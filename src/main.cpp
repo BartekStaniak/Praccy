@@ -109,11 +109,26 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         metronome.process(out);
     });
 
-    // Auto-select and start first available ASIO driver
+    // Auto-select and start available ASIO driver (prefer dedicated hardware USB interfaces)
     auto drivers = praccy::audio::AsioManager::enumerateDrivers();
-    if (!drivers.empty()) {
-        asio.loadDriver(drivers[0], hwnd);
-        asio.start();
+    int activeDriverIdx = -1;
+    for (size_t i = 0; i < drivers.size(); ++i) {
+        if (drivers[i].name.find("USB") != std::string::npos) {
+            if (asio.loadDriver(drivers[i], hwnd)) {
+                activeDriverIdx = static_cast<int>(i);
+                asio.start();
+                break;
+            }
+        }
+    }
+    if (activeDriverIdx == -1) {
+        for (size_t i = 0; i < drivers.size(); ++i) {
+            if (asio.loadDriver(drivers[i], hwnd)) {
+                activeDriverIdx = static_cast<int>(i);
+                asio.start();
+                break;
+            }
+        }
     }
 
     // Connect MIDI bindings callback

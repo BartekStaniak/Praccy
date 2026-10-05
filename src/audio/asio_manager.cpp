@@ -92,7 +92,8 @@ bool AsioManager::loadDriver(const AsioDriverDesc& desc, HWND windowHandle) {
     m_info.numInputChannels = inCh;
     m_info.numOutputChannels = outCh;
 
-    m_driver->getBufferSize(&m_info.minBufferSize, &m_info.maxBufferSize, &m_info.preferredBufferSize, nullptr);
+    int32_t granularity = 0;
+    m_driver->getBufferSize(&m_info.minBufferSize, &m_info.maxBufferSize, &m_info.preferredBufferSize, &granularity);
     m_info.currentBufferSize = m_info.preferredBufferSize;
 
     m_driver->getSampleRate(&m_info.sampleRate);
@@ -206,7 +207,7 @@ ASIOTime* AsioManager::bufferSwitchTimeInfoCallback(ASIOTime* params, int32_t do
     if (s_instance) {
         s_instance->processAudio(doubleBufferIndex);
     }
-    return params;
+    return nullptr;
 }
 
 void AsioManager::sampleRateDidChangeCallback(double sRate) {
@@ -216,7 +217,17 @@ void AsioManager::sampleRateDidChangeCallback(double sRate) {
 }
 
 int32_t AsioManager::asioMessageCallback(int32_t selector, int32_t value, void* message, double* opt) {
-    return 0;
+    switch (selector) {
+        case 1: // kAsioSelectorSupported
+            if (value == 2) return 1; // kAsioEngineVersion
+            return 0;
+        case 2: // kAsioEngineVersion
+            return 2; // Host ASIO version 2.0
+        case 7: // kAsioSupportsTimeInfo
+            return 1;
+        default:
+            return 0;
+    }
 }
 
 void AsioManager::processAudio(int32_t doubleBufferIndex) {

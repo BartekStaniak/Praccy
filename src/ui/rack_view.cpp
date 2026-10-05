@@ -19,6 +19,15 @@ RackView::RackView(audio::GraphEngine& graph,
       m_midi(midi),
       m_scenes(scenes) {
     m_cachedDrivers = audio::AsioManager::enumerateDrivers();
+    if (m_asio.isLoaded()) {
+        const std::string& loadedName = m_asio.driverInfo().name;
+        for (int i = 0; i < static_cast<int>(m_cachedDrivers.size()); ++i) {
+            if (m_cachedDrivers[i].name == loadedName) {
+                m_selectedDriverIdx = i;
+                break;
+            }
+        }
+    }
 }
 
 void RackView::render() {

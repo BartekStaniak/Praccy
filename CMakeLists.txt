@@ -68,7 +68,9 @@ add_executable(test_praccy
     src/state/scene_manager.cpp
 )
 
-target_include_directories(test_praccy PRIVATE src)
-if(NOT MSVC)
-    target_compile_options(test_praccy PRIVATE -O3 -Wall -Wextra -Wno-unused-parameter)
-endif()
+add_executable(test_asio_driver
+    tests/test_asio_driver.cpp
+    src/audio/asio_manager.cpp
+)
+target_include_directories(test_asio_driver PRIVATE src)
+target_link_libraries(test_asio_driver PRIVATE ole32 uuid winmm avrt)
