@@ -198,13 +198,17 @@ void testSceneManager() {
 
     // Recall Scene 0
     scenes.applyScene(0, engine);
-    assert(driveSlot->dryWet() == 1.0f);
-    assert(driveSlot->isBypassed() == false);
+    auto* slot0 = dynamic_cast<audio::PluginSlot*>(engine.getNode(0));
+    assert(slot0 != nullptr);
+    assert(slot0->dryWet() == 1.0f);
+    assert(slot0->isBypassed() == false);
 
     // Recall Scene 1
     scenes.applyScene(1, engine);
-    assert(driveSlot->dryWet() == 0.25f);
-    assert(driveSlot->isBypassed() == true);
+    auto* slot1 = dynamic_cast<audio::PluginSlot*>(engine.getNode(0));
+    assert(slot1 != nullptr);
+    assert(slot1->dryWet() == 0.25f);
+    assert(slot1->isBypassed() == true);
 
     std::cout << "PASSED\n";
 }

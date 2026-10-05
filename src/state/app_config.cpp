@@ -6,7 +6,7 @@
 
 namespace praccy::state {
 
-std::string AppConfig::getConfigFilePath() {
+std::string AppConfig::getConfigDir() {
     const char* localApp = std::getenv("LOCALAPPDATA");
     std::filesystem::path dir;
     if (localApp) {
@@ -17,7 +17,11 @@ std::string AppConfig::getConfigFilePath() {
 
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
-    return (dir / "config.ini").string();
+    return dir.string();
+}
+
+std::string AppConfig::getConfigFilePath() {
+    return (std::filesystem::path(getConfigDir()) / "config.ini").string();
 }
 
 bool AppConfig::load(const std::string& customPath) {

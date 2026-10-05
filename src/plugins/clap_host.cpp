@@ -57,6 +57,7 @@ std::unique_ptr<ClapPluginInstance> ClapPluginInstance::loadFromFile(const std::
     auto instance = std::unique_ptr<ClapPluginInstance>(new ClapPluginInstance());
     instance->m_libraryModule = hLib;
     instance->m_entry = entry;
+    instance->m_path = path;
     instance->m_name = desc->name ? desc->name : "CLAP Plugin";
     instance->m_vendor = desc->vendor ? desc->vendor : "Unknown";
     instance->m_version = desc->version ? desc->version : "1.0.0";
@@ -245,6 +246,18 @@ void ClapPluginInstance::closeGui() {
         m_guiExt->destroy(m_plugin);
         m_guiCreated = false;
         m_guiParentHwnd = nullptr;
+    }
+}
+
+void ClapPluginInstance::getPreferredSize(int& width, int& height) const {
+    if (m_guiExt && m_plugin) {
+        uint32_t w = 850, h = 600;
+        if (m_guiExt->get_size(m_plugin, &w, &h)) {
+            if (w > 100 && h > 100) {
+                width = static_cast<int>(w);
+                height = static_cast<int>(h);
+            }
+        }
     }
 }
 

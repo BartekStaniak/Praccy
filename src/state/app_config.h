@@ -14,6 +14,7 @@ struct AppConfig {
     float metronomeBpm{120.0f};
     std::vector<std::string> customPluginPaths;
 
+    static std::string getConfigDir();
     static std::string getConfigFilePath();
     bool load(const std::string& customPath = "");
     bool save(const std::string& customPath = "") const;

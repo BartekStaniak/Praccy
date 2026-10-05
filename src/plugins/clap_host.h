@@ -22,6 +22,7 @@ public:
     [[nodiscard]] const std::string& name() const noexcept override { return m_name; }
     [[nodiscard]] const std::string& vendor() const noexcept override { return m_vendor; }
     [[nodiscard]] const std::string& version() const noexcept override { return m_version; }
+    [[nodiscard]] const std::string& path() const noexcept override { return m_path; }
 
     [[nodiscard]] size_t numParameters() const noexcept override;
     [[nodiscard]] PluginParameterDesc getParameterDesc(size_t index) const override;
@@ -31,6 +32,7 @@ public:
     [[nodiscard]] bool hasCustomGui() const noexcept override;
     bool openGui(HWND parentHwnd) override;
     void closeGui() override;
+    void getPreferredSize(int& width, int& height) const override;
 
     [[nodiscard]] std::vector<uint8_t> saveState() const override;
     bool loadState(const std::vector<uint8_t>& state) override;
@@ -53,6 +55,7 @@ private:
     const clap_plugin_state* m_stateExt{nullptr};
     const clap_plugin_latency* m_latencyExt{nullptr};
 
+    std::string m_path;
     std::string m_name{"CLAP Plugin"};
     std::string m_vendor{"Unknown"};
     std::string m_version{"1.0.0"};

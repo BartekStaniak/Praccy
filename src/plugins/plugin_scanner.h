@@ -30,6 +30,13 @@ struct PluginDescriptor {
     }
 };
 
+enum class PluginSortMode {
+    NameAscending = 0,
+    NameDescending,
+    VendorAscending,
+    FormatAscending
+};
+
 class PluginScanner {
 public:
     PluginScanner();
@@ -43,13 +50,22 @@ public:
     [[nodiscard]] size_t numPlugins() const noexcept { return m_plugins.size(); }
     [[nodiscard]] bool isScanning() const noexcept { return m_isScanning; }
 
+    [[nodiscard]] std::vector<std::string> getDevelopers() const;
+    [[nodiscard]] std::vector<PluginDescriptor> getFilteredPlugins(
+        const std::string& searchQuery,
+        const std::string& developerFilter,
+        const std::string& formatFilter,
+        PluginSortMode sortMode
+    ) const;
+
 private:
     void addDefaultPaths();
     void scanDirectory(const std::filesystem::path& dirPath);
+    static std::string detectVendor(const std::filesystem::path& path, const std::string& name);
 
     std::vector<std::string> m_searchPaths;
     std::vector<PluginDescriptor> m_plugins;
-    std::mutex m_mutex;
+    mutable std::mutex m_mutex;
     bool m_isScanning{false};
 };
 

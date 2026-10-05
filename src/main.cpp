@@ -112,15 +112,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         graph.setMasterVolumeDb(appConfig.masterVolumeDb);
     }
 
-    // Populate default guitar practice rig
-    auto drive = std::make_unique<praccy::plugins::OverdriveEffect>();
-    auto amp = std::make_unique<praccy::plugins::TubeAmpEffect>();
-    auto delay = std::make_unique<praccy::plugins::StereoDelayEffect>();
-
-    graph.addSerialNode(std::make_unique<praccy::audio::PluginSlot>(std::move(drive)));
-    graph.addSerialNode(std::make_unique<praccy::audio::PluginSlot>(std::move(amp)));
-    graph.addSerialNode(std::make_unique<praccy::audio::PluginSlot>(std::move(delay)));
-
+    // Default state: clean direct signal path from Input to Output
     praccy::tools::InstrumentTuner tuner;
     tuner.prepare(48000.0);
 
@@ -132,9 +124,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     praccy::midi::MidiManager midi;
     praccy::state::SceneManager scenes;
-
-    // Capture initial rig into Scene 1
-    scenes.captureCurrentScene(0, graph);
 
     // Initialize ASIO
     praccy::audio::AsioManager asio;

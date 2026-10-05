@@ -323,6 +323,8 @@ void RackView::renderSceneBar() {
 
         if (ImGui::Button(sc->name.c_str())) {
             m_scenes.applyScene(static_cast<int>(s), m_graph);
+            m_sceneFeedbackMsg = "Loaded " + sc->name;
+            m_sceneFeedbackTimer = 2.5f;
         }
 
         if (isActive) {
@@ -333,6 +335,66 @@ void RackView::renderSceneBar() {
 
     if (ImGui::Button("[Save Scene]")) {
         m_scenes.captureCurrentScene(m_scenes.activeSceneIndex(), m_graph);
+        const auto* cur = m_scenes.getScene(m_scenes.activeSceneIndex());
+        m_sceneFeedbackMsg = "Saved to " + (cur ? cur->name : "Scene");
+        m_sceneFeedbackTimer = 2.5f;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Save current plugin chain into active scene preset");
+    }
+
+    ImGui::SameLine(0, 10);
+    if (ImGui::Button("[Save Preset As...]")) {
+        m_showSavePresetModal = true;
+        m_presetNameBuffer[0] = '\0';
+    }
+
+    auto userPresets = m_scenes.savedPresetNames();
+    if (!userPresets.empty()) {
+        ImGui::SameLine(0, 8);
+        ImGui::SetNextItemWidth(140);
+        if (ImGui::BeginCombo("##UserPresetsCombo", "Load Preset...")) {
+            for (const auto& pName : userPresets) {
+                if (ImGui::Selectable(pName.c_str())) {
+                    m_scenes.loadPresetChain(pName, m_graph);
+                    m_sceneFeedbackMsg = "Loaded preset: " + pName;
+                    m_sceneFeedbackTimer = 2.5f;
+                }
+            }
+            ImGui::EndCombo();
+        }
+    }
+
+    if (m_sceneFeedbackTimer > 0.0f) {
+        m_sceneFeedbackTimer -= ImGui::GetIO().DeltaTime;
+        ImGui::SameLine(0, 16);
+        ImGui::TextColored(ImVec4(0.35f, 0.95f, 0.55f, 1.0f), "✔ %s", m_sceneFeedbackMsg.c_str());
+    }
+
+    // Modal for Save Preset As...
+    if (m_showSavePresetModal) {
+        ImGuiIO& io = ImGui::GetIO();
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(360, 150), ImGuiCond_Appearing);
+        if (ImGui::Begin("Save Preset Chain##Modal", &m_showSavePresetModal, ImGuiWindowFlags_NoCollapse)) {
+            ImGui::Text("Enter preset name:");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputText("##NewPresetNameInput", m_presetNameBuffer, sizeof(m_presetNameBuffer));
+            ImGui::Spacing();
+            if (ImGui::Button("Save", ImVec2(100, 24))) {
+                if (m_presetNameBuffer[0] != '\0') {
+                    m_scenes.savePresetChain(m_presetNameBuffer, m_graph);
+                    m_sceneFeedbackMsg = std::string("Preset '") + m_presetNameBuffer + "' saved!";
+                    m_sceneFeedbackTimer = 2.5f;
+                    m_showSavePresetModal = false;
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(80, 24))) {
+                m_showSavePresetModal = false;
+            }
+            ImGui::End();
+        }
     }
 }
 
@@ -895,123 +957,240 @@ void RackView::renderMeter(const char* label, float level, float width, float he
 }
 
 void RackView::renderPluginBrowserModal() {
-    ImGui::SetNextWindowSize(ImVec2(680, 500), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("Plugin Manager & Scanner", &m_showPluginBrowser)) {
-        ImGui::TextColored(ImVec4(0.98f, 0.60f, 0.20f, 1.0f), "Plugin Search Paths");
-        ImGui::Separator();
-
-        // Search Paths List
-        const auto& paths = m_scanner.searchPaths();
-        ImGui::BeginChild("PathsChild", ImVec2(0, 105), true);
-        for (size_t i = 0; i < paths.size(); ++i) {
-            ImGui::TextDisabled("[%zu]", i + 1);
-            ImGui::SameLine(0, 8);
-            ImGui::Text("%s", paths[i].c_str());
-            ImGui::SameLine(ImGui::GetWindowWidth() - 70);
-            char rmLabel[32];
-            std::snprintf(rmLabel, sizeof(rmLabel), "Remove##%zu", i);
-            if (ImGui::Button(rmLabel)) {
-                m_scanner.removeCustomSearchPath(i);
-                m_scanner.scanAll();
-
-                state::AppConfig cfg;
-                cfg.load();
-                cfg.customPluginPaths = m_scanner.searchPaths();
-                cfg.save();
-            }
-        }
-        ImGui::EndChild();
-
-        // Add Custom Search Path Input
-        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 120);
-        ImGui::InputTextWithHint("##NewPath", "e.g. D:\\AudioPlugins", m_newPathBuffer, sizeof(m_newPathBuffer));
-        ImGui::SameLine(0, 8);
-        if (ImGui::Button("[+ Add Path]")) {
-            if (m_newPathBuffer[0] != '\0') {
-                m_scanner.addCustomSearchPath(m_newPathBuffer);
-                m_scanner.scanAll();
-
-                state::AppConfig cfg;
-                cfg.load();
-                cfg.customPluginPaths = m_scanner.searchPaths();
-                cfg.save();
-
-                m_newPathBuffer[0] = '\0';
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(880, 620), ImGuiCond_Appearing);
+    if (ImGui::Begin("Plugin Manager & Scanner", &m_showPluginBrowser, ImGuiWindowFlags_NoCollapse)) {
+        // TOP FILTER & SEARCH BAR
+        ImGui::TextColored(ImVec4(0.98f, 0.60f, 0.20f, 1.0f), "Filter:");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(260);
+        ImGui::InputTextWithHint("##PluginFilter", "Search plugins by name or vendor...", m_pluginSearchQuery, sizeof(m_pluginSearchQuery));
+        if (m_pluginSearchQuery[0] != '\0') {
+            ImGui::SameLine(0, 4);
+            if (ImGui::Button("X##ClearSearch")) {
+                m_pluginSearchQuery[0] = '\0';
             }
         }
 
-        ImGui::SameLine(0, 8);
-        if (ImGui::Button("Scan / Refresh")) {
+        ImGui::SameLine(0, 16);
+        ImGui::Text("Sort:");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(170);
+        const char* sortOptions[] = { "Name (A -> Z)", "Name (Z -> A)", "Developer (A -> Z)", "Format (VST3/CLAP)" };
+        ImGui::Combo("##SortCombo", &m_pluginSortMode, sortOptions, IM_ARRAYSIZE(sortOptions));
+
+        ImGui::SameLine(0, 16);
+        if (ImGui::Button("Rescan All")) {
             m_scanner.scanAll();
         }
-
-        ImGui::Spacing();
-        if (m_insertTargetBlockIndex >= 0 && m_insertTargetBranchIndex >= 0) {
-            ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.95f, 1.0f), "Inserting into Parallel Block %d, Branch %d",
-                               m_insertTargetBlockIndex + 1, m_insertTargetBranchIndex + 1);
-        } else {
-            ImGui::TextColored(ImVec4(0.98f, 0.60f, 0.20f, 1.0f), "Discovered Plugins (%zu available)", m_scanner.numPlugins());
-        }
         ImGui::Separator();
 
-        // Plugins List
-        ImGui::BeginChild("PluginsListChild", ImVec2(0, 0), true);
-        const auto& plugins = m_scanner.scannedPlugins();
-        for (size_t p = 0; p < plugins.size(); ++p) {
-            const auto& desc = plugins[p];
-            ImGui::PushID(static_cast<int>(p));
+        float leftWidth = 230.0f;
+        float contentHeight = ImGui::GetContentRegionAvail().y - 36.0f;
 
-            ImVec4 badgeCol = (desc.type == plugins::PluginType::VST3) ? ImVec4(0.3f, 0.7f, 1.0f, 1.0f) :
-                              (desc.type == plugins::PluginType::CLAP) ? ImVec4(0.9f, 0.5f, 0.9f, 1.0f) :
-                                                                         ImVec4(0.98f, 0.60f, 0.20f, 1.0f);
-            ImGui::TextColored(badgeCol, "[%s]", desc.typeString().c_str());
-            ImGui::SameLine(0, 8);
-            ImGui::Text("%s", desc.name.c_str());
-            ImGui::SameLine(0, 8);
-            ImGui::TextDisabled("(%s)", desc.vendor.c_str());
+        // LEFT PANE: Folder / Developer Tree View
+        ImGui::BeginChild("CategoryTreeChild", ImVec2(leftWidth, contentHeight), true);
+        {
+            ImGui::TextColored(ImVec4(0.75f, 0.78f, 0.85f, 1.0f), "CATEGORIES");
+            ImGui::Separator();
 
-            ImGui::SameLine(ImGui::GetWindowWidth() - 110);
-            if (ImGui::Button("+ Insert")) {
-                std::unique_ptr<audio::PluginSlot> newSlot;
-
-                if (desc.type == plugins::PluginType::CLAP) {
-                    auto clapInst = plugins::ClapPluginInstance::loadFromFile(desc.path);
-                    if (clapInst) {
-                        newSlot = std::make_unique<audio::PluginSlot>(std::move(clapInst));
-                    }
-                } else if (desc.type == plugins::PluginType::VST3) {
-                    auto vst3Inst = plugins::Vst3PluginInstance::loadFromFile(desc.path);
-                    if (vst3Inst) {
-                        newSlot = std::make_unique<audio::PluginSlot>(std::move(vst3Inst));
-                    }
-                } else if (desc.path == "builtin://drive") {
-                    newSlot = std::make_unique<audio::PluginSlot>(std::make_unique<plugins::OverdriveEffect>());
-                } else if (desc.path == "builtin://amp") {
-                    newSlot = std::make_unique<audio::PluginSlot>(std::make_unique<plugins::TubeAmpEffect>());
-                } else if (desc.path == "builtin://delay") {
-                    newSlot = std::make_unique<audio::PluginSlot>(std::make_unique<plugins::StereoDelayEffect>());
-                }
-
-                if (newSlot) {
-                    if (m_insertTargetBlockIndex >= 0 && m_insertTargetBranchIndex >= 0) {
-                        auto* block = dynamic_cast<audio::ParallelSplitMergeBlock*>(m_graph.getNode(m_insertTargetBlockIndex));
-                        if (block) {
-                            auto* branch = block->getBranch(m_insertTargetBranchIndex);
-                            if (branch) {
-                                newSlot->prepare(m_graph.sampleRate(), m_graph.maxBlockSize());
-                                branch->addSlot(std::move(newSlot));
-                            }
-                        }
-                    } else {
-                        m_graph.addSerialNode(std::move(newSlot));
-                    }
-                }
+            bool isAll = (m_selectedDeveloperFilter == "All" && m_selectedFormatFilter == "All");
+            char allLabel[64];
+            std::snprintf(allLabel, sizeof(allLabel), "All Plugins (%zu)", m_scanner.numPlugins());
+            if (ImGui::Selectable(allLabel, isAll)) {
+                m_selectedDeveloperFilter = "All";
+                m_selectedFormatFilter = "All";
             }
 
-            ImGui::PopID();
-            ImGui::Separator();
+            ImGui::Spacing();
+            if (ImGui::TreeNodeEx("Formats", ImGuiTreeNodeFlags_DefaultOpen)) {
+                bool isVst3 = (m_selectedFormatFilter == "VST3" && m_selectedDeveloperFilter == "All");
+                if (ImGui::Selectable("VST3", isVst3)) {
+                    m_selectedFormatFilter = "VST3";
+                    m_selectedDeveloperFilter = "All";
+                }
+                bool isClap = (m_selectedFormatFilter == "CLAP" && m_selectedDeveloperFilter == "All");
+                if (ImGui::Selectable("CLAP", isClap)) {
+                    m_selectedFormatFilter = "CLAP";
+                    m_selectedDeveloperFilter = "All";
+                }
+                bool isBuiltin = (m_selectedFormatFilter == "Built-In" && m_selectedDeveloperFilter == "All");
+                if (ImGui::Selectable("Built-In", isBuiltin)) {
+                    m_selectedFormatFilter = "Built-In";
+                    m_selectedDeveloperFilter = "All";
+                }
+                ImGui::TreePop();
+            }
+
+            ImGui::Spacing();
+            if (ImGui::TreeNodeEx("Developers", ImGuiTreeNodeFlags_DefaultOpen)) {
+                auto devs = m_scanner.getDevelopers();
+                for (const auto& dev : devs) {
+                    bool isDev = (m_selectedDeveloperFilter == dev);
+                    if (ImGui::Selectable(dev.c_str(), isDev)) {
+                        m_selectedDeveloperFilter = dev;
+                        m_selectedFormatFilter = "All";
+                    }
+                }
+                ImGui::TreePop();
+            }
         }
         ImGui::EndChild();
+
+        ImGui::SameLine();
+
+        // RIGHT PANE: Filtered Plugin Table
+        ImGui::BeginChild("FilteredPluginsChild", ImVec2(0, contentHeight), true);
+        {
+            auto filtered = m_scanner.getFilteredPlugins(
+                m_pluginSearchQuery,
+                m_selectedDeveloperFilter,
+                m_selectedFormatFilter,
+                static_cast<plugins::PluginSortMode>(m_pluginSortMode)
+            );
+
+            if (m_insertTargetBlockIndex >= 0 && m_insertTargetBranchIndex >= 0) {
+                ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.95f, 1.0f),
+                                   "Target: Parallel Block %d, Branch %d  |  %zu plugins matching",
+                                   m_insertTargetBlockIndex + 1, m_insertTargetBranchIndex + 1, filtered.size());
+            } else {
+                ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f),
+                                   "Viewing: %s %s  |  %zu plugins matching",
+                                   (m_selectedDeveloperFilter != "All" ? ("[" + m_selectedDeveloperFilter + "]").c_str() : ""),
+                                   (m_selectedFormatFilter != "All" ? ("[" + m_selectedFormatFilter + "]").c_str() : "All"),
+                                   filtered.size());
+            }
+            ImGui::Separator();
+
+            if (ImGui::BeginTable("PluginsTable", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp)) {
+                ImGui::TableSetupColumn("Format", ImGuiTableColumnFlags_WidthFixed, 75.0f);
+                ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 0.50f);
+                ImGui::TableSetupColumn("Developer", ImGuiTableColumnFlags_WidthStretch, 0.35f);
+                ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+                ImGui::TableHeadersRow();
+
+                for (size_t p = 0; p < filtered.size(); ++p) {
+                    const auto& desc = filtered[p];
+                    ImGui::TableNextRow();
+
+                    ImGui::TableNextColumn();
+                    ImVec4 badgeCol = (desc.type == plugins::PluginType::VST3) ? ImVec4(0.3f, 0.7f, 1.0f, 1.0f) :
+                                      (desc.type == plugins::PluginType::CLAP) ? ImVec4(0.9f, 0.5f, 0.9f, 1.0f) :
+                                                                                 ImVec4(0.98f, 0.60f, 0.20f, 1.0f);
+                    ImGui::TextColored(badgeCol, "%s", desc.typeString().c_str());
+
+                    ImGui::TableNextColumn();
+                    char rowSelectId[128];
+                    std::snprintf(rowSelectId, sizeof(rowSelectId), "%s##row_%zu", desc.name.c_str(), p);
+                    bool doubleClicked = false;
+                    if (ImGui::Selectable(rowSelectId, false, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick)) {
+                        if (ImGui::IsMouseDoubleClicked(0)) {
+                            doubleClicked = true;
+                        }
+                    }
+
+                    ImGui::TableNextColumn();
+                    ImGui::TextDisabled("%s", desc.vendor.c_str());
+
+                    ImGui::TableNextColumn();
+                    char btnLabel[32];
+                    std::snprintf(btnLabel, sizeof(btnLabel), "+ Insert##%zu", p);
+                    bool insertClicked = ImGui::Button(btnLabel);
+
+                    if (insertClicked || doubleClicked) {
+                        std::unique_ptr<audio::PluginSlot> newSlot;
+
+                        if (desc.type == plugins::PluginType::CLAP) {
+                            auto clapInst = plugins::ClapPluginInstance::loadFromFile(desc.path);
+                            if (clapInst) {
+                                newSlot = std::make_unique<audio::PluginSlot>(std::move(clapInst));
+                            }
+                        } else if (desc.type == plugins::PluginType::VST3) {
+                            auto vst3Inst = plugins::Vst3PluginInstance::loadFromFile(desc.path);
+                            if (vst3Inst) {
+                                newSlot = std::make_unique<audio::PluginSlot>(std::move(vst3Inst));
+                            }
+                        } else if (desc.path == "builtin://drive") {
+                            newSlot = std::make_unique<audio::PluginSlot>(std::make_unique<plugins::OverdriveEffect>());
+                        } else if (desc.path == "builtin://amp") {
+                            newSlot = std::make_unique<audio::PluginSlot>(std::make_unique<plugins::TubeAmpEffect>());
+                        } else if (desc.path == "builtin://delay") {
+                            newSlot = std::make_unique<audio::PluginSlot>(std::make_unique<plugins::StereoDelayEffect>());
+                        }
+
+                        if (newSlot) {
+                            if (m_insertTargetBlockIndex >= 0 && m_insertTargetBranchIndex >= 0) {
+                                auto* block = dynamic_cast<audio::ParallelSplitMergeBlock*>(m_graph.getNode(m_insertTargetBlockIndex));
+                                if (block) {
+                                    auto* branch = block->getBranch(m_insertTargetBranchIndex);
+                                    if (branch) {
+                                        newSlot->prepare(m_graph.sampleRate(), m_graph.maxBlockSize());
+                                        branch->addSlot(std::move(newSlot));
+                                    }
+                                }
+                            } else {
+                                newSlot->prepare(m_graph.sampleRate(), m_graph.maxBlockSize());
+                                m_graph.addSerialNode(std::move(newSlot));
+                            }
+                            m_showPluginBrowser = false;
+                        }
+                    }
+                }
+                ImGui::EndTable();
+            }
+        }
+        ImGui::EndChild();
+
+        // BOTTOM BAR: Manage Search Paths toggle & Close button
+        if (ImGui::Button("Search Paths...")) {
+            ImGui::OpenPopup("ManageSearchPathsPopup");
+        }
+        ImGui::SameLine(0, 8);
+        ImGui::TextDisabled("(%zu search locations registered)", m_scanner.searchPaths().size());
+
+        ImGui::SameLine(ImGui::GetWindowWidth() - 90);
+        if (ImGui::Button("Close", ImVec2(75, 24))) {
+            m_showPluginBrowser = false;
+        }
+
+        if (ImGui::BeginPopup("ManageSearchPathsPopup")) {
+            ImGui::TextColored(ImVec4(0.98f, 0.60f, 0.20f, 1.0f), "Plugin Search Paths");
+            ImGui::Separator();
+            const auto& paths = m_scanner.searchPaths();
+            for (size_t i = 0; i < paths.size(); ++i) {
+                ImGui::TextDisabled("[%zu]", i + 1);
+                ImGui::SameLine(0, 8);
+                ImGui::Text("%s", paths[i].c_str());
+                ImGui::SameLine(0, 16);
+                char rmLabel[32];
+                std::snprintf(rmLabel, sizeof(rmLabel), "Remove##%zu", i);
+                if (ImGui::Button(rmLabel)) {
+                    m_scanner.removeCustomSearchPath(i);
+                    m_scanner.scanAll();
+                    state::AppConfig cfg;
+                    cfg.load();
+                    cfg.customPluginPaths = m_scanner.searchPaths();
+                    cfg.save();
+                }
+            }
+            ImGui::Spacing();
+            ImGui::SetNextItemWidth(320);
+            ImGui::InputTextWithHint("##NewPath", "e.g. D:\\AudioPlugins", m_newPathBuffer, sizeof(m_newPathBuffer));
+            ImGui::SameLine(0, 8);
+            if (ImGui::Button("+ Add Path")) {
+                if (m_newPathBuffer[0] != '\0') {
+                    m_scanner.addCustomSearchPath(m_newPathBuffer);
+                    m_scanner.scanAll();
+                    state::AppConfig cfg;
+                    cfg.load();
+                    cfg.customPluginPaths = m_scanner.searchPaths();
+                    cfg.save();
+                    m_newPathBuffer[0] = '\0';
+                }
+            }
+            ImGui::EndPopup();
+        }
     }
     ImGui::End();
 }

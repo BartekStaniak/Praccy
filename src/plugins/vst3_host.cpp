@@ -1,13 +1,22 @@
 #include "vst3_host.h"
 #include <filesystem>
 #include <iostream>
+#include <algorithm>
+#include <vector>
+
+#include <pluginterfaces/base/ibstream.h>
+#include <pluginterfaces/vst/ivstmessage.h>
 
 namespace Steinberg {
 DEF_CLASS_IID (IPlugView)
+DEF_CLASS_IID (IPlugFrame)
 namespace Vst {
 DEF_CLASS_IID (IComponent)
 DEF_CLASS_IID (IAudioProcessor)
 DEF_CLASS_IID (IEditController)
+DEF_CLASS_IID (IComponentHandler)
+DEF_CLASS_IID (IConnectionPoint)
+DEF_CLASS_IID (IMessage)
 }
 }
 
@@ -16,6 +25,125 @@ namespace praccy::plugins {
 using InitDllProc = bool (PLUGIN_API *)();
 using ExitDllProc = bool (PLUGIN_API *)();
 using GetFactoryProc = Steinberg::IPluginFactory* (PLUGIN_API *)();
+
+class PraccyMemoryStream : public Steinberg::IBStream {
+public:
+    std::vector<char> buffer;
+    Steinberg::int64 pos{0};
+
+    PraccyMemoryStream() = default;
+    explicit PraccyMemoryStream(const std::vector<uint8_t>& data) {
+        buffer.assign(data.begin(), data.end());
+    }
+
+    Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID _iid, void** obj) override {
+        if (memcmp(_iid, Steinberg::IBStream::iid, sizeof(Steinberg::TUID)) == 0 ||
+            memcmp(_iid, Steinberg::FUnknown::iid, sizeof(Steinberg::TUID)) == 0) {
+            *obj = this;
+            return Steinberg::kResultOk;
+        }
+        *obj = nullptr;
+        return Steinberg::kNoInterface;
+    }
+    Steinberg::uint32 PLUGIN_API addRef() override { return 1; }
+    Steinberg::uint32 PLUGIN_API release() override { return 1; }
+
+    Steinberg::tresult PLUGIN_API read(void* dest, Steinberg::int32 numBytes, Steinberg::int32* numBytesRead) override {
+        if (!dest || numBytes < 0) return Steinberg::kInvalidArgument;
+        Steinberg::int32 available = static_cast<Steinberg::int32>(buffer.size() - pos);
+        Steinberg::int32 toRead = (std::min)(numBytes, available);
+        if (toRead > 0) {
+            memcpy(dest, buffer.data() + pos, toRead);
+            pos += toRead;
+        }
+        if (numBytesRead) *numBytesRead = toRead;
+        return Steinberg::kResultOk;
+    }
+
+    Steinberg::tresult PLUGIN_API write(void* src, Steinberg::int32 numBytes, Steinberg::int32* numBytesWritten) override {
+        if (!src || numBytes < 0) return Steinberg::kInvalidArgument;
+        if (pos + numBytes > static_cast<Steinberg::int64>(buffer.size())) {
+            buffer.resize(pos + numBytes);
+        }
+        memcpy(buffer.data() + pos, src, numBytes);
+        pos += numBytes;
+        if (numBytesWritten) *numBytesWritten = numBytes;
+        return Steinberg::kResultOk;
+    }
+
+    Steinberg::tresult PLUGIN_API seek(Steinberg::int64 offset, Steinberg::int32 mode, Steinberg::int64* result) override {
+        if (mode == kIBSeekSet) pos = offset;
+        else if (mode == kIBSeekCur) pos += offset;
+        else if (mode == kIBSeekEnd) pos = buffer.size() + offset;
+        if (pos < 0) pos = 0;
+        if (result) *result = pos;
+        return Steinberg::kResultOk;
+    }
+
+    Steinberg::tresult PLUGIN_API tell(Steinberg::int64* result) override {
+        if (result) *result = pos;
+        return Steinberg::kResultOk;
+    }
+};
+
+class PraccyComponentHandler : public Steinberg::Vst::IComponentHandler {
+public:
+    Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID _iid, void** obj) override {
+        if (memcmp(_iid, Steinberg::Vst::IComponentHandler::iid, sizeof(Steinberg::TUID)) == 0 ||
+            memcmp(_iid, Steinberg::FUnknown::iid, sizeof(Steinberg::TUID)) == 0) {
+            *obj = this;
+            return Steinberg::kResultOk;
+        }
+        *obj = nullptr;
+        return Steinberg::kNoInterface;
+    }
+    Steinberg::uint32 PLUGIN_API addRef() override { return 1; }
+    Steinberg::uint32 PLUGIN_API release() override { return 1; }
+
+    Steinberg::tresult PLUGIN_API beginEdit(Steinberg::Vst::ParamID) override { return Steinberg::kResultOk; }
+    Steinberg::tresult PLUGIN_API performEdit(Steinberg::Vst::ParamID, Steinberg::Vst::ParamValue) override { return Steinberg::kResultOk; }
+    Steinberg::tresult PLUGIN_API endEdit(Steinberg::Vst::ParamID) override { return Steinberg::kResultOk; }
+    Steinberg::tresult PLUGIN_API restartComponent(Steinberg::int32) override { return Steinberg::kResultOk; }
+};
+
+class PraccyPlugFrame : public Steinberg::IPlugFrame {
+public:
+    HWND parentHwnd{nullptr};
+
+    Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID _iid, void** obj) override {
+        if (memcmp(_iid, Steinberg::IPlugFrame::iid, sizeof(Steinberg::TUID)) == 0 ||
+            memcmp(_iid, Steinberg::FUnknown::iid, sizeof(Steinberg::TUID)) == 0) {
+            *obj = this;
+            return Steinberg::kResultOk;
+        }
+        *obj = nullptr;
+        return Steinberg::kNoInterface;
+    }
+    Steinberg::uint32 PLUGIN_API addRef() override { return 1; }
+    Steinberg::uint32 PLUGIN_API release() override { return 1; }
+
+    Steinberg::tresult PLUGIN_API resizeView(Steinberg::IPlugView* view, Steinberg::ViewRect* newSize) override {
+        if (!view || !newSize) return Steinberg::kInvalidArgument;
+        if (parentHwnd && IsWindow(parentHwnd)) {
+            int newW = newSize->right - newSize->left;
+            int newH = newSize->bottom - newSize->top;
+            RECT wr = {0, 0, newW, newH};
+            AdjustWindowRectEx(&wr, GetWindowLongW(parentHwnd, GWL_STYLE), FALSE, GetWindowLongW(parentHwnd, GWL_EXSTYLE));
+            int totalW = wr.right - wr.left;
+            int totalH = wr.bottom - wr.top;
+            SetWindowPos(parentHwnd, nullptr, 0, 0, totalW, totalH, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            view->onSize(newSize);
+        }
+        return Steinberg::kResultOk;
+    }
+};
+
+struct Vst3PluginInstance::Impl {
+    PraccyComponentHandler componentHandler;
+    PraccyPlugFrame plugFrame;
+};
+
+Vst3PluginInstance::Vst3PluginInstance() : m_impl(std::make_unique<Impl>()) {}
 
 std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::string& path) {
     std::filesystem::path p(path);
@@ -27,7 +155,6 @@ std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::
         if (std::filesystem::exists(candidate)) {
             dllPath = candidate;
         } else {
-            // Check for any .vst3 or .dll inside Contents/x86_64-win
             auto archDir = p / "Contents" / "x86_64-win";
             if (std::filesystem::exists(archDir)) {
                 for (const auto& entry : std::filesystem::directory_iterator(archDir)) {
@@ -88,8 +215,17 @@ std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::
     auto instance = std::unique_ptr<Vst3PluginInstance>(new Vst3PluginInstance());
     instance->m_module = hLib;
     instance->m_factory = factory;
+    instance->m_path = path;
     instance->m_name = classInfo.name;
     instance->m_vendor = "VST3 Plugin";
+
+    // Query Vendor from factory info if available
+    Steinberg::PFactoryInfo factoryInfo{};
+    if (factory->getFactoryInfo(&factoryInfo) == Steinberg::kResultOk) {
+        if (factoryInfo.vendor[0] != '\0') {
+            instance->m_vendor = factoryInfo.vendor;
+        }
+    }
 
     // Create Component Instance
     if (factory->createInstance(classInfo.cid, Steinberg::Vst::IComponent::iid, reinterpret_cast<void**>(&instance->m_component)) != Steinberg::kResultOk || !instance->m_component) {
@@ -110,15 +246,46 @@ std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::
 
     // Create / Query Edit Controller
     Steinberg::TUID controllerCid{};
-    if (instance->m_component->getControllerClassId(controllerCid) == Steinberg::kResultOk && controllerCid[0] != 0) {
+    if (instance->m_component->getControllerClassId(controllerCid) == Steinberg::kResultOk) {
         factory->createInstance(controllerCid, Steinberg::Vst::IEditController::iid, reinterpret_cast<void**>(&instance->m_controller));
     }
     if (!instance->m_controller) {
         instance->m_component->queryInterface(Steinberg::Vst::IEditController::iid, reinterpret_cast<void**>(&instance->m_controller));
     }
+    if (!instance->m_controller) {
+        for (int32_t i = 0; i < classCount; ++i) {
+            Steinberg::PClassInfo cInfo{};
+            if (factory->getClassInfo(i, &cInfo) == Steinberg::kResultOk) {
+                if (std::strcmp(cInfo.category, kVstComponentControllerClass) == 0) {
+                    factory->createInstance(cInfo.cid, Steinberg::Vst::IEditController::iid, reinterpret_cast<void**>(&instance->m_controller));
+                    if (instance->m_controller) break;
+                }
+            }
+        }
+    }
 
     if (instance->m_controller) {
         instance->m_controller->initialize(nullptr);
+        instance->m_controller->setComponentHandler(&instance->m_impl->componentHandler);
+
+        // Connect IConnectionPoint between component and controller
+        Steinberg::Vst::IConnectionPoint* cpComp = nullptr;
+        Steinberg::Vst::IConnectionPoint* cpCtrl = nullptr;
+        instance->m_component->queryInterface(Steinberg::Vst::IConnectionPoint::iid, reinterpret_cast<void**>(&cpComp));
+        instance->m_controller->queryInterface(Steinberg::Vst::IConnectionPoint::iid, reinterpret_cast<void**>(&cpCtrl));
+        if (cpComp && cpCtrl) {
+            cpComp->connect(cpCtrl);
+            cpCtrl->connect(cpComp);
+        }
+        if (cpComp) cpComp->release();
+        if (cpCtrl) cpCtrl->release();
+
+        // Sync initial state from component to controller
+        PraccyMemoryStream stateStream;
+        if (instance->m_component->getState(&stateStream) == Steinberg::kResultOk) {
+            stateStream.seek(0, Steinberg::IBStream::kIBSeekSet, nullptr);
+            instance->m_controller->setComponentState(&stateStream);
+        }
     }
 
     return instance;
@@ -268,25 +435,74 @@ bool Vst3PluginInstance::openGui(HWND parentHwnd) {
         return false;
     }
 
+    m_impl->plugFrame.parentHwnd = parentHwnd;
+    m_plugView->setFrame(&m_impl->plugFrame);
+
+    if (m_plugView->attached(reinterpret_cast<void*>(parentHwnd), Steinberg::kPlatformTypeHWND) != Steinberg::kResultOk) {
+        m_plugView->setFrame(nullptr);
+        return false;
+    }
+
     m_guiParentHwnd = parentHwnd;
-    return (m_plugView->attached(reinterpret_cast<void*>(parentHwnd), Steinberg::kPlatformTypeHWND) == Steinberg::kResultOk);
+    return true;
+}
+
+void Vst3PluginInstance::getPreferredSize(int& width, int& height) const {
+    if (m_controller) {
+        Steinberg::IPlugView* view = m_plugView;
+        bool createdTemp = false;
+        if (!view) {
+            view = m_controller->createView(Steinberg::Vst::ViewType::kEditor);
+            createdTemp = true;
+        }
+        if (view) {
+            Steinberg::ViewRect rect{};
+            if (view->getSize(&rect) == Steinberg::kResultOk) {
+                int w = rect.right - rect.left;
+                int h = rect.bottom - rect.top;
+                if (w > 100 && h > 100) {
+                    width = w;
+                    height = h;
+                }
+            }
+            if (createdTemp) {
+                view->release();
+            }
+        }
+    }
 }
 
 void Vst3PluginInstance::closeGui() {
     if (m_plugView) {
+        m_plugView->setFrame(nullptr);
         m_plugView->removed();
         m_plugView->release();
         m_plugView = nullptr;
         m_guiParentHwnd = nullptr;
+        m_impl->plugFrame.parentHwnd = nullptr;
     }
 }
 
 std::vector<uint8_t> Vst3PluginInstance::saveState() const {
+    if (!m_component) return {};
+    PraccyMemoryStream stream;
+    if (m_component->getState(&stream) == Steinberg::kResultOk) {
+        return std::vector<uint8_t>(stream.buffer.begin(), stream.buffer.end());
+    }
     return {};
 }
 
 bool Vst3PluginInstance::loadState(const std::vector<uint8_t>& state) {
-    return true;
+    if (!m_component || state.empty()) return false;
+    PraccyMemoryStream stream(state);
+    if (m_component->setState(&stream) == Steinberg::kResultOk) {
+        if (m_controller) {
+            stream.seek(0, Steinberg::IBStream::kIBSeekSet, nullptr);
+            m_controller->setComponentState(&stream);
+        }
+        return true;
+    }
+    return false;
 }
 
 } // namespace praccy::plugins

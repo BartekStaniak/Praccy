@@ -37,11 +37,19 @@ PluginWindowManager::~PluginWindowManager() {
 bool PluginWindowManager::openPluginWindow(IPluginInstance* plugin) {
     if (!plugin) return false;
 
-    // If window already open, bring to front
+    // Determine initial preferred size from plugin
+    int prefW = 850;
+    int prefH = 600;
+    plugin->getPreferredSize(prefW, prefH);
+
+    // If window already open, bring to front, ensure topmost, restore
     auto it = m_openWindows.find(plugin);
     if (it != m_openWindows.end() && IsWindow(it->second)) {
-        ShowWindow(it->second, SW_RESTORE);
-        SetForegroundWindow(it->second);
+        HWND existingHwnd = it->second;
+        ShowWindow(existingHwnd, SW_RESTORE);
+        SetWindowPos(existingHwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+        BringWindowToTop(existingHwnd);
+        SetForegroundWindow(existingHwnd);
         return true;
     }
 
@@ -51,13 +59,27 @@ bool PluginWindowManager::openPluginWindow(IPluginInstance* plugin) {
     }
     wTitle += L" - Praccy";
 
+    // Calculate window size including borders for desired client area
+    DWORD style = WS_OVERLAPPEDWINDOW;
+    DWORD exStyle = WS_EX_APPWINDOW | WS_EX_TOPMOST;
+    RECT wr = {0, 0, prefW, prefH};
+    AdjustWindowRectEx(&wr, style, FALSE, exStyle);
+    int winW = wr.right - wr.left;
+    int winH = wr.bottom - wr.top;
+
+    // Always center the window on screen
+    int screenW = GetSystemMetrics(SM_CXSCREEN);
+    int screenH = GetSystemMetrics(SM_CYSCREEN);
+    int posX = std::max(0, (screenW - winW) / 2);
+    int posY = std::max(0, (screenH - winH) / 2);
+
     HWND hwnd = CreateWindowExW(
-        WS_EX_APPWINDOW,
+        exStyle,
         reinterpret_cast<LPCWSTR>(m_windowClassAtom),
         wTitle.c_str(),
-        WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT,
-        850, 600,
+        style,
+        posX, posY,
+        winW, winH,
         nullptr, nullptr,
         GetModuleHandle(nullptr),
         this
@@ -76,11 +98,27 @@ bool PluginWindowManager::openPluginWindow(IPluginInstance* plugin) {
         return false;
     }
 
+    // Check if plugin size changed after attaching GUI
+    int actualW = prefW;
+    int actualH = prefH;
+    plugin->getPreferredSize(actualW, actualH);
+    if (actualW != prefW || actualH != prefH) {
+        RECT actualWr = {0, 0, actualW, actualH};
+        AdjustWindowRectEx(&actualWr, style, FALSE, exStyle);
+        winW = actualWr.right - actualWr.left;
+        winH = actualWr.bottom - actualWr.top;
+        posX = std::max(0, (screenW - winW) / 2);
+        posY = std::max(0, (screenH - winH) / 2);
+    }
+
     m_openWindows[plugin] = hwnd;
     m_windowToPlugin[hwnd] = plugin;
 
+    // Position centered and on top
+    SetWindowPos(hwnd, HWND_TOPMOST, posX, posY, winW, winH, SWP_SHOWWINDOW);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
+    BringWindowToTop(hwnd);
     SetForegroundWindow(hwnd);
     return true;
 }

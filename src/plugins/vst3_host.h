@@ -29,6 +29,7 @@ public:
     [[nodiscard]] const std::string& name() const noexcept override { return m_name; }
     [[nodiscard]] const std::string& vendor() const noexcept override { return m_vendor; }
     [[nodiscard]] const std::string& version() const noexcept override { return m_version; }
+    [[nodiscard]] const std::string& path() const noexcept override { return m_path; }
 
     [[nodiscard]] size_t numParameters() const noexcept override;
     [[nodiscard]] PluginParameterDesc getParameterDesc(size_t index) const override;
@@ -38,6 +39,7 @@ public:
     [[nodiscard]] bool hasCustomGui() const noexcept override;
     bool openGui(HWND parentHwnd) override;
     void closeGui() override;
+    void getPreferredSize(int& width, int& height) const override;
 
     [[nodiscard]] std::vector<uint8_t> saveState() const override;
     bool loadState(const std::vector<uint8_t>& state) override;
@@ -45,7 +47,7 @@ public:
     [[nodiscard]] Steinberg::IPlugView* plugView() const noexcept { return m_plugView; }
 
 private:
-    Vst3PluginInstance() = default;
+    Vst3PluginInstance();
 
     HMODULE m_module{nullptr};
     Steinberg::IPluginFactory* m_factory{nullptr};
@@ -54,6 +56,7 @@ private:
     Steinberg::Vst::IEditController* m_controller{nullptr};
     Steinberg::IPlugView* m_plugView{nullptr};
 
+    std::string m_path;
     std::string m_name{"VST3 Plugin"};
     std::string m_vendor{"Steinberg VST3"};
     std::string m_version{"1.0.0"};
@@ -61,6 +64,9 @@ private:
     HWND m_guiParentHwnd{nullptr};
     double m_sampleRate{48000.0};
     uint32_t m_maxBlockSize{256};
+
+    struct Impl;
+    std::unique_ptr<Impl> m_impl;
 };
 
 } // namespace praccy::plugins

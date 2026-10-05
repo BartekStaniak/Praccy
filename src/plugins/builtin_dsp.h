@@ -33,6 +33,11 @@ public:
     bool openGui(HWND) override { return false; }
     void closeGui() override {}
 
+    [[nodiscard]] const std::string& path() const noexcept override {
+        static const std::string s_path = "builtin://drive";
+        return s_path;
+    }
+
     [[nodiscard]] std::vector<uint8_t> saveState() const override { return {}; }
     bool loadState(const std::vector<uint8_t>&) override { return true; }
 
@@ -72,6 +77,11 @@ public:
     [[nodiscard]] bool hasCustomGui() const noexcept override { return false; }
     bool openGui(HWND) override { return false; }
     void closeGui() override {}
+
+    [[nodiscard]] const std::string& path() const noexcept override {
+        static const std::string s_path = "builtin://amp";
+        return s_path;
+    }
 
     [[nodiscard]] std::vector<uint8_t> saveState() const override { return {}; }
     bool loadState(const std::vector<uint8_t>&) override { return true; }
@@ -114,6 +124,11 @@ public:
     [[nodiscard]] bool hasCustomGui() const noexcept override { return false; }
     bool openGui(HWND) override { return false; }
     void closeGui() override {}
+
+    [[nodiscard]] const std::string& path() const noexcept override {
+        static const std::string s_path = "builtin://delay";
+        return s_path;
+    }
 
     [[nodiscard]] std::vector<uint8_t> saveState() const override { return {}; }
     bool loadState(const std::vector<uint8_t>&) override { return true; }

@@ -31,6 +31,15 @@ public:
     [[nodiscard]] virtual bool hasCustomGui() const noexcept = 0;
     virtual bool openGui(HWND parentHwnd) = 0;
     virtual void closeGui() = 0;
+    virtual void getPreferredSize(int& width, int& height) const {
+        width = 850;
+        height = 600;
+    }
+
+    [[nodiscard]] virtual const std::string& path() const noexcept {
+        static const std::string s_empty;
+        return s_empty;
+    }
 
     [[nodiscard]] virtual std::vector<uint8_t> saveState() const = 0;
     virtual bool loadState(const std::vector<uint8_t>& state) = 0;

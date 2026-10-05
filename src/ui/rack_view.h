@@ -54,6 +54,16 @@ private:
     bool m_showPluginBrowser{false};
     char m_newPathBuffer[260]{0};
 
+    char m_pluginSearchQuery[128]{0};
+    std::string m_selectedDeveloperFilter{"All"};
+    std::string m_selectedFormatFilter{"All"};
+    int m_pluginSortMode{0}; // 0: Name A-Z, 1: Name Z-A, 2: Dev A-Z, 3: Format A-Z
+
+    bool m_showSavePresetModal{false};
+    char m_presetNameBuffer[64]{0};
+    std::string m_sceneFeedbackMsg;
+    float m_sceneFeedbackTimer{0.0f};
+
     int m_insertTargetBlockIndex{-1};
     int m_insertTargetBranchIndex{-1};
     audio::PluginSlot* m_dspTweakSlot{nullptr};

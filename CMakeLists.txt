@@ -82,12 +82,22 @@ add_executable(test_praccy
     tests/test_praccy.cpp
     src/audio/graph_engine.cpp
     src/plugins/builtin_dsp.cpp
+    src/plugins/vst3_host.cpp
+    src/plugins/clap_host.cpp
+    src/plugins/plugin_window.cpp
     src/tools/tuner.cpp
     src/tools/metronome.cpp
     src/state/scene_manager.cpp
     src/state/app_config.cpp
+    third_party/vst3_pluginterfaces/base/funknown.cpp
+    third_party/vst3_pluginterfaces/base/coreiids.cpp
 )
-target_include_directories(test_praccy PRIVATE src)
+target_include_directories(test_praccy PRIVATE
+    src
+    third_party
+    third_party/clap/include
+)
+target_link_libraries(test_praccy PRIVATE ole32 uuid user32 gdi32)
 
 
 add_executable(test_asio_driver
