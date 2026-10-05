@@ -239,21 +239,39 @@ void RackView::renderHeaderBar() {
 
         auto updateInfo = UpdateChecker::instance().getInfo();
         bool hasUpdate = (updateInfo.status == UpdateStatus::UpdateAvailable);
+        bool isReady = (updateInfo.status == UpdateStatus::ReadyToInstall);
+        bool isDownloading = (updateInfo.status == UpdateStatus::Downloading);
 
-        if (hasUpdate) {
+        if (isReady) {
+            ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(35, 120, 60, 255));
+            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(230, 255, 230, 255));
+        } else if (isDownloading) {
+            ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(30, 65, 110, 255));
+            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(190, 230, 255, 255));
+        } else if (hasUpdate) {
             ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(35, 75, 130, 255));
             ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 230, 100, 255));
         }
 
-        const char* btnLabel = hasUpdate ? "Update Available! *" : "Check for Updates";
-        if (ImGui::Button(btnLabel, ImVec2(updateBtnW, 0))) {
-            m_showUpdateModal = true;
-            state::AppConfig cfg;
-            cfg.load();
-            UpdateChecker::instance().checkForUpdates(cfg.checkBetaUpdates);
+        const char* btnLabel = "Check for Updates";
+        if (isReady) {
+            btnLabel = "Restart to Update! *";
+        } else if (isDownloading) {
+            btnLabel = "Downloading... *";
+        } else if (hasUpdate) {
+            btnLabel = "Update Available! *";
         }
 
-        if (hasUpdate) {
+        if (ImGui::Button(btnLabel, ImVec2(updateBtnW, 0))) {
+            m_showUpdateModal = true;
+            if (!isDownloading && !isReady) {
+                state::AppConfig cfg;
+                cfg.load();
+                UpdateChecker::instance().checkForUpdates(cfg.checkBetaUpdates);
+            }
+        }
+
+        if (hasUpdate || isReady || isDownloading) {
             ImGui::PopStyleColor(2);
         }
 
@@ -518,14 +536,32 @@ void RackView::renderSceneBar() {
 
     if (m_sceneFeedbackTimer > 0.0f) {
         m_sceneFeedbackTimer -= ImGui::GetIO().DeltaTime;
-        ImGui::SameLine(0, 16);
-        ImVec2 p = ImGui::GetCursorScreenPos();
-        float h = ImGui::GetTextLineHeight();
+        ImGui::SameLine(0, 12);
+
+        const ImVec2 textSize = ImGui::CalcTextSize(m_sceneFeedbackMsg.c_str());
+        const float pillW = textSize.x + 28.0f;
+        const float pillH = 22.0f;
+        const float frameH = ImGui::GetFrameHeight();
+        const float offsetY = std::max(0.0f, (frameH - pillH) * 0.5f);
+
+        const ImVec2 screenPos = ImGui::GetCursorScreenPos();
+        const ImVec2 pos(screenPos.x, screenPos.y + offsetY);
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        dl->AddCircleFilled(ImVec2(p.x + 5.0f, p.y + h * 0.5f), 4.0f, IM_COL32(50, 220, 100, 255));
-        dl->AddCircle(ImVec2(p.x + 5.0f, p.y + h * 0.5f), 6.5f, IM_COL32(50, 220, 100, 90));
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 14.0f);
-        ImGui::TextColored(ImVec4(0.35f, 0.95f, 0.55f, 1.0f), "%s", m_sceneFeedbackMsg.c_str());
+
+        // Background capsule pill
+        dl->AddRectFilled(pos, ImVec2(pos.x + pillW, pos.y + pillH), IM_COL32(20, 36, 26, 240), 11.0f);
+        dl->AddRect(pos, ImVec2(pos.x + pillW, pos.y + pillH), IM_COL32(45, 120, 60, 255), 11.0f);
+
+        // Centered glowing LED dot
+        ImVec2 dotCenter(pos.x + 10.0f, pos.y + (pillH * 0.5f));
+        dl->AddCircleFilled(dotCenter, 5.0f, IM_COL32(40, 240, 80, 70));
+        dl->AddCircleFilled(dotCenter, 3.0f, IM_COL32(50, 255, 90, 255));
+
+        // Centered text
+        ImVec2 textPos(pos.x + 19.0f, pos.y + ((pillH - textSize.y) * 0.5f));
+        dl->AddText(textPos, IM_COL32(180, 245, 200, 255), m_sceneFeedbackMsg.c_str());
+
+        ImGui::Dummy(ImVec2(pillW, frameH));
     }
 
     // Modal for Save Preset As...
@@ -1693,7 +1729,7 @@ void RackView::renderUpdateModal() {
     if (!m_showUpdateModal) return;
 
     ImGui::OpenPopup("Praccy Updates##Modal");
-    ImGui::SetNextWindowSize(ImVec2(500, 370), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(520, 390), ImGuiCond_Appearing);
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
 
     if (ImGui::BeginPopupModal("Praccy Updates##Modal", &m_showUpdateModal, ImGuiWindowFlags_NoResize)) {
@@ -1725,7 +1761,8 @@ void RackView::renderUpdateModal() {
 
         if (info.status == UpdateStatus::Checking) {
             ImGui::TextColored(ImVec4(0.40f, 0.75f, 1.0f, 1.0f), "Checking GitHub repository for %s updates...", includeBeta ? "beta" : "stable");
-            ImGui::ProgressBar(-1.0f * static_cast<float>(ImGui::GetTime()), ImVec2(-1, 6));
+            ImGui::Spacing();
+            ImGui::ProgressBar(-1.0f * static_cast<float>(ImGui::GetTime()), ImVec2(-1, 8));
         } else if (info.status == UpdateStatus::UpToDate) {
             ImGui::TextColored(ImVec4(0.25f, 0.90f, 0.45f, 1.0f), "[v] You are up to date!");
             ImGui::TextDisabled("Channel: %s", includeBeta ? "Beta (dev branch)" : "Stable (Releases)");
@@ -1741,20 +1778,84 @@ void RackView::renderUpdateModal() {
             }
 
             ImGui::Spacing();
-            if (ImGui::Button("Open in GitHub ->", ImVec2(160, 28))) {
+            if (!info.assetUrl.empty()) {
+                ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(35, 120, 60, 255));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(45, 150, 75, 255));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(25, 95, 45, 255));
+                if (ImGui::Button("Download & Apply Update", ImVec2(210, 30))) {
+                    UpdateChecker::instance().startDownload();
+                }
+                ImGui::PopStyleColor(3);
+                ImGui::SameLine(0, 10);
+            }
+            if (ImGui::Button("Open in GitHub ->", ImVec2(150, 30))) {
                 ShellExecuteA(nullptr, "open", info.downloadUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             }
+            if (info.assetUrl.empty()) {
+                ImGui::Spacing();
+                ImGui::TextDisabled("Note: Direct binary asset not found for this commit; click 'Open in GitHub' to view.");
+            }
+        } else if (info.status == UpdateStatus::Downloading) {
+            ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "Downloading update package...");
+            if (!info.assetName.empty()) {
+                ImGui::TextDisabled("File: %s", info.assetName.c_str());
+            }
+
+            char progBuf[64];
+            if (info.totalBytes > 0) {
+                float dlMB = static_cast<float>(info.downloadedBytes) / (1024.0f * 1024.0f);
+                float totMB = static_cast<float>(info.totalBytes) / (1024.0f * 1024.0f);
+                std::snprintf(progBuf, sizeof(progBuf), "%.1f / %.1f MB (%.0f%%)", dlMB, totMB, info.downloadProgress * 100.0f);
+            } else if (info.downloadedBytes > 0) {
+                float dlMB = static_cast<float>(info.downloadedBytes) / (1024.0f * 1024.0f);
+                std::snprintf(progBuf, sizeof(progBuf), "%.1f MB downloaded", dlMB);
+            } else {
+                std::snprintf(progBuf, sizeof(progBuf), "Connecting...");
+            }
+
+            ImGui::Spacing();
+            ImGui::ProgressBar(info.downloadProgress, ImVec2(-1, 22), progBuf);
+            ImGui::Spacing();
+
+            if (info.downloadProgress >= 1.0f) {
+                ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.35f, 1.0f), "Extracting and verifying package files...");
+            } else {
+                ImGui::TextDisabled("Please wait while Praccy streams the update package...");
+            }
+        } else if (info.status == UpdateStatus::ReadyToInstall) {
+            ImGui::TextColored(ImVec4(0.25f, 0.95f, 0.55f, 1.0f), "[v] Update downloaded and ready to apply!");
+            ImGui::TextWrapped("Praccy will now close, copy the updated files into place, and restart automatically.");
+            ImGui::Spacing();
+
+            ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(35, 130, 65, 255));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(45, 165, 80, 255));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(25, 105, 50, 255));
+            if (ImGui::Button("Restart & Apply Update Now", ImVec2(230, 32))) {
+                UpdateChecker::instance().applyUpdateAndRestart();
+            }
+            ImGui::PopStyleColor(3);
         } else if (info.status == UpdateStatus::Error) {
-            ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "Update check failed");
+            ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "[!] Update check / download failed");
             ImGui::TextWrapped("%s", info.errorMessage.c_str());
+            if (!info.downloadUrl.empty()) {
+                ImGui::Spacing();
+                if (ImGui::Button("Open GitHub in Browser ->", ImVec2(200, 28))) {
+                    ShellExecuteA(nullptr, "open", info.downloadUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                }
+            }
         }
 
-        ImGui::SetCursorPosY(320);
+        float bottomY = std::max(ImGui::GetCursorPosY() + 12.0f, 335.0f);
+        ImGui::SetCursorPosY(bottomY);
         ImGui::Separator();
-        if (ImGui::Button("Check Again", ImVec2(110, 26))) {
-            UpdateChecker::instance().checkForUpdates(includeBeta);
+
+        bool isDownloading = (info.status == UpdateStatus::Downloading);
+        if (!isDownloading) {
+            if (ImGui::Button("Check Again", ImVec2(110, 26))) {
+                UpdateChecker::instance().checkForUpdates(includeBeta);
+            }
+            ImGui::SameLine();
         }
-        ImGui::SameLine();
         if (ImGui::Button("Close", ImVec2(90, 26))) {
             m_showUpdateModal = false;
             ImGui::CloseCurrentPopup();
