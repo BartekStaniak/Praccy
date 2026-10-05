@@ -26,22 +26,24 @@ public:
     void render();
 
 private:
-    void renderHeaderBar();
+    void renderPraccyLogo();
     void renderStatusPill(bool isRunning, double sampleRate, int bufferSize, double latencyMs);
     void renderPracticeRibbon();
     void renderSignalRack();
     void renderSignalCable(float width = 36.0f);
-    void renderInputCard();
-    void renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int branchIndex = -1);
-    void renderParallelBlock(audio::ParallelSplitMergeBlock* block, int blockIndex);
+    void renderInputCard(float cardY = -1.0f);
+    void renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int blockIndex = -1, int branchIndex = -1);
+    void renderParallelBlock(audio::ParallelSplitMergeBlock* block, int blockIndex, float centerY);
     void renderSceneBar();
     void renderBottomBar();
+    void renderSettingsModal();
     void renderMeter(const char* label, float level, float width, float height);
     void renderPluginBrowserModal();
     void renderDspTweakModal();
     bool renderRotaryKnob(const char* label, float* value, float minVal, float maxVal, float radius, const char* format = "%.1f");
-    void renderMiniHardwareSlot(audio::PluginSlot* slot, int blockIndex, size_t branchIndex, size_t slotIndex);
     void renderUpdateModal();
+
+    bool m_showSettingsModal{false};
 
     audio::GraphEngine& m_graph;
     audio::AsioManager& m_asio;
