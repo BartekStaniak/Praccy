@@ -40,7 +40,7 @@ private:
     void renderMeter(const char* label, float level, float width, float height);
     void renderPluginBrowserModal();
     void renderDspTweakModal();
-    bool renderRotaryKnob(const char* label, float* value, float minVal, float maxVal, float radius, const char* format = "%.1f");
+    bool renderRotaryKnob(const char* label, float* value, float minVal, float maxVal, float radius, const char* format = "%.1f", float defaultVal = 0.0f);
     void renderUpdateModal();
 
     bool m_showSettingsModal{false};

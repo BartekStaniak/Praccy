@@ -7,7 +7,7 @@ if(WIN32)
     endif()
 endif()
 
-project(Praccy VERSION 1.0.0 LANGUAGES CXX C RC)
+project(Praccy VERSION 1.0.1 LANGUAGES CXX C RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

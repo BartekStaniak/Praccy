@@ -226,41 +226,72 @@ void RackView::render() {
 }
 
 void RackView::renderPraccyLogo() {
+    Thumbnail* logoThumb = ThumbnailManager::instance().getThumbnail("__praccy_logo__");
+    if (!logoThumb || !logoThumb->srv) {
+        const char* potentialPaths[] = {
+            "resources/pick_logo_cropped.png",
+            "../resources/pick_logo_cropped.png",
+            "../../resources/pick_logo_cropped.png",
+            "resources/logo.png",
+            "../resources/logo.png"
+        };
+        for (const char* p : potentialPaths) {
+            if (std::filesystem::exists(p)) {
+                ThumbnailManager::instance().loadFromFile("__praccy_logo__", p);
+                logoThumb = ThumbnailManager::instance().getThumbnail("__praccy_logo__");
+                if (logoThumb && logoThumb->srv) break;
+            }
+        }
+    }
+
     ImVec2 pos = ImGui::GetCursorScreenPos();
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    const float boxW = 135.0f;
+    const float boxW = 145.0f;
     const float boxH = 68.0f;
 
     // Stylized logo card
     dl->AddRectFilled(pos, ImVec2(pos.x + boxW, pos.y + boxH), IM_COL32(20, 22, 28, 220), 6.0f);
     dl->AddRect(pos, ImVec2(pos.x + boxW, pos.y + boxH), IM_COL32(45, 52, 68, 200), 6.0f);
 
-    // Glowing badge icon: pick / waveform medallion
-    const float cx = pos.x + 22.0f;
-    const float cy = pos.y + 24.0f;
+    if (logoThumb && logoThumb->srv) {
+        // Draw the actual guitar pick logo
+        const float pickH = 52.0f;
+        const float aspect = (logoThumb->height > 0) ? (static_cast<float>(logoThumb->width) / static_cast<float>(logoThumb->height)) : 0.868f;
+        const float pickW = pickH * aspect; // ~45px
+        const float pickX = pos.x + 8.0f;
+        const float pickY = pos.y + (boxH - pickH) * 0.5f;
 
-    dl->AddCircleFilled(ImVec2(cx, cy), 14.0f, IM_COL32(250, 150, 40, 35));
-    dl->AddCircleFilled(ImVec2(cx, cy), 11.0f, IM_COL32(30, 34, 46, 255));
-    dl->AddCircle(ImVec2(cx, cy), 11.0f, IM_COL32(250, 155, 45, 230), 0, 1.5f);
+        dl->AddImage((ImTextureID)logoThumb->srv, ImVec2(pickX, pickY), ImVec2(pickX + pickW, pickY + pickH));
 
-    // Dynamic wave bars inside medallion
-    dl->AddLine(ImVec2(cx - 5.0f, cy - 3.5f), ImVec2(cx - 5.0f, cy + 3.5f), IM_COL32(255, 180, 70, 255), 1.5f);
-    dl->AddLine(ImVec2(cx - 1.5f, cy - 7.0f), ImVec2(cx - 1.5f, cy + 7.0f), IM_COL32(255, 205, 90, 255), 2.0f);
-    dl->AddLine(ImVec2(cx + 2.0f, cy - 5.0f), ImVec2(cx + 2.0f, cy + 5.0f), IM_COL32(255, 180, 70, 255), 1.8f);
-    dl->AddLine(ImVec2(cx + 5.5f, cy - 2.5f), ImVec2(cx + 5.5f, cy + 2.5f), IM_COL32(255, 160, 50, 255), 1.5f);
+        float textX = pickX + pickW + 8.0f;
+        // Text: PRACCY
+        dl->AddText(ImVec2(textX, pos.y + 12.0f), IM_COL32(245, 195, 120, 255), "PRACCY");
+        // Version tag: v1.0.1
+        dl->AddText(ImVec2(textX, pos.y + 29.0f), IM_COL32(140, 150, 170, 220), "v1.0.1");
+        // Subtitle
+        dl->AddText(ImVec2(textX, pos.y + 46.0f), IM_COL32(100, 115, 138, 220), "PRACTICE HOST");
+    } else {
+        // Fallback procedural medallion
+        const float cx = pos.x + 22.0f;
+        const float cy = pos.y + 24.0f;
 
-    // Text: "PRACCY"
-    ImVec2 textPos(pos.x + 40.0f, pos.y + 14.0f);
-    dl->AddText(textPos, IM_COL32(255, 160, 45, 255), "PRACCY");
+        dl->AddCircleFilled(ImVec2(cx, cy), 14.0f, IM_COL32(250, 150, 40, 35));
+        dl->AddCircleFilled(ImVec2(cx, cy), 11.0f, IM_COL32(30, 34, 46, 255));
+        dl->AddCircle(ImVec2(cx, cy), 11.0f, IM_COL32(250, 155, 45, 230), 0, 1.5f);
 
-    // Version tag
-    ImVec2 verPos(pos.x + 40.0f, pos.y + 31.0f);
-    dl->AddText(verPos, IM_COL32(130, 140, 160, 200), "v1.0.0");
+        dl->AddLine(ImVec2(cx - 5.0f, cy - 3.5f), ImVec2(cx - 5.0f, cy + 3.5f), IM_COL32(255, 180, 70, 255), 1.5f);
+        dl->AddLine(ImVec2(cx - 1.5f, cy - 7.0f), ImVec2(cx - 1.5f, cy + 7.0f), IM_COL32(255, 205, 90, 255), 2.0f);
+        dl->AddLine(ImVec2(cx + 2.0f, cy - 5.0f), ImVec2(cx + 2.0f, cy + 5.0f), IM_COL32(255, 180, 70, 255), 1.8f);
+        dl->AddLine(ImVec2(cx + 5.5f, cy - 2.5f), ImVec2(cx + 5.5f, cy + 2.5f), IM_COL32(255, 160, 50, 255), 1.5f);
 
-    // Subtitle
-    ImVec2 subPos(pos.x + 10.0f, pos.y + 49.0f);
-    dl->AddText(subPos, IM_COL32(100, 115, 138, 220), "PRACTICE HOST");
+        ImVec2 textPos(pos.x + 42.0f, pos.y + 12.0f);
+        dl->AddText(textPos, IM_COL32(255, 160, 45, 255), "PRACCY");
+        ImVec2 verPos(pos.x + 42.0f, pos.y + 29.0f);
+        dl->AddText(verPos, IM_COL32(130, 140, 160, 200), "v1.0.1");
+        ImVec2 subPos(pos.x + 42.0f, pos.y + 46.0f);
+        dl->AddText(subPos, IM_COL32(100, 115, 138, 220), "PRACTICE HOST");
+    }
 
     ImGui::Dummy(ImVec2(boxW, boxH));
 }
@@ -312,11 +343,16 @@ void RackView::renderPracticeRibbon() {
 
     // Responsive 5-column layout: Praccy Logo on far-left, followed by Tuner, Metro, Gate, Master
     if (ImGui::BeginTable("PracticeRibbonTable", 5, ImGuiTableFlags_SizingStretchProp)) {
-        ImGui::TableSetupColumn("LogoCol",   ImGuiTableColumnFlags_WidthFixed, 145.0f);
+        ImGui::TableSetupColumn("LogoCol",   ImGuiTableColumnFlags_WidthFixed, 150.0f);
         ImGui::TableSetupColumn("TunerCol",  ImGuiTableColumnFlags_WidthStretch, 0.28f);
-        ImGui::TableSetupColumn("MetroCol",  ImGuiTableColumnFlags_WidthStretch, 0.26f);
+        ImGui::TableSetupColumn("MetroCol",  ImGuiTableColumnFlags_WidthStretch, 0.28f);
         ImGui::TableSetupColumn("GateCol",   ImGuiTableColumnFlags_WidthStretch, 0.22f);
-        ImGui::TableSetupColumn("MasterCol", ImGuiTableColumnFlags_WidthStretch, 0.24f);
+        ImGui::TableSetupColumn("MasterCol", ImGuiTableColumnFlags_WidthStretch, 0.22f);
+
+        const float modH = 68.0f;
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.15f, 0.17f, 0.22f, 0.85f));
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 6.0f));
 
         // ----------------------------------------------------
         // Column 0: Praccy Logo
@@ -325,35 +361,35 @@ void RackView::renderPracticeRibbon() {
         renderPraccyLogo();
 
         // ----------------------------------------------------
-        // Column 1: Strobe Tuner
+        // Column 1: Strobe Tuner Module
         // ----------------------------------------------------
         ImGui::TableNextColumn();
-        ImGui::TextColored(ImVec4(0.80f, 0.82f, 0.88f, 1.0f), "TUNER");
-        auto result = m_tuner.currentResult();
-        if (result.confidence) {
-            bool inTune = std::abs(result.centDeviation) <= 3.0f;
-            ImVec4 noteColor = inTune ? ImVec4(0.25f, 0.95f, 0.40f, 1.0f) : ImVec4(0.98f, 0.82f, 0.25f, 1.0f);
-            ImGui::TextColored(noteColor, "%s", result.noteName.c_str());
-            ImGui::SameLine();
-            ImGui::TextDisabled("(%.1f Hz)", result.frequencyHz);
-        } else {
-            ImGui::TextDisabled("-- (Listening)");
-        }
-
-        // Strobe Needle Gauge
+        ImGui::BeginChild("Mod_Tuner", ImVec2(0, modH), true, ImGuiWindowFlags_NoScrollbar);
         {
+            auto result = m_tuner.currentResult();
+            ImGui::TextColored(ImVec4(0.70f, 0.74f, 0.82f, 1.0f), "TUNER");
+            ImGui::SameLine();
+            if (result.confidence) {
+                bool inTune = std::abs(result.centDeviation) <= 3.0f;
+                ImVec4 noteColor = inTune ? ImVec4(0.25f, 0.95f, 0.40f, 1.0f) : ImVec4(0.98f, 0.82f, 0.25f, 1.0f);
+                ImGui::TextColored(noteColor, "%s (%.1f Hz)", result.noteName.c_str(), result.frequencyHz);
+            } else {
+                ImGui::TextDisabled("(Listening)");
+            }
+
+            ImGui::Spacing();
             const ImVec2 pos = ImGui::GetCursorScreenPos();
-            const float gaugeW = std::clamp(ImGui::GetContentRegionAvail().x - 10.0f, 140.0f, 220.0f);
-            const float gaugeH = 18.0f;
+            const float gaugeW = std::max(60.0f, ImGui::GetContentRegionAvail().x - 4.0f);
+            const float gaugeH = 20.0f;
             ImDrawList* dl = ImGui::GetWindowDrawList();
 
-            dl->AddRectFilled(pos, ImVec2(pos.x + gaugeW, pos.y + gaugeH), IM_COL32(24, 26, 32, 255), 4.0f);
-            dl->AddRect(pos, ImVec2(pos.x + gaugeW, pos.y + gaugeH), IM_COL32(50, 54, 66, 255), 4.0f);
+            dl->AddRectFilled(pos, ImVec2(pos.x + gaugeW, pos.y + gaugeH), IM_COL32(22, 24, 30, 255), 4.0f);
+            dl->AddRect(pos, ImVec2(pos.x + gaugeW, pos.y + gaugeH), IM_COL32(45, 50, 62, 255), 4.0f);
 
             const float midX = pos.x + (gaugeW * 0.5f);
             dl->AddLine(ImVec2(midX, pos.y + 2), ImVec2(midX, pos.y + gaugeH - 2), IM_COL32(40, 200, 80, 220), 2.0f);
-            dl->AddLine(ImVec2(pos.x + gaugeW * 0.25f, pos.y + 5), ImVec2(pos.x + gaugeW * 0.25f, pos.y + gaugeH - 5), IM_COL32(70, 75, 90, 200), 1.0f);
-            dl->AddLine(ImVec2(pos.x + gaugeW * 0.75f, pos.y + 5), ImVec2(pos.x + gaugeW * 0.75f, pos.y + gaugeH - 5), IM_COL32(70, 75, 90, 200), 1.0f);
+            dl->AddLine(ImVec2(pos.x + gaugeW * 0.25f, pos.y + 4), ImVec2(pos.x + gaugeW * 0.25f, pos.y + gaugeH - 4), IM_COL32(65, 70, 85, 200), 1.0f);
+            dl->AddLine(ImVec2(pos.x + gaugeW * 0.75f, pos.y + 4), ImVec2(pos.x + gaugeW * 0.75f, pos.y + gaugeH - 4), IM_COL32(65, 70, 85, 200), 1.0f);
 
             if (result.confidence) {
                 bool inTune = std::abs(result.centDeviation) <= 3.0f;
@@ -367,100 +403,142 @@ void RackView::renderPracticeRibbon() {
             }
             ImGui::Dummy(ImVec2(gaugeW, gaugeH));
         }
+        ImGui::EndChild();
 
         // ----------------------------------------------------
-        // Column 2: Metronome
+        // Column 2: Metronome Module
         // ----------------------------------------------------
         ImGui::TableNextColumn();
-        ImGui::TextColored(ImVec4(0.80f, 0.82f, 0.88f, 1.0f), "METRONOME");
-        bool metroPlaying = m_metronome.isPlaying();
-        if (ImGui::Button(metroPlaying ? " STOP " : " PLAY ")) {
-            m_metronome.setPlaying(!metroPlaying);
-        }
-        ImGui::SameLine(0, 8);
-
-        float bpm = m_metronome.bpm();
-        ImGui::SetNextItemWidth(75);
-        if (ImGui::DragFloat("##BPM", &bpm, 1.0f, 40.0f, 260.0f, "%.0f BPM")) {
-            m_metronome.setBpm(bpm);
-        }
-        ImGui::SameLine(0, 6);
-
-        // Time Signature selector (4/4, 3/4, 2/4, 6/8)
-        const char* timeSigOptions[] = { "4/4", "3/4", "2/4", "6/8" };
-        const int timeSigBeats[] = { 4, 3, 2, 6 };
-        int currentSigIdx = 0;
-        int currentBeats = m_metronome.beatsPerBar();
-        for (int i = 0; i < 4; ++i) {
-            if (timeSigBeats[i] == currentBeats) {
-                currentSigIdx = i;
-                break;
-            }
-        }
-        ImGui::SetNextItemWidth(55);
-        if (ImGui::Combo("##TimeSig", &currentSigIdx, timeSigOptions, 4)) {
-            m_metronome.setBeatsPerBar(timeSigBeats[currentSigIdx]);
-        }
-        ImGui::SameLine(0, 6);
-
-        // Vector Beat LEDs
+        ImGui::BeginChild("Mod_Metro", ImVec2(0, modH), true, ImGuiWindowFlags_NoScrollbar);
         {
-            const int totalBeats = m_metronome.beatsPerBar();
-            const int currentBeat = m_metronome.currentBeat();
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            ImVec2 curPos = ImGui::GetCursorScreenPos();
-            const float dotRadius = 4.5f;
-            const float dotSpacing = 12.0f;
+            ImGui::TextColored(ImVec4(0.70f, 0.74f, 0.82f, 1.0f), "METRONOME");
+            ImGui::SameLine();
+            bool metroPlaying = m_metronome.isPlaying();
 
-            for (int b = 0; b < totalBeats; ++b) {
-                float cx = curPos.x + 5.0f + (b * dotSpacing);
-                float cy = curPos.y + 11.0f;
-                bool active = metroPlaying && (b == currentBeat);
+            // Beat LEDs beside title
+            {
+                const int totalBeats = m_metronome.beatsPerBar();
+                const int currentBeat = m_metronome.currentBeat();
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                ImVec2 curPos = ImGui::GetCursorScreenPos();
+                const float dotRadius = 4.0f;
+                const float dotSpacing = 11.0f;
 
-                if (active) {
-                    ImU32 haloColor = (b == 0) ? IM_COL32(255, 60, 60, 80) : IM_COL32(250, 160, 30, 80);
-                    dl->AddCircleFilled(ImVec2(cx, cy), dotRadius + 3.0f, haloColor);
-                    ImU32 ledColor = (b == 0) ? IM_COL32(255, 70, 70, 255) : IM_COL32(255, 180, 40, 255);
-                    dl->AddCircleFilled(ImVec2(cx, cy), dotRadius, ledColor);
-                } else {
-                    dl->AddCircleFilled(ImVec2(cx, cy), dotRadius, IM_COL32(36, 40, 48, 255));
-                    dl->AddCircle(ImVec2(cx, cy), dotRadius, IM_COL32(55, 60, 72, 255), 0, 1.0f);
+                for (int b = 0; b < totalBeats; ++b) {
+                    float cx = curPos.x + 6.0f + (b * dotSpacing);
+                    float cy = curPos.y + 7.0f;
+                    bool active = metroPlaying && (b == currentBeat);
+                    if (active) {
+                        ImU32 haloColor = (b == 0) ? IM_COL32(255, 60, 60, 80) : IM_COL32(250, 160, 30, 80);
+                        dl->AddCircleFilled(ImVec2(cx, cy), dotRadius + 2.5f, haloColor);
+                        ImU32 ledColor = (b == 0) ? IM_COL32(255, 70, 70, 255) : IM_COL32(255, 180, 40, 255);
+                        dl->AddCircleFilled(ImVec2(cx, cy), dotRadius, ledColor);
+                    } else {
+                        dl->AddCircleFilled(ImVec2(cx, cy), dotRadius, IM_COL32(36, 40, 48, 255));
+                        dl->AddCircle(ImVec2(cx, cy), dotRadius, IM_COL32(55, 60, 72, 255), 0, 1.0f);
+                    }
                 }
             }
-            ImGui::Dummy(ImVec2(totalBeats * dotSpacing + 8.0f, 22.0f));
+
+            ImGui::Spacing();
+            if (ImGui::Button(metroPlaying ? "STOP##M" : "PLAY##M", ImVec2(48, 22))) {
+                m_metronome.setPlaying(!metroPlaying);
+            }
+            ImGui::SameLine(0, 6);
+
+            float bpm = m_metronome.bpm();
+            ImGui::SetNextItemWidth(76);
+            if (ImGui::DragFloat("##BPM", &bpm, 1.0f, 40.0f, 260.0f, "%.0f BPM")) {
+                m_metronome.setBpm(bpm);
+            }
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                bpm = 120.0f;
+                m_metronome.setBpm(120.0f);
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tempo (Double-click to reset 120 BPM)");
+
+            ImGui::SameLine(0, 6);
+            const char* timeSigOptions[] = { "4/4", "3/4", "2/4", "6/8" };
+            const int timeSigBeats[] = { 4, 3, 2, 6 };
+            int currentSigIdx = 0;
+            int currentBeats = m_metronome.beatsPerBar();
+            for (int i = 0; i < 4; ++i) {
+                if (timeSigBeats[i] == currentBeats) { currentSigIdx = i; break; }
+            }
+            ImGui::SetNextItemWidth(54);
+            if (ImGui::Combo("##TimeSig", &currentSigIdx, timeSigOptions, 4)) {
+                m_metronome.setBeatsPerBar(timeSigBeats[currentSigIdx]);
+            }
         }
+        ImGui::EndChild();
 
         // ----------------------------------------------------
-        // Column 3: Noise Gate
+        // Column 3: Noise Gate Module
         // ----------------------------------------------------
         ImGui::TableNextColumn();
-        ImGui::TextColored(ImVec4(0.80f, 0.82f, 0.88f, 1.0f), "NOISE GATE");
-        auto& gate = m_graph.inputNoiseGate();
-        bool gateOn = gate.isEnabled();
-        if (ImGui::Checkbox("Active##Gate", &gateOn)) {
-            gate.setEnabled(gateOn);
+        ImGui::BeginChild("Mod_Gate", ImVec2(0, modH), true, ImGuiWindowFlags_NoScrollbar);
+        {
+            auto& gate = m_graph.inputNoiseGate();
+            bool gateOn = gate.isEnabled();
+
+            ImGui::TextColored(ImVec4(0.70f, 0.74f, 0.82f, 1.0f), "NOISE GATE");
+            ImGui::SameLine();
+            if (ImGui::Checkbox("Active##Gate", &gateOn)) {
+                gate.setEnabled(gateOn);
+            }
+
+            ImGui::Spacing();
+            float thresh = gate.thresholdDb();
+            float availW = ImGui::GetContentRegionAvail().x;
+            ImGui::SetNextItemWidth(std::max(80.0f, availW - 6.0f));
+            if (ImGui::SliderFloat("##GateThresh", &thresh, -80.0f, -20.0f, "Thresh: %.0f dB")) {
+                gate.setThresholdDb(thresh);
+            }
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                thresh = -60.0f;
+                gate.setThresholdDb(-60.0f);
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Gate Threshold (Double-click to reset -60 dB)");
         }
-        ImGui::SameLine(0, 8);
-        float thresh = gate.thresholdDb();
-        ImGui::SetNextItemWidth(80);
-        if (ImGui::SliderFloat("##GateThresh", &thresh, -80.0f, -20.0f, "%.0f dB")) {
-            gate.setThresholdDb(thresh);
-        }
+        ImGui::EndChild();
 
         // ----------------------------------------------------
-        // Column 4: Master Output
+        // Column 4: Master Output Module
         // ----------------------------------------------------
         ImGui::TableNextColumn();
-        ImGui::TextColored(ImVec4(0.80f, 0.82f, 0.88f, 1.0f), "MASTER OUTPUT");
-        float masterVol = m_graph.masterVolumeDb();
-        ImGui::SetNextItemWidth(100);
-        if (ImGui::SliderFloat("##MasterVol", &masterVol, -36.0f, +6.0f, "%.1f dB")) {
-            m_graph.setMasterVolumeDb(masterVol);
+        ImGui::BeginChild("Mod_Master", ImVec2(0, modH), true, ImGuiWindowFlags_NoScrollbar);
+        {
+            float masterVol = m_graph.masterVolumeDb();
+
+            ImGui::TextColored(ImVec4(0.70f, 0.74f, 0.82f, 1.0f), "MASTER OUTPUT");
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), "%+.1f dB", masterVol);
+
+            ImGui::Spacing();
+            float availMasterW = ImGui::GetContentRegionAvail().x;
+            const float meterW = 9.0f;
+            const float meterGap = 3.0f;
+            const float sliderW = std::max(60.0f, availMasterW - (meterW * 2.0f + meterGap + 12.0f));
+
+            ImGui::SetNextItemWidth(sliderW);
+            if (ImGui::SliderFloat("##MasterVol", &masterVol, -36.0f, +6.0f, "Vol: %+.1f dB")) {
+                m_graph.setMasterVolumeDb(masterVol);
+            }
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                masterVol = 0.0f;
+                m_graph.setMasterVolumeDb(0.0f);
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Master Volume (Double-click to reset 0.0 dB)");
+
+            ImGui::SameLine(0, 6);
+            renderMeter("OutMeterL", m_graph.outputMeter().peakLeft(), meterW, 20.0f);
+            ImGui::SameLine(0, meterGap);
+            renderMeter("OutMeterR", m_graph.outputMeter().peakRight(), meterW, 20.0f);
         }
-        ImGui::SameLine(0, 6);
-        renderMeter("OutMeterL", m_graph.outputMeter().peakLeft(), 10, 30);
-        ImGui::SameLine(0, 3);
-        renderMeter("OutMeterR", m_graph.outputMeter().peakRight(), 10, 30);
+        ImGui::EndChild();
+
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor();
 
         ImGui::EndTable();
     }
@@ -495,7 +573,7 @@ void RackView::renderSceneBar() {
         ImGui::SameLine(0, 8);
     }
 
-    if (ImGui::Button("[Save Scene]")) {
+    if (ImGui::Button("Save Scene")) {
         m_scenes.captureCurrentScene(m_scenes.activeSceneIndex(), m_graph);
         const auto* cur = m_scenes.getScene(m_scenes.activeSceneIndex());
         m_sceneFeedbackMsg = "Saved to " + (cur ? cur->name : "Scene");
@@ -506,7 +584,7 @@ void RackView::renderSceneBar() {
     }
 
     ImGui::SameLine(0, 10);
-    if (ImGui::Button("[Save Preset As...]")) {
+    if (ImGui::Button("Save Preset As...")) {
         m_showSavePresetModal = true;
         m_presetNameBuffer[0] = '\0';
     }
@@ -608,9 +686,9 @@ void RackView::renderSignalRack() {
     float rackTotalH = 240.0f;
 
     if (hasParallel) {
-        centerY = 279.0f;
-        serialCardY = centerY - (cardH * 0.5f); // 167.0f
-        rackTotalH = 540.0f;
+        centerY = 322.0f;
+        serialCardY = centerY - (cardH * 0.5f); // 210.0f
+        rackTotalH = 615.0f;
     }
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -770,6 +848,11 @@ void RackView::renderInputCard(float cardY) {
     if (ImGui::VSliderFloat("##InGain", ImVec2(24, 115), &inGain, -24.0f, +24.0f, "")) {
         m_graph.setInputGainDb(inGain);
     }
+    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        inGain = 0.0f;
+        m_graph.setInputGainDb(0.0f);
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Input Gain (Double-click to reset 0 dB)");
     ImGui::SameLine(0, 8);
     renderMeter("InL", m_graph.inputMeter().peakLeft(), 10, 115);
     ImGui::SameLine(0, 4);
@@ -1111,6 +1194,11 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         if (ImGui::SliderFloat(mixLabel, &mix, 0.0f, 100.0f, "Mix: %.0f%%")) {
             slot->setDryWet(mix / 100.0f);
         }
+        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            mix = 100.0f;
+            slot->setDryWet(1.0f);
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Dry/Wet Mix (Double-click to reset 100%%)");
         ImGui::SameLine(0, 6);
         renderMeter("SlotMtr", slot->meter().peakLeft(), 8, 22);
     }
@@ -1126,6 +1214,11 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         if (ImGui::SliderFloat(trimLabel, &outTrim, -24.0f, +12.0f, "Trim: %+.1f dB")) {
             slot->setOutputGainDb(outTrim);
         }
+        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            outTrim = 0.0f;
+            slot->setOutputGainDb(0.0f);
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Output Trim (Double-click to reset 0.0 dB)");
     }
 
     // Context Menu for MIDI Learn & GUI Options
@@ -1187,192 +1280,332 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
     const float cardH = 224.0f;
     const float slotWireW = 28.0f;
     const float insertCardW = 80.0f;
-
-    const float card0MidY = centerY - 141.0f; // 138.0f when centerY = 279.0f
-    const float branch0Y = card0MidY - (cardH * 0.5f); // 26.0f
-    const float strip0Y = branch0Y - 26.0f; // 0.0f
-
-    const float card1MidY = centerY + 141.0f; // 420.0f
-    const float branch1Y = card1MidY - (cardH * 0.5f); // 308.0f
-    const float strip1Y = branch1Y - 26.0f; // 282.0f
-
-    const float startX = ImGui::GetCursorPosX();
-    const float forkW = 48.0f;
-    const float forkStartX = startX;
-    const float forkEndX = forkStartX + forkW;
-
-    // 1. Fork Junction and Wires to Branch 0 and Branch 1
-    dl->AddCircleFilled(toScreen(forkStartX, centerY), 4.5f, IM_COL32(110, 175, 255, 255));
-    drawRoutingWire(dl, toScreen(forkStartX, centerY), toScreen(forkEndX, card0MidY), true);
-    drawRoutingWire(dl, toScreen(forkStartX, centerY), toScreen(forkEndX, card1MidY), true);
+    const float envHeaderH = 36.0f;
+    const float envPadX = 14.0f;
+    const float envPadY = 10.0f;
+    const float envH = envHeaderH + (2.0f * envPadY) + cardH; // 280.0f
 
     auto* br0 = block->getBranch(0);
     auto* br1 = block->getBranch(1);
+    const size_t numSlots0 = br0 ? br0->numSlots() : 0;
+    const size_t numSlots1 = br1 ? br1->numSlots() : 0;
 
-    // 2. Branch 0 (Top Lane)
-    float curX0 = forkEndX;
-    if (br0) {
-        // Branch A Header Strip
-        ImGui::SetCursorPos(ImVec2(forkEndX, strip0Y));
-        ImGui::BeginGroup();
-        ImGui::TextColored(ImVec4(0.40f, 0.85f, 1.0f, 1.0f), "[ BRANCH A ]");
-        ImGui::SameLine(0, 8);
+    // Calculate dynamic envelope width based on number of slots in each branch
+    float w0 = envPadX + (numSlots0 * (cardW + slotWireW)) + insertCardW + envPadX;
+    float w1 = envPadX + (numSlots1 * (cardW + slotWireW)) + insertCardW + envPadX;
+    const float envelopeW = std::max({ w0, w1, 460.0f });
 
-        bool m0 = br0->isMuted();
-        if (m0) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
-        if (ImGui::Button("M##br0", ImVec2(20, 18))) { br0->setMuted(!m0); }
-        if (m0) ImGui::PopStyleColor();
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Mute Branch A");
+    // Vertical positioning:
+    // With centerY = 322.0f, card0MidY = 170.0f (centerY - 152.0f), card1MidY = 474.0f (centerY + 152.0f)
+    const float card0MidY = centerY - 152.0f; // 170.0f
+    const float card1MidY = centerY + 152.0f; // 474.0f
 
-        ImGui::SameLine(0, 4);
-        bool s0 = br0->isSolo();
-        if (s0) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.9f, 0.7f, 0.1f, 1.0f));
-        if (ImGui::Button("S##br0", ImVec2(20, 18))) { br0->setSolo(!s0); }
-        if (s0) ImGui::PopStyleColor();
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Solo Branch A");
+    const float card0Top = card0MidY - (cardH * 0.5f); // 58.0f
+    const float card1Top = card1MidY - (cardH * 0.5f); // 362.0f
 
-        ImGui::SameLine(0, 4);
-        bool p0 = br0->isPhaseInvert();
-        if (p0) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.45f, 0.15f, 1.0f));
-        if (ImGui::Button("O##br0", ImVec2(20, 18))) { br0->setPhaseInvert(!p0); }
-        if (p0) ImGui::PopStyleColor();
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Phase Invert (180 deg polarity flip)");
+    const float envY0 = card0Top - envPadY - envHeaderH; // 12.0f
+    const float envY1 = card1Top - envPadY - envHeaderH; // 316.0f
 
-        ImGui::SameLine(0, 8);
-        float pan0 = br0->pan();
-        ImGui::SetNextItemWidth(65);
-        if (ImGui::SliderFloat("##Pan0", &pan0, -1.0f, 1.0f, "P: %+.2f")) { br0->setPan(pan0); }
+    const float startX = ImGui::GetCursorPosX();
+    const float forkLeadW = 36.0f;
+    const float forkStartX = startX;
+    const float envX = forkStartX + forkLeadW;
 
-        ImGui::SameLine(0, 6);
-        float gain0 = br0->gainDb();
-        ImGui::SetNextItemWidth(65);
-        if (ImGui::SliderFloat("##Gain0", &gain0, -36.0f, +12.0f, "%+.1f dB")) { br0->setGainDb(gain0); }
-        ImGui::EndGroup();
+    // 1. Split Fork Junction & Wires entering Envelope Left Ports
+    dl->AddCircleFilled(toScreen(forkStartX, centerY), 4.5f, IM_COL32(110, 175, 255, 255));
+    drawRoutingWire(dl, toScreen(forkStartX, centerY), toScreen(envX, card0MidY), true);
+    drawRoutingWire(dl, toScreen(forkStartX, centerY), toScreen(envX, card1MidY), true);
 
-        // Branch 0 Slots
-        for (size_t s = 0; s < br0->numSlots(); ++s) {
-            auto* bSlot = br0->getSlot(s);
-            if (!bSlot) continue;
+    // Left Input Ports on Envelopes
+    dl->AddCircleFilled(toScreen(envX, card0MidY), 6.0f, IM_COL32(18, 24, 34, 255));
+    dl->AddCircleFilled(toScreen(envX, card0MidY), 3.5f, IM_COL32(80, 185, 255, 255));
 
-            ImGui::SetCursorPos(ImVec2(curX0, branch0Y));
-            renderPluginSlot(bSlot, static_cast<int>(s), blockIndex, 0);
-            curX0 += cardW;
+    dl->AddCircleFilled(toScreen(envX, card1MidY), 6.0f, IM_COL32(32, 22, 18, 255));
+    dl->AddCircleFilled(toScreen(envX, card1MidY), 3.5f, IM_COL32(255, 170, 50, 255));
 
-            drawRoutingWire(dl, toScreen(curX0, card0MidY), toScreen(curX0 + slotWireW, card0MidY), true);
-            curX0 += slotWireW;
+    // =========================================================================
+    // 2. BRANCH A ENVELOPE (Top Chassis)
+    // =========================================================================
+    {
+        // Envelope Background & Border (Cool Cyan / Navy theme)
+        dl->AddRectFilled(toScreen(envX, envY0), toScreen(envX + envelopeW, envY0 + envH), IM_COL32(18, 22, 30, 235), 8.0f);
+        dl->AddRect(toScreen(envX, envY0), toScreen(envX + envelopeW, envY0 + envH), IM_COL32(45, 80, 120, 220), 8.0f, 0, 1.5f);
+
+        // Header Background Bar (Rounded top corners)
+        dl->AddRectFilled(toScreen(envX, envY0), toScreen(envX + envelopeW, envY0 + envHeaderH), IM_COL32(23, 29, 40, 255), 8.0f, ImDrawFlags_RoundCornersTop);
+        dl->AddLine(toScreen(envX, envY0 + envHeaderH), toScreen(envX + envelopeW, envY0 + envHeaderH), IM_COL32(45, 80, 120, 180), 1.0f);
+
+        // Header Controls
+        if (br0) {
+            ImGui::SetCursorPos(ImVec2(envX + 12.0f, envY0 + 6.0f));
+            ImGui::BeginGroup();
+
+            // Branch A Badge
+            ImVec2 badgePos = ImGui::GetCursorScreenPos();
+            const char* badgeText = "BRANCH A";
+            ImVec2 badgeSz = ImGui::CalcTextSize(badgeText);
+            dl->AddRectFilled(ImVec2(badgePos.x - 3.0f, badgePos.y - 2.0f),
+                              ImVec2(badgePos.x + badgeSz.x + 5.0f, badgePos.y + badgeSz.y + 2.0f),
+                              IM_COL32(18, 48, 72, 255), 4.0f);
+            dl->AddRect(ImVec2(badgePos.x - 3.0f, badgePos.y - 2.0f),
+                        ImVec2(badgePos.x + badgeSz.x + 5.0f, badgePos.y + badgeSz.y + 2.0f),
+                        IM_COL32(50, 145, 215, 255), 4.0f);
+            dl->AddText(badgePos, IM_COL32(100, 215, 255, 255), badgeText);
+
+            ImGui::Dummy(ImVec2(badgeSz.x + 6.0f, 22.0f));
+            ImGui::SameLine(0, 8);
+
+            char countBuf[32];
+            std::snprintf(countBuf, sizeof(countBuf), "(%zu %s)", numSlots0, numSlots0 == 1 ? "Slot" : "Slots");
+            ImGui::TextDisabled("%s", countBuf);
+            ImGui::SameLine(0, 14);
+
+            // Mute Button
+            bool m0 = br0->isMuted();
+            if (m0) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.20f, 0.20f, 1.0f));
+            if (ImGui::Button("M##br0", ImVec2(22, 22))) { br0->setMuted(!m0); }
+            if (m0) ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(m0 ? "Unmute Branch A" : "Mute Branch A");
+
+            ImGui::SameLine(0, 4);
+
+            // Solo Button
+            bool s0 = br0->isSolo();
+            if (s0) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.95f, 0.70f, 0.10f, 1.0f));
+            if (ImGui::Button("S##br0", ImVec2(22, 22))) { br0->setSolo(!s0); }
+            if (s0) ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(s0 ? "Unsolo Branch A" : "Solo Branch A");
+
+            ImGui::SameLine(0, 4);
+
+            // Phase Invert Button
+            bool p0 = br0->isPhaseInvert();
+            if (p0) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.90f, 0.45f, 0.15f, 1.0f));
+            if (ImGui::Button("Ø##br0", ImVec2(22, 22))) { br0->setPhaseInvert(!p0); }
+            if (p0) ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Phase Invert (180° Polarity Flip)");
+
+            ImGui::SameLine(0, 10);
+
+            // Pan Slider (Double-click reset to 0.0)
+            float pan0 = br0->pan();
+            ImGui::SetNextItemWidth(74);
+            if (ImGui::SliderFloat("##Pan0", &pan0, -1.0f, 1.0f, "Pan: %+.2f")) { br0->setPan(pan0); }
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                pan0 = 0.0f;
+                br0->setPan(0.0f);
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Branch A Pan (Double-click to center)");
+
+            ImGui::SameLine(0, 6);
+
+            // Gain Slider (Double-click reset to 0.0dB)
+            float gain0 = br0->gainDb();
+            ImGui::SetNextItemWidth(74);
+            if (ImGui::SliderFloat("##Gain0", &gain0, -36.0f, +12.0f, "%+.1f dB")) { br0->setGainDb(gain0); }
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                gain0 = 0.0f;
+                br0->setGainDb(0.0f);
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Branch A Gain (Double-click to reset 0.0 dB)");
+
+            ImGui::EndGroup();
+
+            // Branch A Slots & Internal Wiring
+            float curX0 = envX + envPadX;
+
+            // Wire from envelope entry port to first slot/insert card
+            drawRoutingWire(dl, toScreen(envX, card0MidY), toScreen(curX0, card0MidY), false);
+
+            for (size_t s = 0; s < numSlots0; ++s) {
+                auto* bSlot = br0->getSlot(s);
+                if (!bSlot) continue;
+
+                ImGui::SetCursorPos(ImVec2(curX0, card0Top));
+                renderPluginSlot(bSlot, static_cast<int>(s), blockIndex, 0);
+                curX0 += cardW;
+
+                drawRoutingWire(dl, toScreen(curX0, card0MidY), toScreen(curX0 + slotWireW, card0MidY), true);
+                curX0 += slotWireW;
+            }
+
+            // Branch A Inline Insert Button Card
+            ImGui::SetCursorPos(ImVec2(curX0, card0Top));
+            ImGui::BeginGroup();
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.15f, 0.19f, 0.6f));
+            ImGui::BeginChild("InsertBr0Card", ImVec2(insertCardW, cardH), true, ImGuiWindowFlags_NoScrollbar);
+            ImGui::SetCursorPos(ImVec2((insertCardW - 48.0f) * 0.5f, (cardH - 48.0f) * 0.5f));
+            if (renderCenteredPlusButton("##AddPluginBr0", ImVec2(48.0f, 48.0f), 11.0f)) {
+                m_insertTargetBlockIndex = blockIndex;
+                m_insertTargetBranchIndex = 0;
+                m_showPluginBrowser = true;
+                m_focusPluginBrowser = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                ImGui::SetTooltip("Insert plugin into Branch A");
+            }
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
+            ImGui::EndGroup();
+            curX0 += insertCardW;
+
+            // Wire from insert card to envelope exit port
+            if (curX0 < envX + envelopeW) {
+                drawRoutingWire(dl, toScreen(curX0, card0MidY), toScreen(envX + envelopeW, card0MidY), false);
+            }
         }
-
-        // Branch 0 Inline Insert Button Card
-        ImGui::SetCursorPos(ImVec2(curX0, branch0Y));
-        ImGui::BeginGroup();
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.15f, 0.19f, 0.6f));
-        ImGui::BeginChild("InsertBr0Card", ImVec2(insertCardW, cardH), true, ImGuiWindowFlags_NoScrollbar);
-        ImGui::SetCursorPos(ImVec2((insertCardW - 48.0f) * 0.5f, (cardH - 48.0f) * 0.5f));
-        if (renderCenteredPlusButton("##AddPluginBr0", ImVec2(48.0f, 48.0f), 11.0f)) {
-            m_insertTargetBlockIndex = blockIndex;
-            m_insertTargetBranchIndex = 0;
-            m_showPluginBrowser = true;
-            m_focusPluginBrowser = true;
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-            ImGui::SetTooltip("Insert plugin into Branch A");
-        }
-        ImGui::EndChild();
-        ImGui::PopStyleColor();
-        ImGui::EndGroup();
-        curX0 += insertCardW;
     }
 
-    // 3. Branch 1 (Bottom Lane)
-    float curX1 = forkEndX;
-    if (br1) {
-        // Branch B Header Strip
-        ImGui::SetCursorPos(ImVec2(forkEndX, strip1Y));
-        ImGui::BeginGroup();
-        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f), "[ BRANCH B ]");
-        ImGui::SameLine(0, 8);
+    // =========================================================================
+    // 3. BRANCH B ENVELOPE (Bottom Chassis)
+    // =========================================================================
+    {
+        // Envelope Background & Border (Warm Amber theme)
+        dl->AddRectFilled(toScreen(envX, envY1), toScreen(envX + envelopeW, envY1 + envH), IM_COL32(26, 21, 19, 235), 8.0f);
+        dl->AddRect(toScreen(envX, envY1), toScreen(envX + envelopeW, envY1 + envH), IM_COL32(130, 75, 40, 220), 8.0f, 0, 1.5f);
 
-        bool m1 = br1->isMuted();
-        if (m1) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
-        if (ImGui::Button("M##br1", ImVec2(20, 18))) { br1->setMuted(!m1); }
-        if (m1) ImGui::PopStyleColor();
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Mute Branch B");
+        // Header Background Bar (Rounded top corners)
+        dl->AddRectFilled(toScreen(envX, envY1), toScreen(envX + envelopeW, envY1 + envHeaderH), IM_COL32(35, 27, 23, 255), 8.0f, ImDrawFlags_RoundCornersTop);
+        dl->AddLine(toScreen(envX, envY1 + envHeaderH), toScreen(envX + envelopeW, envY1 + envHeaderH), IM_COL32(130, 75, 40, 180), 1.0f);
 
-        ImGui::SameLine(0, 4);
-        bool s1 = br1->isSolo();
-        if (s1) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.9f, 0.7f, 0.1f, 1.0f));
-        if (ImGui::Button("S##br1", ImVec2(20, 18))) { br1->setSolo(!s1); }
-        if (s1) ImGui::PopStyleColor();
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Solo Branch B");
+        // Header Controls
+        if (br1) {
+            ImGui::SetCursorPos(ImVec2(envX + 12.0f, envY1 + 6.0f));
+            ImGui::BeginGroup();
 
-        ImGui::SameLine(0, 4);
-        bool p1 = br1->isPhaseInvert();
-        if (p1) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.45f, 0.15f, 1.0f));
-        if (ImGui::Button("O##br1", ImVec2(20, 18))) { br1->setPhaseInvert(!p1); }
-        if (p1) ImGui::PopStyleColor();
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Phase Invert (180 deg polarity flip)");
+            // Branch B Badge
+            ImVec2 badgePos = ImGui::GetCursorScreenPos();
+            const char* badgeText = "BRANCH B";
+            ImVec2 badgeSz = ImGui::CalcTextSize(badgeText);
+            dl->AddRectFilled(ImVec2(badgePos.x - 3.0f, badgePos.y - 2.0f),
+                              ImVec2(badgePos.x + badgeSz.x + 5.0f, badgePos.y + badgeSz.y + 2.0f),
+                              IM_COL32(65, 38, 20, 255), 4.0f);
+            dl->AddRect(ImVec2(badgePos.x - 3.0f, badgePos.y - 2.0f),
+                        ImVec2(badgePos.x + badgeSz.x + 5.0f, badgePos.y + badgeSz.y + 2.0f),
+                        IM_COL32(215, 120, 45, 255), 4.0f);
+            dl->AddText(badgePos, IM_COL32(255, 185, 75, 255), badgeText);
 
-        ImGui::SameLine(0, 8);
-        float pan1 = br1->pan();
-        ImGui::SetNextItemWidth(65);
-        if (ImGui::SliderFloat("##Pan1", &pan1, -1.0f, 1.0f, "P: %+.2f")) { br1->setPan(pan1); }
+            ImGui::Dummy(ImVec2(badgeSz.x + 6.0f, 22.0f));
+            ImGui::SameLine(0, 8);
 
-        ImGui::SameLine(0, 6);
-        float gain1 = br1->gainDb();
-        ImGui::SetNextItemWidth(65);
-        if (ImGui::SliderFloat("##Gain1", &gain1, -36.0f, +12.0f, "%+.1f dB")) { br1->setGainDb(gain1); }
-        ImGui::EndGroup();
+            char countBuf[32];
+            std::snprintf(countBuf, sizeof(countBuf), "(%zu %s)", numSlots1, numSlots1 == 1 ? "Slot" : "Slots");
+            ImGui::TextDisabled("%s", countBuf);
+            ImGui::SameLine(0, 14);
 
-        // Branch 1 Slots
-        for (size_t s = 0; s < br1->numSlots(); ++s) {
-            auto* bSlot = br1->getSlot(s);
-            if (!bSlot) continue;
+            // Mute Button
+            bool m1 = br1->isMuted();
+            if (m1) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.20f, 0.20f, 1.0f));
+            if (ImGui::Button("M##br1", ImVec2(22, 22))) { br1->setMuted(!m1); }
+            if (m1) ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(m1 ? "Unmute Branch B" : "Mute Branch B");
 
-            ImGui::SetCursorPos(ImVec2(curX1, branch1Y));
-            renderPluginSlot(bSlot, static_cast<int>(s), blockIndex, 1);
-            curX1 += cardW;
+            ImGui::SameLine(0, 4);
 
-            drawRoutingWire(dl, toScreen(curX1, card1MidY), toScreen(curX1 + slotWireW, card1MidY), true);
-            curX1 += slotWireW;
+            // Solo Button
+            bool s1 = br1->isSolo();
+            if (s1) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.95f, 0.70f, 0.10f, 1.0f));
+            if (ImGui::Button("S##br1", ImVec2(22, 22))) { br1->setSolo(!s1); }
+            if (s1) ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(s1 ? "Unsolo Branch B" : "Solo Branch B");
+
+            ImGui::SameLine(0, 4);
+
+            // Phase Invert Button
+            bool p1 = br1->isPhaseInvert();
+            if (p1) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.90f, 0.45f, 0.15f, 1.0f));
+            if (ImGui::Button("Ø##br1", ImVec2(22, 22))) { br1->setPhaseInvert(!p1); }
+            if (p1) ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Phase Invert (180° Polarity Flip)");
+
+            ImGui::SameLine(0, 10);
+
+            // Pan Slider (Double-click reset to 0.0)
+            float pan1 = br1->pan();
+            ImGui::SetNextItemWidth(74);
+            if (ImGui::SliderFloat("##Pan1", &pan1, -1.0f, 1.0f, "Pan: %+.2f")) { br1->setPan(pan1); }
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                pan1 = 0.0f;
+                br1->setPan(0.0f);
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Branch B Pan (Double-click to center)");
+
+            ImGui::SameLine(0, 6);
+
+            // Gain Slider (Double-click reset to 0.0dB)
+            float gain1 = br1->gainDb();
+            ImGui::SetNextItemWidth(74);
+            if (ImGui::SliderFloat("##Gain1", &gain1, -36.0f, +12.0f, "%+.1f dB")) { br1->setGainDb(gain1); }
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                gain1 = 0.0f;
+                br1->setGainDb(0.0f);
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Branch B Gain (Double-click to reset 0.0 dB)");
+
+            ImGui::EndGroup();
+
+            // Branch B Slots & Internal Wiring
+            float curX1 = envX + envPadX;
+
+            // Wire from envelope entry port to first slot/insert card
+            drawRoutingWire(dl, toScreen(envX, card1MidY), toScreen(curX1, card1MidY), false);
+
+            for (size_t s = 0; s < numSlots1; ++s) {
+                auto* bSlot = br1->getSlot(s);
+                if (!bSlot) continue;
+
+                ImGui::SetCursorPos(ImVec2(curX1, card1Top));
+                renderPluginSlot(bSlot, static_cast<int>(s), blockIndex, 1);
+                curX1 += cardW;
+
+                drawRoutingWire(dl, toScreen(curX1, card1MidY), toScreen(curX1 + slotWireW, card1MidY), true);
+                curX1 += slotWireW;
+            }
+
+            // Branch B Inline Insert Button Card
+            ImGui::SetCursorPos(ImVec2(curX1, card1Top));
+            ImGui::BeginGroup();
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.15f, 0.19f, 0.6f));
+            ImGui::BeginChild("InsertBr1Card", ImVec2(insertCardW, cardH), true, ImGuiWindowFlags_NoScrollbar);
+            ImGui::SetCursorPos(ImVec2((insertCardW - 48.0f) * 0.5f, (cardH - 48.0f) * 0.5f));
+            if (renderCenteredPlusButton("##AddPluginBr1", ImVec2(48.0f, 48.0f), 11.0f)) {
+                m_insertTargetBlockIndex = blockIndex;
+                m_insertTargetBranchIndex = 1;
+                m_showPluginBrowser = true;
+                m_focusPluginBrowser = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                ImGui::SetTooltip("Insert plugin into Branch B");
+            }
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
+            ImGui::EndGroup();
+            curX1 += insertCardW;
+
+            // Wire from insert card to envelope exit port
+            if (curX1 < envX + envelopeW) {
+                drawRoutingWire(dl, toScreen(curX1, card1MidY), toScreen(envX + envelopeW, card1MidY), false);
+            }
         }
-
-        // Branch 1 Inline Insert Button Card
-        ImGui::SetCursorPos(ImVec2(curX1, branch1Y));
-        ImGui::BeginGroup();
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.15f, 0.19f, 0.6f));
-        ImGui::BeginChild("InsertBr1Card", ImVec2(insertCardW, cardH), true, ImGuiWindowFlags_NoScrollbar);
-        ImGui::SetCursorPos(ImVec2((insertCardW - 48.0f) * 0.5f, (cardH - 48.0f) * 0.5f));
-        if (renderCenteredPlusButton("##AddPluginBr1", ImVec2(48.0f, 48.0f), 11.0f)) {
-            m_insertTargetBlockIndex = blockIndex;
-            m_insertTargetBranchIndex = 1;
-            m_showPluginBrowser = true;
-            m_focusPluginBrowser = true;
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-            ImGui::SetTooltip("Insert plugin into Branch B");
-        }
-        ImGui::EndChild();
-        ImGui::PopStyleColor();
-        ImGui::EndGroup();
-        curX1 += insertCardW;
     }
 
-    // 4. Convergence and Combiner Node
-    const float maxBranchEndX = std::max(curX0, curX1);
-    if (curX0 < maxBranchEndX) {
-        drawRoutingWire(dl, toScreen(curX0, card0MidY), toScreen(maxBranchEndX, card0MidY), false);
-    }
-    if (curX1 < maxBranchEndX) {
-        drawRoutingWire(dl, toScreen(curX1, card1MidY), toScreen(maxBranchEndX, card1MidY), false);
-    }
+    // =========================================================================
+    // 4. CONVERGENCE & COMBINER NODE
+    // =========================================================================
+    // Right Exit Ports on Envelopes
+    dl->AddCircleFilled(toScreen(envX + envelopeW, card0MidY), 6.0f, IM_COL32(18, 24, 34, 255));
+    dl->AddCircleFilled(toScreen(envX + envelopeW, card0MidY), 3.5f, IM_COL32(80, 185, 255, 255));
 
-    const float convW = 48.0f;
-    const float combinerX = maxBranchEndX + convW;
+    dl->AddCircleFilled(toScreen(envX + envelopeW, card1MidY), 6.0f, IM_COL32(32, 22, 18, 255));
+    dl->AddCircleFilled(toScreen(envX + envelopeW, card1MidY), 3.5f, IM_COL32(255, 170, 50, 255));
 
-    drawRoutingWire(dl, toScreen(maxBranchEndX, card0MidY), toScreen(combinerX, centerY), true);
-    drawRoutingWire(dl, toScreen(maxBranchEndX, card1MidY), toScreen(combinerX, centerY), true);
+    const float convLeadW = 36.0f;
+    const float combinerX = envX + envelopeW + convLeadW;
+
+    drawRoutingWire(dl, toScreen(envX + envelopeW, card0MidY), toScreen(combinerX, centerY), true);
+    drawRoutingWire(dl, toScreen(envX + envelopeW, card1MidY), toScreen(combinerX, centerY), true);
 
     // Combiner node [ + ]
     const float combSize = 44.0f;
@@ -1415,7 +1648,7 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
     ImGui::SetCursorPosX(combinerX + (combSize * 0.5f));
 }
 
-bool RackView::renderRotaryKnob(const char* label, float* value, float minVal, float maxVal, float radius, const char* format) {
+bool RackView::renderRotaryKnob(const char* label, float* value, float minVal, float maxVal, float radius, const char* format, float defaultVal) {
     ImVec2 pos = ImGui::GetCursorScreenPos();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImGuiIO& io = ImGui::GetIO();
@@ -1438,11 +1671,16 @@ bool RackView::renderRotaryKnob(const char* label, float* value, float minVal, f
         }
     }
 
+    if (isHovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        *value = std::clamp(defaultVal, minVal, maxVal);
+        valueChanged = true;
+    }
+
     if (isHovered) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
         char tip[64];
         std::snprintf(tip, sizeof(tip), format, *value);
-        ImGui::SetTooltip("%s", tip);
+        ImGui::SetTooltip("%s (Double-click to reset)", tip);
     }
 
     // Normalized value (0.0 to 1.0)
@@ -1482,6 +1720,20 @@ bool RackView::renderRotaryKnob(const char* label, float* value, float minVal, f
 void RackView::renderBottomBar() {
     ImGui::Separator();
 
+    // Left side: Settings button (clean name without brackets)
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.22f, 0.28f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.32f, 0.42f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.88f, 0.95f, 1.0f));
+    if (ImGui::Button("Settings", ImVec2(78.0f, 22.0f))) {
+        m_showSettingsModal = true;
+    }
+    ImGui::PopStyleColor(3);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Open Audio, Plugin, and Host Settings");
+    }
+
+    ImGui::SameLine(0, 14);
+
     // Left side: MIDI status / learn
     if (m_midi.isLearning()) {
         ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "[*] MIDI LEARN ACTIVE: Move any knob, slider, or press a footswitch to bind...");
@@ -1493,7 +1745,7 @@ void RackView::renderBottomBar() {
         ImGui::TextDisabled("MIDI: %s", m_midi.lastActivityDescription().c_str());
     }
 
-    // Right side: ASIO Activity Pill and [ settings ] Button
+    // Right side: ASIO Activity Pill
     const double sr = m_asio.currentSampleRate();
     const int bufSize = m_asio.currentBufferSize();
     const double latencyMs = (sr > 0.0) ? (static_cast<double>(bufSize) / sr * 1000.0) : 0.0;
@@ -1507,29 +1759,15 @@ void RackView::renderBottomBar() {
     }
 
     const float pillW = ImGui::CalcTextSize(statusText).x + 36.0f;
-    const float settingsBtnW = 88.0f;
-    const float totalRightW = pillW + 12.0f + settingsBtnW;
     const float availW = ImGui::GetContentRegionAvail().x;
 
-    if (availW > totalRightW) {
-        ImGui::SameLine(ImGui::GetCursorPosX() + availW - totalRightW);
+    if (availW > pillW) {
+        ImGui::SameLine(ImGui::GetCursorPosX() + availW - pillW);
     } else {
         ImGui::SameLine(0, 12);
     }
 
     renderStatusPill(m_asio.isRunning(), sr, bufSize, latencyMs);
-    ImGui::SameLine(0, 10);
-
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.22f, 0.28f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.32f, 0.42f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.88f, 0.95f, 1.0f));
-    if (ImGui::Button("[ settings ]", ImVec2(settingsBtnW, 22.0f))) {
-        m_showSettingsModal = true;
-    }
-    ImGui::PopStyleColor(3);
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Open Audio, Plugin, and Host Settings");
-    }
 }
 
 void RackView::renderMeter(const char* label, float level, float width, float height) {
@@ -1840,6 +2078,13 @@ void RackView::renderDspTweakModal() {
                 if (ImGui::SliderFloat(label, &val, desc.minValue, desc.maxValue, "%.2f")) {
                     pInst->setParameterValue(desc.id, val);
                 }
+                if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    val = desc.defaultValue;
+                    pInst->setParameterValue(desc.id, val);
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Double-click to reset (default: %.2f)", desc.defaultValue);
+                }
             }
         }
 
@@ -1868,7 +2113,7 @@ void RackView::renderUpdateModal() {
         ImGui::Separator();
         ImGui::Spacing();
 
-        ImGui::Text("Installed Version: %s", "v1.0.0");
+        ImGui::Text("Installed Version: %s", "v1.0.1");
         ImGui::Spacing();
 
         // Option to enable beta builds from dev branch
@@ -2112,7 +2357,7 @@ void RackView::renderSettingsModal() {
                 ImGui::Separator();
                 ImGui::Spacing();
 
-                ImGui::Text("Installed Version: %s", "v1.0.0");
+                ImGui::Text("Installed Version: %s", "v1.0.1");
                 ImGui::Spacing();
 
                 state::AppConfig cfg;
@@ -2135,7 +2380,7 @@ void RackView::renderSettingsModal() {
             // TAB 4: ABOUT
             if (ImGui::BeginTabItem("About")) {
                 ImGui::Spacing();
-                ImGui::TextColored(ImVec4(0.98f, 0.60f, 0.20f, 1.0f), "PRACCY v1.0.0");
+                ImGui::TextColored(ImVec4(0.98f, 0.60f, 0.20f, 1.0f), "PRACCY v1.0.1");
                 ImGui::TextDisabled("Lightweight, Low-Latency Guitar & Audio Practice Host");
                 ImGui::Separator();
                 ImGui::Spacing();
