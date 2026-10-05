@@ -3,6 +3,7 @@
 #include "audio_buffer.h"
 #include "audio_node.h"
 #include "dsp_utils.h"
+#include "input_config.h"
 #include <vector>
 #include <memory>
 #include <string>
@@ -173,6 +174,9 @@ public:
     void setInputGainDb(float db) noexcept { m_inputGainDb.store(db, std::memory_order_relaxed); }
     [[nodiscard]] float inputGainDb() const noexcept { return m_inputGainDb.load(std::memory_order_relaxed); }
 
+    void setInputRouting(const InputRoutingConfig& config) noexcept { m_inputConfig = config; }
+    [[nodiscard]] const InputRoutingConfig& inputRouting() const noexcept { return m_inputConfig; }
+
     void setMasterVolumeDb(float db) noexcept { m_masterVolumeDb.store(db, std::memory_order_relaxed); }
     [[nodiscard]] float masterVolumeDb() const noexcept { return m_masterVolumeDb.load(std::memory_order_relaxed); }
 
@@ -189,6 +193,7 @@ private:
 
     std::atomic<float> m_inputGainDb{0.0f};
     std::atomic<float> m_masterVolumeDb{0.0f};
+    InputRoutingConfig m_inputConfig;
 
     NoiseGate m_noiseGate;
     LevelMeter m_inputMeter;

@@ -15,6 +15,7 @@
 #include "midi/midi_manager.h"
 #include "state/scene_manager.h"
 #include "plugins/builtin_dsp.h"
+#include "plugins/plugin_scanner.h"
 #include "ui/theme.h"
 #include "ui/rack_view.h"
 
@@ -155,7 +156,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         }
     });
 
-    praccy::ui::RackView rackView(graph, asio, tuner, metronome, midi, scenes);
+    praccy::plugins::PluginScanner scanner;
+    praccy::ui::RackView rackView(graph, asio, tuner, metronome, midi, scenes, scanner);
 
     // Main event loop
     bool done = false;

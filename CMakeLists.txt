@@ -12,6 +12,7 @@ set(PRACCY_SOURCES
     src/audio/graph_engine.cpp
     src/plugins/clap_host.cpp
     src/plugins/builtin_dsp.cpp
+    src/plugins/plugin_scanner.cpp
     src/midi/midi_manager.cpp
     src/tools/tuner.cpp
     src/tools/metronome.cpp

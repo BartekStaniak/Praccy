@@ -1,4 +1,6 @@
 #include "rack_view.h"
+#include "../plugins/builtin_dsp.h"
+#include "../plugins/clap_host.h"
 #include <imgui.h>
 #include <cmath>
 #include <cstdio>
@@ -11,13 +13,15 @@ RackView::RackView(audio::GraphEngine& graph,
                    tools::InstrumentTuner& tuner,
                    tools::Metronome& metronome,
                    midi::MidiManager& midi,
-                   state::SceneManager& scenes)
+                   state::SceneManager& scenes,
+                   plugins::PluginScanner& scanner)
     : m_graph(graph),
       m_asio(asio),
       m_tuner(tuner),
       m_metronome(metronome),
       m_midi(midi),
-      m_scenes(scenes) {
+      m_scenes(scenes),
+      m_scanner(scanner) {
     m_cachedDrivers = audio::AsioManager::enumerateDrivers();
     if (m_asio.isLoaded()) {
         const std::string& loadedName = m_asio.driverInfo().name;
@@ -49,6 +53,10 @@ void RackView::render() {
         ImGui::Separator();
         renderSignalRack();
         renderBottomBar();
+
+        if (m_showPluginBrowser) {
+            renderPluginBrowserModal();
+        }
     }
     ImGui::End();
     ImGui::PopStyleVar();
@@ -59,14 +67,14 @@ void RackView::renderHeaderBar() {
         ImGui::TextColored(ImVec4(0.98f, 0.60f, 0.20f, 1.0f), "PRACCY");
         ImGui::SameLine();
         ImGui::TextDisabled("v1.0.0");
-        ImGui::SameLine(100);
+        ImGui::SameLine(0, 20);
 
-        // Driver selection
+        // ASIO Device Selector
         ImGui::Text("ASIO Device:");
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(230);
+        ImGui::SetNextItemWidth(180);
 
-        std::string previewName = m_cachedDrivers.empty() ? "No ASIO Driver Found" :
+        std::string previewName = m_cachedDrivers.empty() ? "No Driver Found" :
             (m_selectedDriverIdx < static_cast<int>(m_cachedDrivers.size()) ? m_cachedDrivers[m_selectedDriverIdx].name : "Select");
 
         if (ImGui::BeginCombo("##DriverCombo", previewName.c_str())) {
@@ -83,169 +91,201 @@ void RackView::renderHeaderBar() {
             ImGui::EndCombo();
         }
 
-        ImGui::SameLine(400);
+        ImGui::SameLine(0, 16);
+
+        // Dynamic Status Pill (Guaranteed zero overlapping!)
         if (m_asio.isRunning()) {
             const auto& info = m_asio.driverInfo();
             const double latencyMs = (2.0 * info.currentBufferSize / info.sampleRate) * 1000.0;
-            ImGui::TextColored(ImVec4(0.30f, 0.95f, 0.45f, 1.0f), "[ACTIVE]");
-            ImGui::SameLine();
-            ImGui::Text("%.0f kHz | %d spls (%.1f ms)", info.sampleRate / 1000.0, info.currentBufferSize, latencyMs);
+            renderStatusPill(true, info.sampleRate, info.currentBufferSize, latencyMs);
         } else {
-            ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "[STOPPED]");
+            renderStatusPill(false, 0.0, 0, 0.0);
         }
 
-        ImGui::SameLine();
+        ImGui::SameLine(0, 14);
         if (ImGui::Button("ASIO Settings")) {
             m_asio.openControlPanel();
+        }
+
+        ImGui::SameLine(0, 10);
+        if (ImGui::Button("Plugins...")) {
+            m_showPluginBrowser = true;
         }
 
         ImGui::EndMenuBar();
     }
 }
 
+void RackView::renderStatusPill(bool isRunning, double sampleRate, int bufferSize, double latencyMs) {
+    char statusText[128];
+    if (isRunning) {
+        std::snprintf(statusText, sizeof(statusText), "ACTIVE  |  %.0f kHz  |  %d spls (%.1f ms)", sampleRate / 1000.0, bufferSize, latencyMs);
+    } else {
+        std::snprintf(statusText, sizeof(statusText), "STOPPED");
+    }
+
+    const ImVec2 textSize = ImGui::CalcTextSize(statusText);
+    const float pillW = textSize.x + 36.0f;
+    const float pillH = 22.0f;
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    // Background capsule pill
+    ImU32 bgCol = isRunning ? IM_COL32(20, 36, 26, 255) : IM_COL32(40, 24, 24, 255);
+    ImU32 borderCol = isRunning ? IM_COL32(45, 120, 60, 255) : IM_COL32(120, 45, 45, 255);
+    dl->AddRectFilled(pos, ImVec2(pos.x + pillW, pos.y + pillH), bgCol, 11.0f);
+    dl->AddRect(pos, ImVec2(pos.x + pillW, pos.y + pillH), borderCol, 11.0f);
+
+    // Glowing LED Dot
+    ImVec2 dotCenter(pos.x + 12.0f, pos.y + (pillH * 0.5f));
+    if (isRunning) {
+        dl->AddCircleFilled(dotCenter, 6.0f, IM_COL32(40, 240, 80, 80));
+        dl->AddCircleFilled(dotCenter, 3.5f, IM_COL32(50, 255, 90, 255));
+    } else {
+        dl->AddCircleFilled(dotCenter, 3.5f, IM_COL32(230, 60, 60, 255));
+    }
+
+    // Text Label inside pill
+    ImVec2 textPos(pos.x + 24.0f, pos.y + ((pillH - textSize.y) * 0.5f));
+    ImU32 textCol = isRunning ? IM_COL32(210, 245, 220, 255) : IM_COL32(245, 180, 180, 255);
+    dl->AddText(textPos, textCol, statusText);
+
+    ImGui::Dummy(ImVec2(pillW, pillH));
+}
+
 void RackView::renderPracticeRibbon() {
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.12f, 0.13f, 0.16f, 1.0f));
-    ImGui::BeginChild("PracticeRibbon", ImVec2(0, 80), false, ImGuiWindowFlags_NoScrollbar);
+    ImGui::BeginChild("PracticeRibbon", ImVec2(0, 82), false, ImGuiWindowFlags_NoScrollbar);
 
-    // ==========================================
-    // 1. Tuner Section (Custom Strobe Needle)
-    // ==========================================
-    ImGui::BeginGroup();
-    ImGui::TextColored(ImVec4(0.80f, 0.82f, 0.88f, 1.0f), "TUNER");
-    auto result = m_tuner.currentResult();
+    // Responsive 4-column layout: guaranteed dynamic scaling without overlapping!
+    if (ImGui::BeginTable("PracticeRibbonTable", 4, ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("TunerCol", ImGuiTableColumnFlags_WidthStretch, 0.28f);
+        ImGui::TableSetupColumn("MetroCol", ImGuiTableColumnFlags_WidthStretch, 0.26f);
+        ImGui::TableSetupColumn("GateCol",  ImGuiTableColumnFlags_WidthStretch, 0.22f);
+        ImGui::TableSetupColumn("MasterCol",ImGuiTableColumnFlags_WidthStretch, 0.24f);
 
-    if (result.confidence) {
-        bool inTune = std::abs(result.centDeviation) <= 3.0f;
-        ImVec4 noteColor = inTune ? ImVec4(0.25f, 0.95f, 0.40f, 1.0f) : ImVec4(0.98f, 0.82f, 0.25f, 1.0f);
-
-        ImGui::TextColored(noteColor, "%s", result.noteName.c_str());
-        ImGui::SameLine();
-        ImGui::TextDisabled("(%.1f Hz)", result.frequencyHz);
-    } else {
-        ImGui::TextDisabled("-- (Listening)");
-    }
-
-    // Custom Strobe Needle Gauge
-    {
-        const ImVec2 pos = ImGui::GetCursorScreenPos();
-        const float gaugeW = 190.0f;
-        const float gaugeH = 18.0f;
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-
-        // Background groove
-        dl->AddRectFilled(pos, ImVec2(pos.x + gaugeW, pos.y + gaugeH), IM_COL32(24, 26, 32, 255), 4.0f);
-        dl->AddRect(pos, ImVec2(pos.x + gaugeW, pos.y + gaugeH), IM_COL32(50, 54, 66, 255), 4.0f);
-
-        // Center zero line (green)
-        const float midX = pos.x + (gaugeW * 0.5f);
-        dl->AddLine(ImVec2(midX, pos.y + 2), ImVec2(midX, pos.y + gaugeH - 2), IM_COL32(40, 200, 80, 220), 2.0f);
-
-        // Sub-ticks at -25 and +25 cents
-        dl->AddLine(ImVec2(pos.x + gaugeW * 0.25f, pos.y + 5), ImVec2(pos.x + gaugeW * 0.25f, pos.y + gaugeH - 5), IM_COL32(70, 75, 90, 200), 1.0f);
-        dl->AddLine(ImVec2(pos.x + gaugeW * 0.75f, pos.y + 5), ImVec2(pos.x + gaugeW * 0.75f, pos.y + gaugeH - 5), IM_COL32(70, 75, 90, 200), 1.0f);
-
+        // ----------------------------------------------------
+        // Column 1: Strobe Tuner
+        // ----------------------------------------------------
+        ImGui::TableNextColumn();
+        ImGui::TextColored(ImVec4(0.80f, 0.82f, 0.88f, 1.0f), "TUNER");
+        auto result = m_tuner.currentResult();
         if (result.confidence) {
             bool inTune = std::abs(result.centDeviation) <= 3.0f;
-            float norm = (result.centDeviation + 50.0f) / 100.0f;
-            norm = std::clamp(norm, 0.0f, 1.0f);
-            float needleX = pos.x + (norm * gaugeW);
-
-            ImU32 needleColor = inTune ? IM_COL32(40, 240, 80, 255) : IM_COL32(250, 180, 30, 255);
-            dl->AddRectFilled(ImVec2(needleX - 2.0f, pos.y + 1), ImVec2(needleX + 2.0f, pos.y + gaugeH - 1), needleColor, 2.0f);
+            ImVec4 noteColor = inTune ? ImVec4(0.25f, 0.95f, 0.40f, 1.0f) : ImVec4(0.98f, 0.82f, 0.25f, 1.0f);
+            ImGui::TextColored(noteColor, "%s", result.noteName.c_str());
+            ImGui::SameLine();
+            ImGui::TextDisabled("(%.1f Hz)", result.frequencyHz);
         } else {
-            // Idle indicator
-            dl->AddCircleFilled(ImVec2(midX, pos.y + gaugeH * 0.5f), 3.0f, IM_COL32(90, 95, 110, 180));
+            ImGui::TextDisabled("-- (Listening)");
         }
-        ImGui::Dummy(ImVec2(gaugeW, gaugeH));
-    }
-    ImGui::EndGroup();
 
-    // ==========================================
-    // 2. Metronome Section (Custom Vector LEDs)
-    // ==========================================
-    ImGui::SameLine(250);
-    ImGui::BeginGroup();
-    ImGui::TextColored(ImVec4(0.80f, 0.82f, 0.88f, 1.0f), "METRONOME");
+        // Strobe Needle Gauge
+        {
+            const ImVec2 pos = ImGui::GetCursorScreenPos();
+            const float gaugeW = std::clamp(ImGui::GetContentRegionAvail().x - 10.0f, 140.0f, 220.0f);
+            const float gaugeH = 18.0f;
+            ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    bool metroPlaying = m_metronome.isPlaying();
-    if (ImGui::Button(metroPlaying ? " STOP " : " PLAY ")) {
-        m_metronome.setPlaying(!metroPlaying);
-    }
-    ImGui::SameLine();
+            dl->AddRectFilled(pos, ImVec2(pos.x + gaugeW, pos.y + gaugeH), IM_COL32(24, 26, 32, 255), 4.0f);
+            dl->AddRect(pos, ImVec2(pos.x + gaugeW, pos.y + gaugeH), IM_COL32(50, 54, 66, 255), 4.0f);
 
-    float bpm = m_metronome.bpm();
-    ImGui::SetNextItemWidth(90);
-    if (ImGui::DragFloat("##BPM", &bpm, 1.0f, 40.0f, 260.0f, "%.0f BPM")) {
-        m_metronome.setBpm(bpm);
-    }
-    ImGui::SameLine();
+            const float midX = pos.x + (gaugeW * 0.5f);
+            dl->AddLine(ImVec2(midX, pos.y + 2), ImVec2(midX, pos.y + gaugeH - 2), IM_COL32(40, 200, 80, 220), 2.0f);
+            dl->AddLine(ImVec2(pos.x + gaugeW * 0.25f, pos.y + 5), ImVec2(pos.x + gaugeW * 0.25f, pos.y + gaugeH - 5), IM_COL32(70, 75, 90, 200), 1.0f);
+            dl->AddLine(ImVec2(pos.x + gaugeW * 0.75f, pos.y + 5), ImVec2(pos.x + gaugeW * 0.75f, pos.y + gaugeH - 5), IM_COL32(70, 75, 90, 200), 1.0f);
 
-    // Custom Vector Beat LEDs (Circles drawn via ImDrawList)
-    {
-        const int currentBeat = m_metronome.currentBeat();
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        ImVec2 curPos = ImGui::GetCursorScreenPos();
-        const float dotRadius = 5.5f;
-        const float dotSpacing = 16.0f;
-
-        for (int b = 0; b < 4; ++b) {
-            float cx = curPos.x + 8.0f + (b * dotSpacing);
-            float cy = curPos.y + 12.0f;
-            bool active = metroPlaying && (b == currentBeat);
-
-            if (active) {
-                // Glow outer halo
-                ImU32 haloColor = (b == 0) ? IM_COL32(255, 60, 60, 80) : IM_COL32(250, 160, 30, 80);
-                dl->AddCircleFilled(ImVec2(cx, cy), dotRadius + 3.0f, haloColor);
-
-                // Bright center
-                ImU32 ledColor = (b == 0) ? IM_COL32(255, 70, 70, 255) : IM_COL32(255, 180, 40, 255);
-                dl->AddCircleFilled(ImVec2(cx, cy), dotRadius, ledColor);
+            if (result.confidence) {
+                bool inTune = std::abs(result.centDeviation) <= 3.0f;
+                float norm = (result.centDeviation + 50.0f) / 100.0f;
+                norm = std::clamp(norm, 0.0f, 1.0f);
+                float needleX = pos.x + (norm * gaugeW);
+                ImU32 needleColor = inTune ? IM_COL32(40, 240, 80, 255) : IM_COL32(250, 180, 30, 255);
+                dl->AddRectFilled(ImVec2(needleX - 2.0f, pos.y + 1), ImVec2(needleX + 2.0f, pos.y + gaugeH - 1), needleColor, 2.0f);
             } else {
-                // Inactive bezel
-                dl->AddCircleFilled(ImVec2(cx, cy), dotRadius, IM_COL32(36, 40, 48, 255));
-                dl->AddCircle(ImVec2(cx, cy), dotRadius, IM_COL32(55, 60, 72, 255), 0, 1.0f);
+                dl->AddCircleFilled(ImVec2(midX, pos.y + gaugeH * 0.5f), 3.0f, IM_COL32(90, 95, 110, 180));
             }
+            ImGui::Dummy(ImVec2(gaugeW, gaugeH));
         }
-        ImGui::Dummy(ImVec2(4 * dotSpacing + 10.0f, 24.0f));
-    }
-    ImGui::EndGroup();
 
-    // ==========================================
-    // 3. Noise Gate Section
-    // ==========================================
-    ImGui::SameLine(510);
-    ImGui::BeginGroup();
-    ImGui::TextColored(ImVec4(0.80f, 0.82f, 0.88f, 1.0f), "NOISE GATE");
-    auto& gate = m_graph.inputNoiseGate();
-    bool gateOn = gate.isEnabled();
-    if (ImGui::Checkbox("Active##Gate", &gateOn)) {
-        gate.setEnabled(gateOn);
-    }
-    ImGui::SameLine();
-    float thresh = gate.thresholdDb();
-    ImGui::SetNextItemWidth(90);
-    if (ImGui::SliderFloat("##GateThresh", &thresh, -80.0f, -20.0f, "%.0f dB")) {
-        gate.setThresholdDb(thresh);
-    }
-    ImGui::EndGroup();
+        // ----------------------------------------------------
+        // Column 2: Metronome
+        // ----------------------------------------------------
+        ImGui::TableNextColumn();
+        ImGui::TextColored(ImVec4(0.80f, 0.82f, 0.88f, 1.0f), "METRONOME");
+        bool metroPlaying = m_metronome.isPlaying();
+        if (ImGui::Button(metroPlaying ? " STOP " : " PLAY ")) {
+            m_metronome.setPlaying(!metroPlaying);
+        }
+        ImGui::SameLine(0, 8);
 
-    // ==========================================
-    // 4. Master Output Section
-    // ==========================================
-    ImGui::SameLine(ImGui::GetWindowWidth() - 240);
-    ImGui::BeginGroup();
-    ImGui::TextColored(ImVec4(0.80f, 0.82f, 0.88f, 1.0f), "MASTER OUTPUT");
-    float masterVol = m_graph.masterVolumeDb();
-    ImGui::SetNextItemWidth(110);
-    if (ImGui::SliderFloat("##MasterVol", &masterVol, -36.0f, +6.0f, "%.1f dB")) {
-        m_graph.setMasterVolumeDb(masterVol);
+        float bpm = m_metronome.bpm();
+        ImGui::SetNextItemWidth(75);
+        if (ImGui::DragFloat("##BPM", &bpm, 1.0f, 40.0f, 260.0f, "%.0f BPM")) {
+            m_metronome.setBpm(bpm);
+        }
+        ImGui::SameLine(0, 8);
+
+        // Vector Beat LEDs
+        {
+            const int currentBeat = m_metronome.currentBeat();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            ImVec2 curPos = ImGui::GetCursorScreenPos();
+            const float dotRadius = 5.0f;
+            const float dotSpacing = 14.0f;
+
+            for (int b = 0; b < 4; ++b) {
+                float cx = curPos.x + 6.0f + (b * dotSpacing);
+                float cy = curPos.y + 12.0f;
+                bool active = metroPlaying && (b == currentBeat);
+
+                if (active) {
+                    ImU32 haloColor = (b == 0) ? IM_COL32(255, 60, 60, 80) : IM_COL32(250, 160, 30, 80);
+                    dl->AddCircleFilled(ImVec2(cx, cy), dotRadius + 3.0f, haloColor);
+                    ImU32 ledColor = (b == 0) ? IM_COL32(255, 70, 70, 255) : IM_COL32(255, 180, 40, 255);
+                    dl->AddCircleFilled(ImVec2(cx, cy), dotRadius, ledColor);
+                } else {
+                    dl->AddCircleFilled(ImVec2(cx, cy), dotRadius, IM_COL32(36, 40, 48, 255));
+                    dl->AddCircle(ImVec2(cx, cy), dotRadius, IM_COL32(55, 60, 72, 255), 0, 1.0f);
+                }
+            }
+            ImGui::Dummy(ImVec2(4 * dotSpacing + 8.0f, 22.0f));
+        }
+
+        // ----------------------------------------------------
+        // Column 3: Noise Gate
+        // ----------------------------------------------------
+        ImGui::TableNextColumn();
+        ImGui::TextColored(ImVec4(0.80f, 0.82f, 0.88f, 1.0f), "NOISE GATE");
+        auto& gate = m_graph.inputNoiseGate();
+        bool gateOn = gate.isEnabled();
+        if (ImGui::Checkbox("Active##Gate", &gateOn)) {
+            gate.setEnabled(gateOn);
+        }
+        ImGui::SameLine(0, 8);
+        float thresh = gate.thresholdDb();
+        ImGui::SetNextItemWidth(80);
+        if (ImGui::SliderFloat("##GateThresh", &thresh, -80.0f, -20.0f, "%.0f dB")) {
+            gate.setThresholdDb(thresh);
+        }
+
+        // ----------------------------------------------------
+        // Column 4: Master Output
+        // ----------------------------------------------------
+        ImGui::TableNextColumn();
+        ImGui::TextColored(ImVec4(0.80f, 0.82f, 0.88f, 1.0f), "MASTER OUTPUT");
+        float masterVol = m_graph.masterVolumeDb();
+        ImGui::SetNextItemWidth(100);
+        if (ImGui::SliderFloat("##MasterVol", &masterVol, -36.0f, +6.0f, "%.1f dB")) {
+            m_graph.setMasterVolumeDb(masterVol);
+        }
+        ImGui::SameLine(0, 6);
+        renderMeter("OutMeterL", m_graph.outputMeter().peakLeft(), 10, 30);
+        ImGui::SameLine(0, 3);
+        renderMeter("OutMeterR", m_graph.outputMeter().peakRight(), 10, 30);
+
+        ImGui::EndTable();
     }
-    ImGui::SameLine();
-    renderMeter("OutMeterL", m_graph.outputMeter().peakLeft(), 12, 34);
-    ImGui::SameLine();
-    renderMeter("OutMeterR", m_graph.outputMeter().peakRight(), 12, 34);
-    ImGui::EndGroup();
 
     ImGui::EndChild();
     ImGui::PopStyleColor();
@@ -253,7 +293,7 @@ void RackView::renderPracticeRibbon() {
 
 void RackView::renderSceneBar() {
     ImGui::TextColored(ImVec4(0.75f, 0.78f, 0.85f, 1.0f), "SCENE PRESETS:");
-    ImGui::SameLine();
+    ImGui::SameLine(0, 12);
 
     for (size_t s = 0; s < m_scenes.numScenes(); ++s) {
         const auto* sc = m_scenes.getScene(s);
@@ -272,7 +312,7 @@ void RackView::renderSceneBar() {
         if (isActive) {
             ImGui::PopStyleColor(2);
         }
-        ImGui::SameLine();
+        ImGui::SameLine(0, 8);
     }
 
     if (ImGui::Button("[Save Scene]")) {
@@ -285,32 +325,13 @@ void RackView::renderSignalRack() {
 
     ImGui::BeginChild("RackScrollArea", ImVec2(0, -42), true, ImGuiWindowFlags_HorizontalScrollbar);
 
-    // ==========================================
-    // Master Input Node Card
-    // ==========================================
-    ImGui::BeginGroup();
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.16f, 0.18f, 0.22f, 1.0f));
-    ImGui::BeginChild("InputGainNode", ImVec2(100, 155), true);
-    ImGui::TextColored(ImVec4(0.35f, 0.80f, 1.0f, 1.0f), "[ INPUT ]");
-    float inGain = m_graph.inputGainDb();
-    if (ImGui::VSliderFloat("##InGain", ImVec2(24, 78), &inGain, -24.0f, +24.0f, "")) {
-        m_graph.setInputGainDb(inGain);
-    }
-    ImGui::SameLine();
-    renderMeter("InL", m_graph.inputMeter().peakLeft(), 10, 78);
-    ImGui::SameLine();
-    renderMeter("InR", m_graph.inputMeter().peakRight(), 10, 78);
-    ImGui::Text("%.0fdB", inGain);
-    ImGui::EndChild();
-    ImGui::PopStyleColor();
-    ImGui::EndGroup();
+    // 1. Input Node Card with Channel Selector
+    renderInputCard();
 
-    // Signal connection line & arrow
-    ImGui::SameLine();
-    ImGui::TextDisabled("-->");
-    ImGui::SameLine();
+    // 2. Hardware Signal Cable & Arrow
+    renderSignalCable(42.0f);
 
-    // Render nodes in the graph
+    // 3. Render Serial Nodes in Graph
     const size_t numNodes = m_graph.numNodes();
     for (size_t i = 0; i < numNodes; ++i) {
         auto* node = m_graph.getNode(i);
@@ -324,27 +345,94 @@ void RackView::renderSignalRack() {
             renderParallelBlock(block, static_cast<int>(i));
         }
 
-        ImGui::SameLine();
-        ImGui::TextDisabled("-->");
-        ImGui::SameLine();
+        renderSignalCable(42.0f);
     }
 
-    // ==========================================
-    // Master Output Node Card
-    // ==========================================
+    // 4. Output Node Card
+    {
+        ImGui::BeginGroup();
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.16f, 0.18f, 0.22f, 1.0f));
+        ImGui::BeginChild("OutputDestNode", ImVec2(100, 155), true);
+        ImGui::TextColored(ImVec4(0.35f, 0.80f, 1.0f, 1.0f), "[ OUTPUT ]");
+        ImGui::TextDisabled("To ASIO");
+        renderMeter("FinalL", m_graph.outputMeter().peakLeft(), 14, 75);
+        ImGui::SameLine(0, 4);
+        renderMeter("FinalR", m_graph.outputMeter().peakRight(), 14, 75);
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+        ImGui::EndGroup();
+    }
+
+    ImGui::EndChild();
+}
+
+void RackView::renderSignalCable(float width) {
+    ImGui::SameLine(0, 0);
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
+    const float cardH = 155.0f;
+    const float centerY = pos.y + (cardH * 0.5f);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    // Sleek patch cable body
+    dl->AddLine(ImVec2(pos.x + 2.0f, centerY), ImVec2(pos.x + width - 8.0f, centerY), IM_COL32(32, 36, 46, 255), 5.0f);
+    dl->AddLine(ImVec2(pos.x + 2.0f, centerY), ImVec2(pos.x + width - 8.0f, centerY), IM_COL32(85, 105, 140, 255), 2.5f);
+
+    // Glowing Arrowhead at right tip
+    const float arrowSize = 6.0f;
+    const float tipX = pos.x + width - 2.0f;
+    dl->AddTriangleFilled(
+        ImVec2(tipX, centerY),
+        ImVec2(tipX - arrowSize - 2.0f, centerY - arrowSize),
+        ImVec2(tipX - arrowSize - 2.0f, centerY + arrowSize),
+        IM_COL32(110, 140, 195, 255)
+    );
+
+    ImGui::Dummy(ImVec2(width, cardH));
+    ImGui::SameLine(0, 0);
+}
+
+void RackView::renderInputCard() {
     ImGui::BeginGroup();
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.16f, 0.18f, 0.22f, 1.0f));
-    ImGui::BeginChild("OutputDestNode", ImVec2(100, 155), true);
-    ImGui::TextColored(ImVec4(0.35f, 0.80f, 1.0f, 1.0f), "[ OUTPUT ]");
-    ImGui::TextDisabled("To ASIO");
-    renderMeter("FinalL", m_graph.outputMeter().peakLeft(), 14, 75);
-    ImGui::SameLine();
-    renderMeter("FinalR", m_graph.outputMeter().peakRight(), 14, 75);
+    ImGui::BeginChild("InputGainNode", ImVec2(180, 155), true);
+    ImGui::TextColored(ImVec4(0.35f, 0.80f, 1.0f, 1.0f), "[ INPUT ]");
+
+    // Input Channel Routing Selector (Mono/Stereo)
+    auto inputConfig = m_graph.inputRouting();
+    const char* routingLabels[] = {
+        "Mono: In 1 (L+R)",
+        "Mono: In 2 (L+R)",
+        "Stereo: In 1+2"
+    };
+
+    int currentModeIdx = 0;
+    if (inputConfig.mode == audio::InputRoutingMode::MonoLeft) currentModeIdx = 0;
+    else if (inputConfig.mode == audio::InputRoutingMode::MonoRight) currentModeIdx = 1;
+    else if (inputConfig.mode == audio::InputRoutingMode::Stereo) currentModeIdx = 2;
+
+    ImGui::SetNextItemWidth(155);
+    if (ImGui::Combo("##InRoute", &currentModeIdx, routingLabels, 3)) {
+        if (currentModeIdx == 0) inputConfig.mode = audio::InputRoutingMode::MonoLeft;
+        else if (currentModeIdx == 1) inputConfig.mode = audio::InputRoutingMode::MonoRight;
+        else if (currentModeIdx == 2) inputConfig.mode = audio::InputRoutingMode::Stereo;
+        m_graph.setInputRouting(inputConfig);
+    }
+
+    float inGain = m_graph.inputGainDb();
+    if (ImGui::VSliderFloat("##InGain", ImVec2(24, 60), &inGain, -24.0f, +24.0f, "")) {
+        m_graph.setInputGainDb(inGain);
+    }
+    ImGui::SameLine(0, 8);
+    renderMeter("InL", m_graph.inputMeter().peakLeft(), 10, 60);
+    ImGui::SameLine(0, 4);
+    renderMeter("InR", m_graph.inputMeter().peakRight(), 10, 60);
+
+    ImGui::SameLine(0, 10);
+    ImGui::Text("%.0fdB", inGain);
+
     ImGui::EndChild();
     ImGui::PopStyleColor();
     ImGui::EndGroup();
-
-    ImGui::EndChild();
 }
 
 void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int branchIndex) {
@@ -358,14 +446,13 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bran
     char childId[64];
     std::snprintf(childId, sizeof(childId), "SlotCard_%d_%d", slotIndex, branchIndex);
 
-    // Card dimensions: 215px width ensures no title truncation!
     ImGui::BeginChild(childId, ImVec2(215, 155), true);
 
-    // Title
+    // Title (cleanly formatted, never clipped)
     ImGui::TextColored(bypassed ? ImVec4(0.55f, 0.58f, 0.65f, 1.0f) : ImVec4(0.98f, 0.98f, 1.0f, 1.0f),
                        "%s", slot->name().c_str());
 
-    // Hardware-style Bypass / Active Button with LED
+    // Hardware Stompbox Active / Bypass Button
     {
         bool active = !bypassed;
         if (active) {
@@ -382,7 +469,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bran
         ImGui::PopStyleColor();
     }
 
-    // Dry / Wet mix slider
+    // Dry / Wet Slider
     float mix = slot->dryWet() * 100.0f;
     char mixLabel[32];
     std::snprintf(mixLabel, sizeof(mixLabel), "##Mix_%d_%d", slotIndex, branchIndex);
@@ -392,10 +479,10 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bran
     if (ImGui::SliderFloat(mixLabel, &mix, 0.0f, 100.0f, "%.0f%%")) {
         slot->setDryWet(mix / 100.0f);
     }
-    ImGui::SameLine();
+    ImGui::SameLine(0, 6);
     renderMeter("SlotMtr", slot->meter().peakLeft(), 8, 22);
 
-    // Output trim slider
+    // Output Trim Slider
     float outTrim = slot->outputGainDb();
     char trimLabel[32];
     std::snprintf(trimLabel, sizeof(trimLabel), "##Trim_%d_%d", slotIndex, branchIndex);
@@ -444,9 +531,9 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
 
         ImGui::Separator();
         ImGui::Text("[%s]", branch->name().c_str());
-        ImGui::SameLine();
+        ImGui::SameLine(0, 10);
 
-        // Mute / Solo
+        // Mute / Solo Buttons
         bool muted = branch->isMuted();
         char muteLabel[32];
         std::snprintf(muteLabel, sizeof(muteLabel), "M##%d_%zu", blockIndex, b);
@@ -455,7 +542,7 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
             branch->setMuted(!muted);
         }
         if (muted) ImGui::PopStyleColor();
-        ImGui::SameLine();
+        ImGui::SameLine(0, 6);
 
         bool solo = branch->isSolo();
         char soloLabel[32];
@@ -465,9 +552,9 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
             branch->setSolo(!solo);
         }
         if (solo) ImGui::PopStyleColor();
-        ImGui::SameLine();
+        ImGui::SameLine(0, 10);
 
-        // Branch Pan & Gain
+        // Branch Pan & Gain Sliders
         float pan = branch->pan();
         char panLabel[32];
         std::snprintf(panLabel, sizeof(panLabel), "##Pan_%d_%zu", blockIndex, b);
@@ -475,7 +562,7 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
         if (ImGui::SliderFloat(panLabel, &pan, -1.0f, +1.0f, "Pan: %.2f")) {
             branch->setPan(pan);
         }
-        ImGui::SameLine();
+        ImGui::SameLine(0, 8);
 
         float gain = branch->gainDb();
         char gainLabel[32];
@@ -495,7 +582,7 @@ void RackView::renderBottomBar() {
     ImGui::Separator();
     if (m_midi.isLearning()) {
         ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "[*] MIDI LEARN ACTIVE: Move any knob, slider, or press a footswitch to bind...");
-        ImGui::SameLine();
+        ImGui::SameLine(0, 12);
         if (ImGui::Button("Cancel")) {
             m_midi.cancelLearning();
         }
@@ -508,26 +595,105 @@ void RackView::renderMeter(const char* label, float level, float width, float he
     ImVec2 pos = ImGui::GetCursorScreenPos();
     ImDrawList* drawList = ImGui::GetWindowDrawList();
 
-    // Background groove
     drawList->AddRectFilled(pos, ImVec2(pos.x + width, pos.y + height), IM_COL32(26, 28, 34, 255), 2.0f);
 
-    // Meter Fill (logarithmic scaled)
     float db = audio::DspUtils::gainToDb(level);
-    float norm = (db + 60.0f) / 60.0f; // -60dB to 0dB range
+    float norm = (db + 60.0f) / 60.0f;
     norm = std::clamp(norm, 0.0f, 1.0f);
 
     float fillHeight = height * norm;
-    ImU32 meterColor = (db > -0.5f) ? IM_COL32(245, 50, 50, 255) : // Red (clipping)
-                       (db > -6.0f) ? IM_COL32(245, 175, 35, 255) : // Amber
-                                      IM_COL32(40, 210, 80, 255);   // Green
+    ImU32 meterColor = (db > -0.5f) ? IM_COL32(245, 50, 50, 255) :
+                       (db > -6.0f) ? IM_COL32(245, 175, 35, 255) :
+                                      IM_COL32(40, 210, 80, 255);
 
     drawList->AddRectFilled(ImVec2(pos.x, pos.y + height - fillHeight),
                             ImVec2(pos.x + width, pos.y + height),
                             meterColor, 2.0f);
 
-    // Border
     drawList->AddRect(pos, ImVec2(pos.x + width, pos.y + height), IM_COL32(50, 55, 65, 255), 2.0f);
     ImGui::Dummy(ImVec2(width, height));
+}
+
+void RackView::renderPluginBrowserModal() {
+    ImGui::SetNextWindowSize(ImVec2(680, 500), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Plugin Manager & Scanner", &m_showPluginBrowser)) {
+        ImGui::TextColored(ImVec4(0.98f, 0.60f, 0.20f, 1.0f), "Plugin Search Paths");
+        ImGui::Separator();
+
+        // Search Paths List
+        const auto& paths = m_scanner.searchPaths();
+        ImGui::BeginChild("PathsChild", ImVec2(0, 110), true);
+        for (size_t i = 0; i < paths.size(); ++i) {
+            ImGui::TextDisabled("[%zu]", i + 1);
+            ImGui::SameLine(0, 8);
+            ImGui::Text("%s", paths[i].c_str());
+            ImGui::SameLine(ImGui::GetWindowWidth() - 70);
+            char rmLabel[32];
+            std::snprintf(rmLabel, sizeof(rmLabel), "Remove##%zu", i);
+            if (ImGui::Button(rmLabel)) {
+                m_scanner.removeCustomSearchPath(i);
+            }
+        }
+        ImGui::EndChild();
+
+        // Add Custom Search Path Input
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 120);
+        ImGui::InputTextWithHint("##NewPath", "e.g. D:\\AudioPlugins", m_newPathBuffer, sizeof(m_newPathBuffer));
+        ImGui::SameLine(0, 8);
+        if (ImGui::Button("[+ Add Path]")) {
+            if (m_newPathBuffer[0] != '\0') {
+                m_scanner.addCustomSearchPath(m_newPathBuffer);
+                m_newPathBuffer[0] = '\0';
+            }
+        }
+
+        ImGui::SameLine(0, 8);
+        if (ImGui::Button("Scan / Refresh")) {
+            m_scanner.scanAll();
+        }
+
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.98f, 0.60f, 0.20f, 1.0f), "Discovered Plugins (%zu available)", m_scanner.numPlugins());
+        ImGui::Separator();
+
+        // Plugins List
+        ImGui::BeginChild("PluginsListChild", ImVec2(0, 0), true);
+        const auto& plugins = m_scanner.scannedPlugins();
+        for (size_t p = 0; p < plugins.size(); ++p) {
+            const auto& desc = plugins[p];
+            ImGui::PushID(static_cast<int>(p));
+
+            ImVec4 badgeCol = (desc.type == plugins::PluginType::VST3) ? ImVec4(0.3f, 0.7f, 1.0f, 1.0f) :
+                              (desc.type == plugins::PluginType::CLAP) ? ImVec4(0.9f, 0.5f, 0.9f, 1.0f) :
+                                                                         ImVec4(0.98f, 0.60f, 0.20f, 1.0f);
+            ImGui::TextColored(badgeCol, "[%s]", desc.typeString().c_str());
+            ImGui::SameLine(0, 8);
+            ImGui::Text("%s", desc.name.c_str());
+            ImGui::SameLine(0, 8);
+            ImGui::TextDisabled("(%s)", desc.vendor.c_str());
+
+            ImGui::SameLine(ImGui::GetWindowWidth() - 110);
+            if (ImGui::Button("+ Insert")) {
+                if (desc.type == plugins::PluginType::CLAP) {
+                    auto clapInst = plugins::ClapPluginInstance::loadFromFile(desc.path);
+                    if (clapInst) {
+                        m_graph.addSerialNode(std::make_unique<audio::PluginSlot>(std::move(clapInst)));
+                    }
+                } else if (desc.path == "builtin://drive") {
+                    m_graph.addSerialNode(std::make_unique<audio::PluginSlot>(std::make_unique<plugins::OverdriveEffect>()));
+                } else if (desc.path == "builtin://amp") {
+                    m_graph.addSerialNode(std::make_unique<audio::PluginSlot>(std::make_unique<plugins::TubeAmpEffect>()));
+                } else if (desc.path == "builtin://delay") {
+                    m_graph.addSerialNode(std::make_unique<audio::PluginSlot>(std::make_unique<plugins::StereoDelayEffect>()));
+                }
+            }
+
+            ImGui::PopID();
+            ImGui::Separator();
+        }
+        ImGui::EndChild();
+    }
+    ImGui::End();
 }
 
 } // namespace praccy::ui

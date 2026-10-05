@@ -334,11 +334,42 @@ void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& ha
     const uint32_t numSamples = hardwareIn.numSamples();
     if (numSamples == 0) return;
 
-    // Track input levels
-    m_inputMeter.process(hardwareIn.channel(0), hardwareIn.numChannels() > 1 ? hardwareIn.channel(1) : nullptr, numSamples);
-
     auto mainView = m_mainProcessingBuffer.view(numSamples);
-    mainView.copyFrom(hardwareIn);
+    const uint32_t inCh = hardwareIn.numChannels();
+    float* mainL = mainView.channel(0);
+    float* mainR = (mainView.numChannels() > 1) ? mainView.channel(1) : mainL;
+
+    if (m_inputConfig.mode == InputRoutingMode::MonoLeft && inCh > 0) {
+        const float* src = hardwareIn.channel(0);
+        std::memcpy(mainL, src, numSamples * sizeof(float));
+        std::memcpy(mainR, src, numSamples * sizeof(float));
+    } else if (m_inputConfig.mode == InputRoutingMode::MonoRight && inCh > 1) {
+        const float* src = hardwareIn.channel(1);
+        std::memcpy(mainL, src, numSamples * sizeof(float));
+        std::memcpy(mainR, src, numSamples * sizeof(float));
+    } else if (m_inputConfig.mode == InputRoutingMode::MonoChannel && inCh > 0) {
+        const uint32_t ch = std::min(static_cast<uint32_t>(m_inputConfig.channelLeft), inCh - 1);
+        const float* src = hardwareIn.channel(ch);
+        std::memcpy(mainL, src, numSamples * sizeof(float));
+        std::memcpy(mainR, src, numSamples * sizeof(float));
+    } else if (m_inputConfig.mode == InputRoutingMode::Stereo) {
+        const float* srcL = inCh > 0 ? hardwareIn.channel(0) : nullptr;
+        const float* srcR = inCh > 1 ? hardwareIn.channel(1) : srcL;
+        if (srcL) std::memcpy(mainL, srcL, numSamples * sizeof(float));
+        else std::memset(mainL, 0, numSamples * sizeof(float));
+        if (srcR) std::memcpy(mainR, srcR, numSamples * sizeof(float));
+        else std::memset(mainR, 0, numSamples * sizeof(float));
+    } else if (m_inputConfig.mode == InputRoutingMode::StereoCustom && inCh > 0) {
+        const uint32_t chL = std::min(static_cast<uint32_t>(m_inputConfig.channelLeft), inCh - 1);
+        const uint32_t chR = std::min(static_cast<uint32_t>(m_inputConfig.channelRight), inCh - 1);
+        std::memcpy(mainL, hardwareIn.channel(chL), numSamples * sizeof(float));
+        std::memcpy(mainR, hardwareIn.channel(chR), numSamples * sizeof(float));
+    } else {
+        mainView.copyFrom(hardwareIn);
+    }
+
+    // Track input levels
+    m_inputMeter.process(mainL, mainR, numSamples);
 
     // Apply Master Input Gain
     const float inGain = DspUtils::dbToGain(m_inputGainDb.load(std::memory_order_relaxed));
