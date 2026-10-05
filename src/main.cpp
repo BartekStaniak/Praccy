@@ -39,11 +39,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     // Enable High-DPI awareness
     SetProcessDPIAware();
 
+    // Load application icon from embedded resource
+    HICON hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(101));
+    if (!hIcon) {
+        hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(1));
+    }
+
     // Register Win32 window class
     WNDCLASSEXW wc = {
         sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L,
-        GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr,
-        L"PraccyHostClass", nullptr
+        hInstance, hIcon, LoadCursor(nullptr, IDC_ARROW), nullptr, nullptr,
+        L"PraccyHostClass", hIcon
     };
     RegisterClassExW(&wc);
 
@@ -54,6 +60,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         100, 100, 1280, 720,
         nullptr, nullptr, wc.hInstance, nullptr
     );
+
+    if (hIcon) {
+        SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(hIcon));
+        SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hIcon));
+    }
 
     if (!CreateDeviceD3D(hwnd)) {
         CleanupDeviceD3D();

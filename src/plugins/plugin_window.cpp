@@ -9,11 +9,17 @@ PluginWindowManager& PluginWindowManager::instance() {
 }
 
 PluginWindowManager::PluginWindowManager() {
+    HINSTANCE hInst = GetModuleHandle(nullptr);
+    HICON hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(101));
+    if (!hIcon) hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(1));
+
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = &PluginWindowManager::windowProc;
-    wc.hInstance = GetModuleHandle(nullptr);
+    wc.hInstance = hInst;
+    wc.hIcon = hIcon;
+    wc.hIconSm = hIcon;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     wc.lpszClassName = L"PraccyPluginHostClass";
