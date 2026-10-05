@@ -3,6 +3,7 @@
 #include <iostream>
 #include <algorithm>
 #include <set>
+#include <unordered_set>
 #include <windows.h>
 #include <pluginterfaces/base/ipluginbase.h>
 
@@ -140,8 +141,35 @@ std::string PluginScanner::detectVendor(const std::filesystem::path& path, const
         nameLower.find("ltl ") != std::string::npos ||
         nameLower.find("spl ") != std::string::npos ||
         nameLower.find("unfiltered audio") != std::string::npos ||
-        nameLower.find("shadow hills") != std::string::npos) {
+        nameLower.find("shadow hills") != std::string::npos ||
+        nameLower.find("adptr") != std::string::npos ||
+        nameLower.find("metricab") != std::string::npos ||
+        nameLower.find("acme") != std::string::npos ||
+        nameLower.find("opticom") != std::string::npos ||
+        nameLower.find("ampeg") != std::string::npos ||
+        nameLower.find("brainworx") != std::string::npos ||
+        nameLower.find("bx_") != std::string::npos) {
         return "Plugin Alliance";
+    }
+
+    if (nameLower.find("beam") != std::string::npos ||
+        nameLower.find("lunacy") != std::string::npos) {
+        return "Lunacy Audio";
+    }
+
+    if (nameLower.find("bassroom") != std::string::npos ||
+        nameLower.find("mixroom") != std::string::npos ||
+        nameLower.find("mastering the mix") != std::string::npos) {
+        return "Mastering The Mix";
+    }
+
+    if (nameLower.find("screamer") != std::string::npos ||
+        nameLower.find("ablaze") != std::string::npos) {
+        return "Ablaze Audio";
+    }
+
+    if (nameLower.find("dark cabin") != std::string::npos) {
+        return "Dark Cabin Studios";
     }
 
     if (nameLower.find("toneforge") != std::string::npos ||
@@ -149,26 +177,14 @@ std::string PluginScanner::detectVendor(const std::filesystem::path& path, const
         return "Joey Sturgis Tones";
     }
 
-    // 2. Parent directory inspect (if inside subfolder like "Vendor/plugin.vst3")
-    auto parent = path.parent_path();
-    while (!parent.empty() && parent.has_filename()) {
-        std::string pName = parent.filename().string();
-        if (pName != "VST3" && pName != "CLAP" && pName != "Contents" && pName != "x86_64-win" &&
-            pName.find(".vst3") == std::string::npos && pName.find(".clap") == std::string::npos &&
-            pName != "Common Files" && pName != "VstPlugins") {
-            return pName;
-        }
-        parent = parent.parent_path();
-    }
-
-    // 3. Fallback: query VST3 factory if possible
+    // 2. Query VST3 factory metadata if available
     std::filesystem::path dllPath = path;
     if (std::filesystem::is_directory(path)) {
         auto candidate = path / "Contents" / "x86_64-win" / (path.stem().string() + ".vst3");
         if (std::filesystem::exists(candidate)) dllPath = candidate;
     }
 
-    HMODULE hLib = LoadLibraryExW(dllPath.wstring().c_str(), nullptr, LOAD_LIBRARY_AS_DATAFILE);
+    HMODULE hLib = LoadLibraryExW(dllPath.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
     if (!hLib) {
         hLib = LoadLibraryW(dllPath.wstring().c_str());
     }
@@ -179,12 +195,34 @@ std::string PluginScanner::detectVendor(const std::filesystem::path& path, const
             if (factory) {
                 Steinberg::PFactoryInfo fInfo{};
                 if (factory->getFactoryInfo(&fInfo) == Steinberg::kResultOk && fInfo.vendor[0] != '\0') {
+                    std::string fVendor = fInfo.vendor;
                     FreeLibrary(hLib);
-                    return fInfo.vendor;
+                    if (!fVendor.empty()) return fVendor;
                 }
             }
         }
         FreeLibrary(hLib);
+    }
+
+    // 3. Parent directory inspection (filtering out system folders)
+    static const std::unordered_set<std::string> s_systemDirs = {
+        "vst3", "clap", "contents", "x86_64-win", "common files", "vstplugins",
+        "program files", "program files (x86)", "steinberg", "plugins", "vst",
+        "audio", "windows", "users", "documents", "appdata", "roaming", "local"
+    };
+
+    auto parent = path.parent_path();
+    while (!parent.empty() && parent.has_filename()) {
+        std::string pName = parent.filename().string();
+        std::string pNameLower = pName;
+        std::transform(pNameLower.begin(), pNameLower.end(), pNameLower.begin(), [](unsigned char c) { return std::tolower(c); });
+
+        if (s_systemDirs.find(pNameLower) == s_systemDirs.end() &&
+            pNameLower.find(".vst3") == std::string::npos &&
+            pNameLower.find(".clap") == std::string::npos) {
+            return pName;
+        }
+        parent = parent.parent_path();
     }
 
     return "Other";

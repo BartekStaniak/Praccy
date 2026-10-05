@@ -39,6 +39,8 @@ private:
     void renderMeter(const char* label, float level, float width, float height);
     void renderPluginBrowserModal();
     void renderDspTweakModal();
+    bool renderRotaryKnob(const char* label, float* value, float minVal, float maxVal, float radius, const char* format = "%.1f");
+    void renderMiniHardwareSlot(audio::PluginSlot* slot, int blockIndex, size_t branchIndex, size_t slotIndex);
 
     audio::GraphEngine& m_graph;
     audio::AsioManager& m_asio;
@@ -52,6 +54,7 @@ private:
     int m_selectedDriverIdx{0};
 
     bool m_showPluginBrowser{false};
+    bool m_focusPluginBrowser{false};
     char m_newPathBuffer[260]{0};
 
     char m_pluginSearchQuery[128]{0};
