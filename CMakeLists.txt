@@ -30,6 +30,7 @@ set(PRACCY_SOURCES
     src/state/app_config.cpp
     src/ui/rack_view.cpp
     src/ui/thumbnail_manager.cpp
+    src/ui/update_checker.cpp
     resources/praccy.rc
 
     # Dear ImGui
@@ -73,6 +74,7 @@ target_link_libraries(Praccy PRIVATE
     uuid
     gdi32
     gdiplus
+    wininet
     user32
     kernel32
 )

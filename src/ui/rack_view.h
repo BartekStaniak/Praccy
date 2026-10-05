@@ -41,6 +41,7 @@ private:
     void renderDspTweakModal();
     bool renderRotaryKnob(const char* label, float* value, float minVal, float maxVal, float radius, const char* format = "%.1f");
     void renderMiniHardwareSlot(audio::PluginSlot* slot, int blockIndex, size_t branchIndex, size_t slotIndex);
+    void renderUpdateModal();
 
     audio::GraphEngine& m_graph;
     audio::AsioManager& m_asio;
@@ -73,6 +74,8 @@ private:
 
     int m_expandedSlotIndex{-1};
     float m_expandPulseTimer{0.0f};
+
+    bool m_showUpdateModal{false};
 };
 
 } // namespace praccy::ui

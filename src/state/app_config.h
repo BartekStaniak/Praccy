@@ -12,6 +12,7 @@ struct AppConfig {
     float inputGainDb{0.0f};
     float masterVolumeDb{0.0f};
     float metronomeBpm{120.0f};
+    bool checkBetaUpdates{false};
     std::vector<std::string> customPluginPaths;
 
     static std::string getConfigDir();

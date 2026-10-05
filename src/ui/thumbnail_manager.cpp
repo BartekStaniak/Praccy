@@ -267,10 +267,9 @@ void ThumbnailManager::requestCapture(const std::string& pluginName, HWND hwnd, 
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!hwnd || !IsWindow(hwnd)) return;
 
-    // Avoid redundant duplicates for same window
-    for (auto& pending : m_pendingCaptures) {
+    // If already scheduled for this window, let the existing countdown proceed
+    for (const auto& pending : m_pendingCaptures) {
         if (pending.hwnd == hwnd) {
-            pending.framesRemaining = delayFrames;
             return;
         }
     }
@@ -302,24 +301,14 @@ void ThumbnailManager::update() {
 bool ThumbnailManager::captureWindow(const std::string& pluginName, HWND hwnd) {
     if (!m_initialized || !m_device || !hwnd || !IsWindow(hwnd)) return false;
 
-    // Prefer inner child window if available (VST3/CLAP GUI container)
-    HWND targetHwnd = hwnd;
-    HWND childHwnd = GetWindow(hwnd, GW_CHILD);
-    if (childHwnd && IsWindow(childHwnd)) {
-        RECT childRc{};
-        GetClientRect(childHwnd, &childRc);
-        if ((childRc.right - childRc.left) > 40 && (childRc.bottom - childRc.top) > 40) {
-            targetHwnd = childHwnd;
-        }
-    }
-
+    // Use client area of the hosted window (contains exact plugin GUI)
     RECT rc{};
-    GetClientRect(targetHwnd, &rc);
+    GetClientRect(hwnd, &rc);
     int width = rc.right - rc.left;
     int height = rc.bottom - rc.top;
 
-    if (width <= 0 || height <= 0) {
-        GetWindowRect(targetHwnd, &rc);
+    if (width <= 32 || height <= 32) {
+        GetWindowRect(hwnd, &rc);
         width = rc.right - rc.left;
         height = rc.bottom - rc.top;
     }
@@ -331,22 +320,29 @@ bool ThumbnailManager::captureWindow(const std::string& pluginName, HWND hwnd) {
     HBITMAP hbm = CreateCompatibleBitmap(hdcScreen, width, height);
     HGDIOBJ oldBm = SelectObject(hdcMem, hbm);
 
-    // 1. Try PrintWindow with PW_RENDERFULLCONTENT (supports hardware acceleration)
-    BOOL ok = PrintWindow(targetHwnd, hdcMem, 2 /* PW_RENDERFULLCONTENT */);
-    if (!ok) {
-        ok = PrintWindow(targetHwnd, hdcMem, 0);
-    }
-    if (!ok && targetHwnd != hwnd) {
-        ok = PrintWindow(hwnd, hdcMem, 2);
-        if (!ok) ok = PrintWindow(hwnd, hdcMem, 0);
+    BOOL captured = FALSE;
+
+    // Method 1: If window is visible on screen, capture directly from desktop DC
+    // This captures 100% of GPU DirectComposition, OpenGL, JUCE, and VST3 windows!
+    if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
+        POINT pt{0, 0};
+        ClientToScreen(hwnd, &pt);
+        if (BitBlt(hdcMem, 0, 0, width, height, hdcScreen, pt.x, pt.y, SRCCOPY)) {
+            captured = TRUE;
+        }
     }
 
-    // 2. If PrintWindow failed or window is on screen, fall back to BitBlt
-    if (!ok || IsWindowVisible(targetHwnd)) {
-        POINT pt{0, 0};
-        ClientToScreen(targetHwnd, &pt);
-        BitBlt(hdcMem, 0, 0, width, height, hdcScreen, pt.x, pt.y, SRCCOPY);
-        ok = TRUE;
+    // Method 2: If BitBlt failed or window not on screen, try PrintWindow
+    if (!captured) {
+        HWND childHwnd = GetWindow(hwnd, GW_CHILD);
+        if (childHwnd && IsWindow(childHwnd)) {
+            captured = PrintWindow(childHwnd, hdcMem, 2 /*PW_RENDERFULLCONTENT*/);
+            if (!captured) captured = PrintWindow(childHwnd, hdcMem, 0);
+        }
+        if (!captured) {
+            captured = PrintWindow(hwnd, hdcMem, 2);
+            if (!captured) captured = PrintWindow(hwnd, hdcMem, 0);
+        }
     }
 
     Gdiplus::Bitmap fullBmp(hbm, nullptr);
@@ -384,24 +380,34 @@ bool ThumbnailManager::captureWindow(const std::string& pluginName, HWND hwnd) {
     std::vector<uint8_t> rgba(targetW * targetH * 4);
     const auto* pSrc = static_cast<const uint8_t*>(bmpData.Scan0);
 
+    bool hasContent = false;
     for (int y = 0; y < targetH; ++y) {
         const uint8_t* srcRow = pSrc + y * bmpData.Stride;
         uint8_t* dstRow = rgba.data() + y * targetW * 4;
         for (int x = 0; x < targetW; ++x) {
-            dstRow[x * 4 + 0] = srcRow[x * 4 + 2]; // R
-            dstRow[x * 4 + 1] = srcRow[x * 4 + 1]; // G
-            dstRow[x * 4 + 2] = srcRow[x * 4 + 0]; // B
-            dstRow[x * 4 + 3] = 255;              // Force opaque
+            uint8_t b = srcRow[x * 4 + 0];
+            uint8_t g = srcRow[x * 4 + 1];
+            uint8_t r = srcRow[x * 4 + 2];
+            dstRow[x * 4 + 0] = r;
+            dstRow[x * 4 + 1] = g;
+            dstRow[x * 4 + 2] = b;
+            dstRow[x * 4 + 3] = 255;
+            if (r > 12 || g > 12 || b > 12) {
+                hasContent = true;
+            }
         }
     }
     scaledBmp.UnlockBits(&bmpData);
+
+    // If the image was entirely black/blank, don't save or cache yet
+    if (!hasContent) return false;
 
     // Save PNG to disk cache in AppData
     std::filesystem::path cacheDir = getThumbnailCacheDir();
     std::filesystem::path outPath = cacheDir / (sanitizeFilename(pluginName) + ".png");
     scaledBmp.Save(outPath.wstring().c_str(), &s_pngClsid, nullptr);
 
-    // Update discovered files map
+    // Update discovered files map and texture cache
     std::string key = normalizeKey(pluginName);
     {
         std::lock_guard<std::mutex> lock(m_mutex);

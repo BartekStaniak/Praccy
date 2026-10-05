@@ -1,5 +1,6 @@
 #include "rack_view.h"
 #include "thumbnail_manager.h"
+#include "update_checker.h"
 #include "../plugins/builtin_dsp.h"
 #include "../plugins/clap_host.h"
 #include "../plugins/vst3_host.h"
@@ -73,6 +74,36 @@ static bool renderCenteredDeleteButton(const char* id, const ImVec2& size = ImVe
     return clicked;
 }
 
+static bool renderCenteredPlusButton(const char* id, const ImVec2& size = ImVec2(52, 52), float iconRadius = 11.0f) {
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+    bool clicked = ImGui::InvisibleButton(id, size);
+    bool hovered = ImGui::IsItemHovered();
+    bool held = ImGui::IsItemActive();
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    ImU32 bgCol;
+    if (held)         bgCol = IM_COL32(30, 52, 85, 255);
+    else if (hovered) bgCol = IM_COL32(42, 68, 110, 255);
+    else              bgCol = IM_COL32(32, 44, 65, 220);
+
+    ImU32 borderCol = hovered ? IM_COL32(80, 140, 230, 255) : IM_COL32(52, 70, 100, 180);
+    ImU32 iconCol   = hovered ? IM_COL32(255, 255, 255, 255) : IM_COL32(185, 205, 235, 220);
+
+    dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), bgCol, 8.0f);
+    dl->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), borderCol, 8.0f, 0, hovered ? 1.5f : 1.0f);
+
+    float cx = std::floor(pos.x + size.x * 0.5f);
+    float cy = std::floor(pos.y + size.y * 0.5f);
+
+    const float halfBar = iconRadius;
+    const float thick = 1.5f;
+    dl->AddRectFilled(ImVec2(cx - halfBar, cy - thick), ImVec2(cx + halfBar, cy + thick), iconCol, 1.0f);
+    dl->AddRectFilled(ImVec2(cx - thick, cy - halfBar), ImVec2(cx + thick, cy + halfBar), iconCol, 1.0f);
+
+    return clicked;
+}
+
 RackView::RackView(audio::GraphEngine& graph,
                    audio::AsioManager& asio,
                    tools::InstrumentTuner& tuner,
@@ -131,6 +162,7 @@ void RackView::render() {
         }
 
         renderDspTweakModal();
+        renderUpdateModal();
     }
     ImGui::End();
     ImGui::PopStyleVar();
@@ -194,6 +226,35 @@ void RackView::renderHeaderBar() {
                 m_insertTargetBranchIndex = -1;
                 m_focusPluginBrowser = true;
             }
+        }
+
+        // Right-aligned "Check for Updates" button
+        const float updateBtnW = 145.0f;
+        float rightEdge = ImGui::GetWindowWidth() - updateBtnW - 14.0f;
+        if (ImGui::GetCursorPosX() < rightEdge) {
+            ImGui::SameLine(rightEdge);
+        } else {
+            ImGui::SameLine(0, 12);
+        }
+
+        auto updateInfo = UpdateChecker::instance().getInfo();
+        bool hasUpdate = (updateInfo.status == UpdateStatus::UpdateAvailable);
+
+        if (hasUpdate) {
+            ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(35, 75, 130, 255));
+            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 230, 100, 255));
+        }
+
+        const char* btnLabel = hasUpdate ? "Update Available! *" : "Check for Updates";
+        if (ImGui::Button(btnLabel, ImVec2(updateBtnW, 0))) {
+            m_showUpdateModal = true;
+            state::AppConfig cfg;
+            cfg.load();
+            UpdateChecker::instance().checkForUpdates(cfg.checkBetaUpdates);
+        }
+
+        if (hasUpdate) {
+            ImGui::PopStyleColor(2);
         }
 
         ImGui::EndMenuBar();
@@ -526,19 +587,23 @@ void RackView::renderSignalRack() {
     {
         ImGui::BeginGroup();
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.15f, 0.19f, 0.6f));
-        ImGui::BeginChild("InsertSerialCard", ImVec2(92, 230), true);
-        ImGui::SetCursorPosY(85);
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.26f, 0.36f, 0.85f));
-        if (ImGui::Button("+ Add\nPlugin", ImVec2(76, 55))) {
+        const float insertCardW = 82.0f;
+        const float insertCardH = 230.0f;
+        ImGui::BeginChild("InsertSerialCard", ImVec2(insertCardW, insertCardH), true, ImGuiWindowFlags_NoScrollbar);
+
+        // Perfectly centered plus vector button
+        const float btnSize = 52.0f;
+        ImGui::SetCursorPos(ImVec2((insertCardW - btnSize) * 0.5f, (insertCardH - btnSize) * 0.5f));
+        if (renderCenteredPlusButton("##AddPluginSerial", ImVec2(btnSize, btnSize), 12.0f)) {
             m_insertTargetBlockIndex = -1;
             m_insertTargetBranchIndex = -1;
             m_showPluginBrowser = true;
             m_focusPluginBrowser = true;
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Insert a new plugin into the serial rack");
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            ImGui::SetTooltip("Insert a new plugin into the signal chain");
         }
-        ImGui::PopStyleColor();
         ImGui::EndChild();
         ImGui::PopStyleColor();
         ImGui::EndGroup();
@@ -867,7 +932,8 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bran
                 plugins::PluginWindowManager::instance().openPluginWindow(pluginInst);
                 HWND hw = plugins::PluginWindowManager::instance().getWindow(pluginInst);
                 if (hw) {
-                    ThumbnailManager::instance().requestCapture(slot->name(), hw, 25);
+                    ThumbnailManager::instance().captureWindow(slot->name(), hw);
+                    ThumbnailManager::instance().requestCapture(slot->name(), hw, 15);
                 }
             } else {
                 m_dspTweakSlot = slot;
@@ -876,11 +942,11 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bran
             m_expandPulseTimer = 1.0f;
         }
 
-        // If window is currently open but we have no cached thumbnail yet, request capture
-        if (isWindowOpen && !thumb && pluginInst) {
+        // If window is currently open, schedule auto-capture or periodic refresh
+        if (isWindowOpen && pluginInst) {
             HWND hw = plugins::PluginWindowManager::instance().getWindow(pluginInst);
             if (hw) {
-                ThumbnailManager::instance().requestCapture(slot->name(), hw, 20);
+                ThumbnailManager::instance().requestCapture(slot->name(), hw, thumb ? 120 : 15);
             }
         }
 
@@ -1620,6 +1686,81 @@ void RackView::renderDspTweakModal() {
 
     if (!open) {
         m_dspTweakSlot = nullptr;
+    }
+}
+
+void RackView::renderUpdateModal() {
+    if (!m_showUpdateModal) return;
+
+    ImGui::OpenPopup("Praccy Updates##Modal");
+    ImGui::SetNextWindowSize(ImVec2(500, 370), ImGuiCond_Appearing);
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+
+    if (ImGui::BeginPopupModal("Praccy Updates##Modal", &m_showUpdateModal, ImGuiWindowFlags_NoResize)) {
+        ImGui::TextColored(ImVec4(0.98f, 0.60f, 0.20f, 1.0f), "PRACCY UPDATE MANAGER");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::Text("Installed Version: %s", "v1.0.0");
+        ImGui::Spacing();
+
+        // Option to enable beta builds from dev branch
+        state::AppConfig cfg;
+        cfg.load();
+        bool includeBeta = cfg.checkBetaUpdates;
+        if (ImGui::Checkbox("Enable beta builds from 'dev' branch on GitHub", &includeBeta)) {
+            cfg.checkBetaUpdates = includeBeta;
+            cfg.save();
+            UpdateChecker::instance().checkForUpdates(includeBeta);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Check for cutting-edge development commits directly from origin/dev on GitHub");
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        auto info = UpdateChecker::instance().getInfo();
+
+        if (info.status == UpdateStatus::Checking) {
+            ImGui::TextColored(ImVec4(0.40f, 0.75f, 1.0f, 1.0f), "Checking GitHub repository for %s updates...", includeBeta ? "beta" : "stable");
+            ImGui::ProgressBar(-1.0f * static_cast<float>(ImGui::GetTime()), ImVec2(-1, 6));
+        } else if (info.status == UpdateStatus::UpToDate) {
+            ImGui::TextColored(ImVec4(0.25f, 0.90f, 0.45f, 1.0f), "[v] You are up to date!");
+            ImGui::TextDisabled("Channel: %s", includeBeta ? "Beta (dev branch)" : "Stable (Releases)");
+            ImGui::Text("Latest version: %s", info.latestVersion.c_str());
+        } else if (info.status == UpdateStatus::UpdateAvailable) {
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.25f, 1.0f), "[*] New %s build available!", includeBeta ? "Beta" : "Release");
+            ImGui::Text("Latest: %s", info.latestVersion.c_str());
+            if (!info.releaseTitle.empty()) {
+                ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), "%s", info.releaseTitle.c_str());
+            }
+            if (!info.publishedDate.empty()) {
+                ImGui::TextDisabled("Date: %s", info.publishedDate.c_str());
+            }
+
+            ImGui::Spacing();
+            if (ImGui::Button("Open in GitHub ->", ImVec2(160, 28))) {
+                ShellExecuteA(nullptr, "open", info.downloadUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            }
+        } else if (info.status == UpdateStatus::Error) {
+            ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "Update check failed");
+            ImGui::TextWrapped("%s", info.errorMessage.c_str());
+        }
+
+        ImGui::SetCursorPosY(320);
+        ImGui::Separator();
+        if (ImGui::Button("Check Again", ImVec2(110, 26))) {
+            UpdateChecker::instance().checkForUpdates(includeBeta);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Close", ImVec2(90, 26))) {
+            m_showUpdateModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::EndPopup();
     }
 }
 
