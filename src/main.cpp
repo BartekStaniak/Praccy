@@ -46,10 +46,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(1));
     }
 
-    // Register Win32 window class
+    // Register Win32 window class with dark background brush matching Praccy theme
+    HBRUSH hDarkBrush = CreateSolidBrush(RGB(28, 30, 36));
     WNDCLASSEXW wc = {
         sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L,
-        hInstance, hIcon, LoadCursor(nullptr, IDC_ARROW), nullptr, nullptr,
+        hInstance, hIcon, LoadCursor(nullptr, IDC_ARROW), hDarkBrush, nullptr,
         L"PraccyHostClass", hIcon
     };
     RegisterClassExW(&wc);
@@ -70,11 +71,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     if (!CreateDeviceD3D(hwnd)) {
         CleanupDeviceD3D();
         UnregisterClassW(wc.lpszClassName, wc.hInstance);
+        if (hDarkBrush) DeleteObject(hDarkBrush);
         return 1;
     }
-
-    ShowWindow(hwnd, SW_SHOWDEFAULT);
-    UpdateWindow(hwnd);
 
     // Initialize ImGui
     IMGUI_CHECKVERSION();
@@ -198,9 +197,29 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         for (const auto& cp : appConfig.customPluginPaths) {
             scanner.addCustomSearchPath(cp);
         }
-        scanner.scanAll();
     }
+    // Launch asynchronous non-blocking plugin scanner in the background
+    scanner.scanAll();
+
     praccy::ui::RackView rackView(graph, asio, tuner, metronome, midi, scenes, scanner);
+
+    // Pre-render and present the first frame to the swapchain backbuffer
+    // BEFORE showing the window. This completely eliminates any white window flash or hang,
+    // ensuring the window appears instantly in its fully styled dark state.
+    ImGui_ImplDX11_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+    rackView.render();
+    ImGui::Render();
+    const float clear_color[4] = { 0.11f, 0.12f, 0.14f, 1.00f };
+    g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
+    g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
+    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    g_pSwapChain->Present(0, 0);
+
+    // Display window now that the first frame is already drawn and ready
+    ShowWindow(hwnd, SW_SHOWDEFAULT);
+    UpdateWindow(hwnd);
 
     // Main event loop
     bool done = false;
@@ -224,7 +243,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         // Rendering
         ImGui::Render();
-        const float clear_color[4] = { 0.11f, 0.12f, 0.14f, 1.00f };
         g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
         g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
@@ -258,6 +276,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     CleanupDeviceD3D();
     DestroyWindow(hwnd);
     UnregisterClassW(wc.lpszClassName, wc.hInstance);
+    if (hDarkBrush) DeleteObject(hDarkBrush);
 
     return 0;
 }
@@ -323,6 +342,8 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return true;
 
     switch (msg) {
+        case WM_ERASEBKGND:
+            return 1; // Prevent GDI from erasing background with white (prevents flicker and white state)
         case WM_SIZE:
             if (wParam != SIZE_MINIMIZED) {
                 if (g_pd3dDevice != nullptr && g_pSwapChain != nullptr) {

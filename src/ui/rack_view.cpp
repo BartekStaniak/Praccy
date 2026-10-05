@@ -1460,6 +1460,10 @@ void RackView::renderPluginBrowserModal() {
         if (ImGui::Button("Rescan All")) {
             m_scanner.scanAll();
         }
+        if (m_scanner.isScanning()) {
+            ImGui::SameLine(0, 10);
+            ImGui::TextColored(ImVec4(0.40f, 0.75f, 1.0f, 1.0f), "Scanning plugins...");
+        }
         ImGui::Separator();
 
         float leftWidth = 230.0f;

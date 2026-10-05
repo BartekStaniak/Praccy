@@ -4,6 +4,8 @@
 #include <vector>
 #include <filesystem>
 #include <mutex>
+#include <atomic>
+#include <thread>
 
 namespace praccy::plugins {
 
@@ -40,15 +42,17 @@ enum class PluginSortMode {
 class PluginScanner {
 public:
     PluginScanner();
+    ~PluginScanner();
 
     void scanAll();
+    void scanSync();
     void addCustomSearchPath(const std::string& path);
     void removeCustomSearchPath(size_t index);
-    [[nodiscard]] const std::vector<std::string>& searchPaths() const noexcept { return m_searchPaths; }
+    [[nodiscard]] std::vector<std::string> searchPaths() const;
 
-    [[nodiscard]] const std::vector<PluginDescriptor>& scannedPlugins() const noexcept { return m_plugins; }
-    [[nodiscard]] size_t numPlugins() const noexcept { return m_plugins.size(); }
-    [[nodiscard]] bool isScanning() const noexcept { return m_isScanning; }
+    [[nodiscard]] std::vector<PluginDescriptor> scannedPlugins() const;
+    [[nodiscard]] size_t numPlugins() const;
+    [[nodiscard]] bool isScanning() const noexcept { return m_isScanning.load(); }
 
     [[nodiscard]] std::vector<std::string> getDevelopers() const;
     [[nodiscard]] std::vector<PluginDescriptor> getFilteredPlugins(
@@ -60,13 +64,16 @@ public:
 
 private:
     void addDefaultPaths();
-    void scanDirectory(const std::filesystem::path& dirPath);
+    void runScan();
+    void scanDirectory(const std::filesystem::path& dirPath, std::vector<PluginDescriptor>& outPlugins);
     static std::string detectVendor(const std::filesystem::path& path, const std::string& name);
 
     std::vector<std::string> m_searchPaths;
     std::vector<PluginDescriptor> m_plugins;
     mutable std::mutex m_mutex;
-    bool m_isScanning{false};
+    std::atomic<bool> m_isScanning{false};
+    std::atomic<bool> m_shouldStop{false};
+    std::thread m_scanThread;
 };
 
 } // namespace praccy::plugins
