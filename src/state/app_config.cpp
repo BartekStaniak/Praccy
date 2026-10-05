@@ -53,8 +53,12 @@ bool AppConfig::load(const std::string& customPath) {
             masterVolumeDb = static_cast<float>(std::atof(val.c_str()));
         } else if (key == "metronome_bpm") {
             metronomeBpm = static_cast<float>(std::atof(val.c_str()));
+        } else if (key == "check_beta_updates") {
+            checkBetaUpdates = (val == "1" || val == "true");
         } else if (key == "custom_plugin_path") {
             customPluginPaths.push_back(val);
+        } else if (key == "favorite_plugin") {
+            favoritePlugins.push_back(val);
         }
     }
     return true;
@@ -71,9 +75,14 @@ bool AppConfig::save(const std::string& customPath) const {
     file << "input_gain_db=" << inputGainDb << "\n";
     file << "master_volume_db=" << masterVolumeDb << "\n";
     file << "metronome_bpm=" << metronomeBpm << "\n";
+    file << "check_beta_updates=" << (checkBetaUpdates ? "1" : "0") << "\n";
 
     for (const auto& cp : customPluginPaths) {
         file << "custom_plugin_path=" << cp << "\n";
+    }
+
+    for (const auto& fp : favoritePlugins) {
+        file << "favorite_plugin=" << fp << "\n";
     }
 
     return true;

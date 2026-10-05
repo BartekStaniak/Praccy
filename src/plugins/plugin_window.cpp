@@ -149,6 +149,12 @@ bool PluginWindowManager::isWindowOpen(IPluginInstance* plugin) const {
     return (it != m_openWindows.end() && IsWindow(it->second));
 }
 
+HWND PluginWindowManager::getWindow(IPluginInstance* plugin) const {
+    if (!plugin) return nullptr;
+    auto it = m_openWindows.find(plugin);
+    return (it != m_openWindows.end()) ? it->second : nullptr;
+}
+
 LRESULT CALLBACK PluginWindowManager::windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     auto* plugin = reinterpret_cast<IPluginInstance*>(GetPropW(hwnd, L"PluginInstance"));
 

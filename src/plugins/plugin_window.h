@@ -16,6 +16,7 @@ public:
     void closePluginWindow(IPluginInstance* plugin);
     void closeAllWindows();
     [[nodiscard]] bool isWindowOpen(IPluginInstance* plugin) const;
+    [[nodiscard]] HWND getWindow(IPluginInstance* plugin) const;
 
 private:
     PluginWindowManager();

@@ -26,21 +26,24 @@ public:
     void render();
 
 private:
-    void renderHeaderBar();
+    void renderPraccyLogo();
     void renderStatusPill(bool isRunning, double sampleRate, int bufferSize, double latencyMs);
     void renderPracticeRibbon();
     void renderSignalRack();
     void renderSignalCable(float width = 36.0f);
-    void renderInputCard();
-    void renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int branchIndex = -1);
-    void renderParallelBlock(audio::ParallelSplitMergeBlock* block, int blockIndex);
+    void renderInputCard(float cardY = -1.0f);
+    void renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int blockIndex = -1, int branchIndex = -1);
+    void renderParallelBlock(audio::ParallelSplitMergeBlock* block, int blockIndex, float centerY);
     void renderSceneBar();
     void renderBottomBar();
+    void renderSettingsModal();
     void renderMeter(const char* label, float level, float width, float height);
     void renderPluginBrowserModal();
     void renderDspTweakModal();
-    bool renderRotaryKnob(const char* label, float* value, float minVal, float maxVal, float radius, const char* format = "%.1f");
-    void renderMiniHardwareSlot(audio::PluginSlot* slot, int blockIndex, size_t branchIndex, size_t slotIndex);
+    bool renderRotaryKnob(const char* label, float* value, float minVal, float maxVal, float radius, const char* format = "%.1f", float defaultVal = 0.0f);
+    void renderUpdateModal();
+
+    bool m_showSettingsModal{false};
 
     audio::GraphEngine& m_graph;
     audio::AsioManager& m_asio;
@@ -60,6 +63,7 @@ private:
     char m_pluginSearchQuery[128]{0};
     std::string m_selectedDeveloperFilter{"All"};
     std::string m_selectedFormatFilter{"All"};
+    bool m_showFavoritesFilter{false};
     int m_pluginSortMode{0}; // 0: Name A-Z, 1: Name Z-A, 2: Dev A-Z, 3: Format A-Z
 
     bool m_showSavePresetModal{false};
@@ -70,6 +74,11 @@ private:
     int m_insertTargetBlockIndex{-1};
     int m_insertTargetBranchIndex{-1};
     audio::PluginSlot* m_dspTweakSlot{nullptr};
+
+    int m_expandedSlotIndex{-1};
+    float m_expandPulseTimer{0.0f};
+
+    bool m_showUpdateModal{false};
 };
 
 } // namespace praccy::ui

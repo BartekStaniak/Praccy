@@ -7,7 +7,7 @@ if(WIN32)
     endif()
 endif()
 
-project(Praccy VERSION 1.0.0 LANGUAGES CXX C RC)
+project(Praccy VERSION 1.1.0 LANGUAGES CXX C RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -29,6 +29,8 @@ set(PRACCY_SOURCES
     src/state/scene_manager.cpp
     src/state/app_config.cpp
     src/ui/rack_view.cpp
+    src/ui/thumbnail_manager.cpp
+    src/ui/update_checker.cpp
     resources/praccy.rc
 
     # Dear ImGui
@@ -45,6 +47,11 @@ set(PRACCY_SOURCES
 )
 
 add_executable(Praccy WIN32 ${PRACCY_SOURCES})
+
+# Copy bundled resources to build output
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/thumbnails")
+    file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/resources/thumbnails" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/resources")
+endif()
 
 target_include_directories(Praccy PRIVATE
     src
@@ -66,6 +73,8 @@ target_link_libraries(Praccy PRIVATE
     ole32
     uuid
     gdi32
+    gdiplus
+    wininet
     user32
     kernel32
 )

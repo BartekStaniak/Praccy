@@ -1,4 +1,5 @@
 #include "plugin_scanner.h"
+#include "../state/app_config.h"
 #include <cstdlib>
 #include <iostream>
 #include <algorithm>
@@ -13,7 +14,58 @@ using GetFactoryProc = Steinberg::IPluginFactory* (PLUGIN_API *)();
 
 PluginScanner::PluginScanner() {
     addDefaultPaths();
-    scanAll();
+    // Load favorites from app config
+    state::AppConfig cfg;
+    if (cfg.load()) {
+        for (const auto& fav : cfg.favoritePlugins) {
+            m_favorites.insert(fav);
+        }
+    }
+
+    // Register built-in effects immediately so they are available right away
+    m_plugins.push_back(PluginDescriptor{
+        .name = "Praccy Drive",
+        .path = "builtin://drive",
+        .type = PluginType::BuiltIn,
+        .vendor = "Praccy Audio",
+        .category = "Distortion"
+    });
+    m_plugins.push_back(PluginDescriptor{
+        .name = "Praccy Amp Sim",
+        .path = "builtin://amp",
+        .type = PluginType::BuiltIn,
+        .vendor = "Praccy Audio",
+        .category = "Amp Emulation"
+    });
+    m_plugins.push_back(PluginDescriptor{
+        .name = "Praccy Stereo Delay",
+        .path = "builtin://delay",
+        .type = PluginType::BuiltIn,
+        .vendor = "Praccy Audio",
+        .category = "Delay/Echo"
+    });
+}
+
+PluginScanner::~PluginScanner() {
+    m_shouldStop = true;
+    if (m_scanThread.joinable()) {
+        m_scanThread.join();
+    }
+}
+
+std::vector<std::string> PluginScanner::searchPaths() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_searchPaths;
+}
+
+std::vector<PluginDescriptor> PluginScanner::scannedPlugins() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_plugins;
+}
+
+size_t PluginScanner::numPlugins() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_plugins.size();
 }
 
 void PluginScanner::addDefaultPaths() {
@@ -177,7 +229,28 @@ std::string PluginScanner::detectVendor(const std::filesystem::path& path, const
         return "Joey Sturgis Tones";
     }
 
-    // 2. Query VST3 factory metadata if available
+    // 2. Parent directory inspection (filtering out system folders - fast path without loading DLL)
+    static const std::unordered_set<std::string> s_systemDirs = {
+        "vst3", "clap", "contents", "x86_64-win", "common files", "vstplugins",
+        "program files", "program files (x86)", "steinberg", "plugins", "vst",
+        "audio", "windows", "users", "documents", "appdata", "roaming", "local"
+    };
+
+    auto parent = path.parent_path();
+    while (!parent.empty() && parent.has_filename()) {
+        std::string pName = parent.filename().string();
+        std::string pNameLower = pName;
+        std::transform(pNameLower.begin(), pNameLower.end(), pNameLower.begin(), [](unsigned char c) { return std::tolower(c); });
+
+        if (s_systemDirs.find(pNameLower) == s_systemDirs.end() &&
+            pNameLower.find(".vst3") == std::string::npos &&
+            pNameLower.find(".clap") == std::string::npos) {
+            return pName;
+        }
+        parent = parent.parent_path();
+    }
+
+    // 3. Query VST3 factory metadata only if parent folder was generic
     std::filesystem::path dllPath = path;
     if (std::filesystem::is_directory(path)) {
         auto candidate = path / "Contents" / "x86_64-win" / (path.stem().string() + ".vst3");
@@ -204,51 +277,52 @@ std::string PluginScanner::detectVendor(const std::filesystem::path& path, const
         FreeLibrary(hLib);
     }
 
-    // 3. Parent directory inspection (filtering out system folders)
-    static const std::unordered_set<std::string> s_systemDirs = {
-        "vst3", "clap", "contents", "x86_64-win", "common files", "vstplugins",
-        "program files", "program files (x86)", "steinberg", "plugins", "vst",
-        "audio", "windows", "users", "documents", "appdata", "roaming", "local"
-    };
-
-    auto parent = path.parent_path();
-    while (!parent.empty() && parent.has_filename()) {
-        std::string pName = parent.filename().string();
-        std::string pNameLower = pName;
-        std::transform(pNameLower.begin(), pNameLower.end(), pNameLower.begin(), [](unsigned char c) { return std::tolower(c); });
-
-        if (s_systemDirs.find(pNameLower) == s_systemDirs.end() &&
-            pNameLower.find(".vst3") == std::string::npos &&
-            pNameLower.find(".clap") == std::string::npos) {
-            return pName;
-        }
-        parent = parent.parent_path();
-    }
-
     return "Other";
 }
 
 void PluginScanner::scanAll() {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_isScanning.load()) return;
+
+    if (m_scanThread.joinable()) {
+        m_scanThread.join();
+    }
+
     m_isScanning = true;
-    m_plugins.clear();
+    m_shouldStop = false;
+
+    m_scanThread = std::thread([this]() {
+        runScan();
+    });
+}
+
+void PluginScanner::scanSync() {
+    if (m_scanThread.joinable()) {
+        m_scanThread.join();
+    }
+    m_isScanning = true;
+    m_shouldStop = false;
+    runScan();
+}
+
+void PluginScanner::runScan() {
+    std::vector<PluginDescriptor> found;
 
     // Register built-in effects
-    m_plugins.push_back(PluginDescriptor{
+    found.push_back(PluginDescriptor{
         .name = "Praccy Drive",
         .path = "builtin://drive",
         .type = PluginType::BuiltIn,
         .vendor = "Praccy Audio",
         .category = "Distortion"
     });
-    m_plugins.push_back(PluginDescriptor{
+    found.push_back(PluginDescriptor{
         .name = "Praccy Amp Sim",
         .path = "builtin://amp",
         .type = PluginType::BuiltIn,
         .vendor = "Praccy Audio",
         .category = "Amp Emulation"
     });
-    m_plugins.push_back(PluginDescriptor{
+    found.push_back(PluginDescriptor{
         .name = "Praccy Stereo Delay",
         .path = "builtin://delay",
         .type = PluginType::BuiltIn,
@@ -256,59 +330,95 @@ void PluginScanner::scanAll() {
         .category = "Delay/Echo"
     });
 
-    for (const auto& dirStr : m_searchPaths) {
+    std::vector<std::string> pathsCopy;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        pathsCopy = m_searchPaths;
+    }
+
+    for (const auto& dirStr : pathsCopy) {
+        if (m_shouldStop.load()) break;
         std::error_code ec;
         std::filesystem::path p(dirStr);
         if (std::filesystem::exists(p, ec) && std::filesystem::is_directory(p, ec)) {
-            scanDirectory(p);
+            scanDirectory(p, found);
         }
+    }
+
+    if (!m_shouldStop.load()) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_plugins = std::move(found);
     }
 
     m_isScanning = false;
 }
 
-void PluginScanner::scanDirectory(const std::filesystem::path& dirPath) {
+void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vector<PluginDescriptor>& outPlugins) {
     std::error_code ec;
     for (auto iter = std::filesystem::recursive_directory_iterator(dirPath, std::filesystem::directory_options::skip_permission_denied, ec);
          iter != std::filesystem::recursive_directory_iterator(); ++iter) {
-        if (ec) break;
+        if (m_shouldStop.load() || ec) break;
 
         const auto& path = iter->path();
         const std::string ext = path.extension().string();
 
         if (ext == ".clap") {
             const std::string name = path.stem().string();
-            auto itExists = std::find_if(m_plugins.begin(), m_plugins.end(), [&](const PluginDescriptor& d) {
+            auto itExists = std::find_if(outPlugins.begin(), outPlugins.end(), [&](const PluginDescriptor& d) {
                 return d.name == name;
             });
-            if (itExists == m_plugins.end()) {
+            if (itExists == outPlugins.end()) {
                 PluginDescriptor desc;
                 desc.name = name;
                 desc.path = path.string();
                 desc.type = PluginType::CLAP;
                 desc.vendor = detectVendor(path, name);
                 desc.category = "CLAP";
-                m_plugins.push_back(std::move(desc));
+                outPlugins.push_back(std::move(desc));
             }
         } else if (ext == ".vst3") {
             const std::string name = path.stem().string();
-            auto itExists = std::find_if(m_plugins.begin(), m_plugins.end(), [&](const PluginDescriptor& d) {
+            auto itExists = std::find_if(outPlugins.begin(), outPlugins.end(), [&](const PluginDescriptor& d) {
                 return d.name == name;
             });
-            if (itExists == m_plugins.end()) {
+            if (itExists == outPlugins.end()) {
                 PluginDescriptor desc;
                 desc.name = name;
                 desc.path = path.string();
                 desc.type = PluginType::VST3;
                 desc.vendor = detectVendor(path, name);
                 desc.category = "VST3";
-                m_plugins.push_back(std::move(desc));
+                outPlugins.push_back(std::move(desc));
             }
             if (iter->is_directory()) {
                 iter.disable_recursion_pending();
             }
         }
     }
+}
+
+bool PluginScanner::isFavorite(const std::string& nameOrPath) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_favorites.find(nameOrPath) != m_favorites.end();
+}
+
+void PluginScanner::toggleFavorite(const std::string& nameOrPath) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_favorites.find(nameOrPath);
+    if (it != m_favorites.end()) {
+        m_favorites.erase(it);
+    } else {
+        m_favorites.insert(nameOrPath);
+    }
+    state::AppConfig cfg;
+    cfg.load();
+    cfg.favoritePlugins.assign(m_favorites.begin(), m_favorites.end());
+    cfg.save();
+}
+
+size_t PluginScanner::numFavorites() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_favorites.size();
 }
 
 std::vector<std::string> PluginScanner::getDevelopers() const {
@@ -326,7 +436,8 @@ std::vector<PluginDescriptor> PluginScanner::getFilteredPlugins(
     const std::string& searchQuery,
     const std::string& developerFilter,
     const std::string& formatFilter,
-    PluginSortMode sortMode
+    PluginSortMode sortMode,
+    bool favoritesOnly
 ) const {
     std::lock_guard<std::mutex> lock(m_mutex);
     std::vector<PluginDescriptor> result;
@@ -335,6 +446,13 @@ std::vector<PluginDescriptor> PluginScanner::getFilteredPlugins(
     std::transform(qLower.begin(), qLower.end(), qLower.begin(), [](unsigned char c) { return std::tolower(c); });
 
     for (const auto& p : m_plugins) {
+        // Favorites filter
+        if (favoritesOnly) {
+            if (m_favorites.find(p.name) == m_favorites.end() && m_favorites.find(p.path) == m_favorites.end()) {
+                continue;
+            }
+        }
+
         // Format filter
         if (!formatFilter.empty() && formatFilter != "All") {
             if (p.typeString() != formatFilter) continue;
