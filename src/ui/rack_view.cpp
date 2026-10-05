@@ -1339,12 +1339,12 @@ void RackView::renderPluginBrowserModal() {
                 ImGui::TableSetupColumn("Format", ImGuiTableColumnFlags_WidthFixed, 75.0f);
                 ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 0.50f);
                 ImGui::TableSetupColumn("Developer", ImGuiTableColumnFlags_WidthStretch, 0.35f);
-                ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+                ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 84.0f);
                 ImGui::TableHeadersRow();
 
                 for (size_t p = 0; p < filtered.size(); ++p) {
                     const auto& desc = filtered[p];
-                    ImGui::TableNextRow(ImGuiTableRowFlags_None, 24.0f);
+                    ImGui::TableNextRow();
 
                     ImGui::TableNextColumn();
                     ImGui::AlignTextToFramePadding();
@@ -1369,10 +1369,13 @@ void RackView::renderPluginBrowserModal() {
                     ImGui::TextDisabled("%s", desc.vendor.c_str());
 
                     ImGui::TableNextColumn();
-                    ImGui::AlignTextToFramePadding();
+                    float availW = ImGui::GetContentRegionAvail().x;
+                    if (availW > 74.0f) {
+                        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (availW - 74.0f) * 0.5f);
+                    }
                     char btnLabel[32];
                     std::snprintf(btnLabel, sizeof(btnLabel), "+ Insert##%zu", p);
-                    bool insertClicked = ImGui::Button(btnLabel, ImVec2(72.0f, 22.0f));
+                    bool insertClicked = ImGui::Button(btnLabel, ImVec2(74.0f, 0));
 
                     if (insertClicked || doubleClicked) {
                         std::unique_ptr<audio::PluginSlot> newSlot;
