@@ -415,8 +415,8 @@ void RackView::renderPraccyLogo() {
         float textX = pickX + pickW + 10.0f;
         // Text: PRACCY (vertically centered alongside the pick logo)
         dl->AddText(ImVec2(textX, pos.y + (boxH * 0.5f) - 15.0f), IM_COL32(245, 195, 120, 255), "PRACCY");
-        // Version tag: v1.0.2
-        dl->AddText(ImVec2(textX, pos.y + (boxH * 0.5f) + 3.0f), IM_COL32(140, 150, 170, 220), "v1.0.2");
+        // Version tag: v1.1.0
+        dl->AddText(ImVec2(textX, pos.y + (boxH * 0.5f) + 3.0f), IM_COL32(140, 150, 170, 220), "v1.1.0");
     } else {
         // Fallback procedural medallion
         const float cx = pos.x + 24.0f;
@@ -432,7 +432,7 @@ void RackView::renderPraccyLogo() {
         dl->AddLine(ImVec2(cx + 5.5f, cy - 3.0f), ImVec2(cx + 5.5f, cy + 3.0f), IM_COL32(255, 160, 50, 255), 1.5f);
 
         dl->AddText(ImVec2(pos.x + 46.0f, pos.y + (boxH * 0.5f) - 15.0f), IM_COL32(255, 160, 45, 255), "PRACCY");
-        dl->AddText(ImVec2(pos.x + 46.0f, pos.y + (boxH * 0.5f) + 3.0f), IM_COL32(130, 140, 160, 200), "v1.0.2");
+        dl->AddText(ImVec2(pos.x + 46.0f, pos.y + (boxH * 0.5f) + 3.0f), IM_COL32(130, 140, 160, 200), "v1.1.0");
     }
 
     ImGui::Dummy(ImVec2(boxW, boxH));
@@ -2296,7 +2296,7 @@ void RackView::renderUpdateModal() {
         ImGui::Separator();
         ImGui::Spacing();
 
-        ImGui::Text("Installed Version: %s", "v1.0.2");
+        ImGui::Text("Installed Version: %s", "v1.1.0");
         ImGui::Spacing();
 
         // Option to enable beta builds from dev branch
@@ -2540,7 +2540,7 @@ void RackView::renderSettingsModal() {
                 ImGui::Separator();
                 ImGui::Spacing();
 
-                ImGui::Text("Installed Version: %s", "v1.0.2");
+                ImGui::Text("Installed Version: %s", "v1.1.0");
                 ImGui::Spacing();
 
                 state::AppConfig cfg;
@@ -2563,7 +2563,7 @@ void RackView::renderSettingsModal() {
             // TAB 4: ABOUT
             if (ImGui::BeginTabItem("About")) {
                 ImGui::Spacing();
-                ImGui::TextColored(ImVec4(0.98f, 0.60f, 0.20f, 1.0f), "PRACCY v1.0.2");
+                ImGui::TextColored(ImVec4(0.98f, 0.60f, 0.20f, 1.0f), "PRACCY v1.1.0");
                 ImGui::TextDisabled("Lightweight, Low-Latency Guitar & Audio Practice Host");
                 ImGui::Separator();
                 ImGui::Spacing();
