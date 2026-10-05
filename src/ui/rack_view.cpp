@@ -554,7 +554,7 @@ void RackView::renderPracticeRibbon() {
         ImGui::BeginChild("Mod_Metro", ImVec2(0, modH), true, ImGuiWindowFlags_NoScrollbar);
         {
             ImGui::TextColored(ImVec4(0.70f, 0.74f, 0.82f, 1.0f), "METRONOME");
-            ImGui::SameLine();
+            ImGui::SameLine(0, 8);
             bool metroPlaying = m_metronome.isPlaying();
 
             // Beat LEDs beside title
@@ -565,10 +565,11 @@ void RackView::renderPracticeRibbon() {
                 ImVec2 curPos = ImGui::GetCursorScreenPos();
                 const float dotRadius = 4.0f;
                 const float dotSpacing = 11.0f;
+                float fontH = ImGui::GetFontSize();
+                float cy = curPos.y + (fontH * 0.5f);
 
                 for (int b = 0; b < totalBeats; ++b) {
-                    float cx = curPos.x + 8.0f + (b * dotSpacing);
-                    float cy = curPos.y + 8.0f;
+                    float cx = curPos.x + 4.0f + (b * dotSpacing);
                     bool active = metroPlaying && (b == currentBeat);
                     if (active) {
                         ImU32 haloColor = (b == 0) ? IM_COL32(255, 60, 60, 80) : IM_COL32(250, 160, 30, 80);
@@ -580,22 +581,42 @@ void RackView::renderPracticeRibbon() {
                         dl->AddCircle(ImVec2(cx, cy), dotRadius, IM_COL32(55, 60, 72, 255), 0, 1.0f);
                     }
                 }
+                ImGui::Dummy(ImVec2(totalBeats * dotSpacing + 4.0f, fontH));
             }
 
             ImGui::SetCursorPosY(38.0f);
-            if (CenteredButton(metroPlaying ? "STOP##M" : "PLAY##M", ImVec2(50, 24))) {
+            float availW = ImGui::GetContentRegionAvail().x;
+            const float gap = 6.0f;
+            const float playW = 50.0f;
+            const float sigW = 68.0f;
+            float bpmW = std::max(60.0f, availW - playW - sigW - (gap * 2.0f) - 2.0f);
+
+            // Push FramePadding so PLAY, BPM Drag, and TimeSig Combo share exact 24px height
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 3.5f));
+
+            if (metroPlaying) {
+                ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(185, 45, 45, 255));
+                ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 255, 255, 255));
+            }
+            if (CenteredButton(metroPlaying ? "STOP##M" : "PLAY##M", ImVec2(playW, 24.0f))) {
                 m_metronome.setPlaying(!metroPlaying);
             }
-            ImGui::SameLine(0, 6);
+            if (metroPlaying) {
+                ImGui::PopStyleColor(2);
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(metroPlaying ? "Stop Metronome" : "Start Metronome");
+
+            ImGui::SameLine(0, gap);
 
             float bpm = m_metronome.bpm();
-            ImGui::SetNextItemWidth(76);
+            ImGui::SetNextItemWidth(bpmW);
             if (ResettableDragFloat("##BPM", &bpm, 1.0f, 40.0f, 260.0f, 120.0f, "%.0f BPM")) {
                 m_metronome.setBpm(bpm);
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tempo (Double-click to reset 120 BPM)");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tempo (Drag or click to edit, double-click to reset 120 BPM)");
 
-            ImGui::SameLine(0, 6);
+            ImGui::SameLine(0, gap);
+
             const char* timeSigOptions[] = { "4/4", "3/4", "2/4", "6/8" };
             const int timeSigBeats[] = { 4, 3, 2, 6 };
             int currentSigIdx = 0;
@@ -603,10 +624,13 @@ void RackView::renderPracticeRibbon() {
             for (int i = 0; i < 4; ++i) {
                 if (timeSigBeats[i] == currentBeats) { currentSigIdx = i; break; }
             }
-            ImGui::SetNextItemWidth(54);
+            ImGui::SetNextItemWidth(sigW);
             if (ImGui::Combo("##TimeSig", &currentSigIdx, timeSigOptions, 4)) {
                 m_metronome.setBeatsPerBar(timeSigBeats[currentSigIdx]);
             }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Time Signature");
+
+            ImGui::PopStyleVar();
         }
         ImGui::EndChild();
 
@@ -690,6 +714,7 @@ void RackView::renderPracticeRibbon() {
 }
 
 void RackView::renderSceneBar() {
+    ImGui::AlignTextToFramePadding();
     ImGui::TextColored(ImVec4(0.75f, 0.78f, 0.85f, 1.0f), "SCENE PRESETS:");
     ImGui::SameLine(0, 12);
 
