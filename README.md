@@ -43,16 +43,18 @@ Full digital audio workstations like REAPER, Ableton Live, or Cubase are indispe
 - **🔌 Modern Dual Plugin Hosting (VST3 & CLAP)**:
   - Native 64-bit hosting for both **VST3** (`IComponent` / `IEditController`) and **CLAP** (`clap_plugin`).
   - **Native Win32 GUI Windows**: Plugin editor interfaces load in dedicated, draggable Win32 windows with message pump isolation.
-  - **Rack Faceplate Previews**: Compact interactive slot previews on the main rack let you monitor state and open the full plugin GUI with a single click.
+  - **Rack Faceplate Previews**: Hardware-style rack faceplates featuring parameter dials, status lamps, and live waveform previews let you monitor state and open the full plugin GUI with a single click.
   - **Plugin Scanner & Manager**: Background directory scanning with default Windows paths (`C:\Program Files\Common Files\VST3`, `CLAP`) and customizable user folders.
+  - **Built-In Zero-Latency Effects**: Comes out-of-the-box with `Praccy Drive` (TS-style overdrive), `Praccy Amp` (tube amp simulation), and `Praccy Stereo Delay` for immediate jamming without third-party plugins.
 - **🎸 Musician's Practice Suite**:
   - **Chromatic Strobe Tuner**: High-precision pitch detection powered by the **YIN autocorrelation algorithm**, displaying note name, octave, and sub-cent cents offset in real time.
-  - **Sample-Accurate Metronome**: Click track with adjustable tempo (BPM), time signatures (2/4, 3/4, 4/4, 6/8), beat subdivisions, and visual pulsing LEDs.
+  - **Sample-Accurate Metronome**: Click track with adjustable tempo (BPM), selectable time signatures (4/4, 3/4, 2/4, 6/8), accented downbeats, and visual pulsing LEDs.
+  - **Adaptive Noise Gate**: Built-in input gate with threshold slider to eliminate high-gain guitar hum and single-coil buzz.
   - **Master Safety Limiter**: Zero-lookahead soft-saturation ceiling to protect your ears and monitors from unexpected feedback spikes or runaway gain.
 - **🎛️ Hardware & MIDI Control**:
-  - **1-Click MIDI Learn**: Map hardware MIDI footswitches, expression pedals, and knobs directly to bypass states, branch toggles, or mix knobs.
-  - **Instant Scene Snapshots**: Switch between Clean, Rhythm, and Lead presets with seamless state transitions.
-- **💾 State Persistence**: Automatically stores your selected ASIO driver, sample rate, buffer size, input channel routing (Stereo, Left Mono, Right Mono), plugin search directories, and window positions across restarts.
+  - **1-Click MIDI Learn**: Map hardware MIDI footswitches, expression pedals, and knobs directly to bypass states, dry/wet mix, and output trim.
+  - **Instant Scene Snapshots**: Switch between Clean, Rhythm, and Lead presets with seamless state transitions, and save custom full-chain presets.
+- **💾 State Persistence**: Automatically stores your selected ASIO driver, sample rate, buffer size, input channel routing (Stereo, Left Mono, Right Mono), master volume, and plugin search directories across restarts.
 
 ---
 
@@ -98,8 +100,8 @@ Full digital audio workstations like REAPER, Ableton Live, or Cubase are indispe
    - **Stereo**: Both channels 1 & 2.
    - **Left Mono (Ch 1)**: Standard single-cable guitar / bass input into input 1.
    - **Right Mono (Ch 2)**: Input 2.
-4. **Scan Plugins**: Click **Plugins > Scan for Plugins** or add your custom VST3/CLAP directories in the scanner dialog.
-5. **Add to Rack**: Click **+ Add Plugin** to insert effects into your rack.
+4. **Scan Plugins**: Click **Plugins...** in the top bar to open the Plugin Manager, or use **Search Paths...** to add custom plugin directories.
+5. **Add to Rack**: Click **+ Add Plugin** on the serial rack or inside any parallel branch to insert effects.
 6. **Parallel Rigs**: Click `[|| Split]` on any slot to branch your signal into parallel paths.
 7. **Tune & Play**: The chromatic tuner is always active at the top of your rack.
 

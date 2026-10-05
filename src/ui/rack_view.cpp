@@ -244,19 +244,37 @@ void RackView::renderPracticeRibbon() {
         if (ImGui::DragFloat("##BPM", &bpm, 1.0f, 40.0f, 260.0f, "%.0f BPM")) {
             m_metronome.setBpm(bpm);
         }
-        ImGui::SameLine(0, 8);
+        ImGui::SameLine(0, 6);
+
+        // Time Signature selector (4/4, 3/4, 2/4, 6/8)
+        const char* timeSigOptions[] = { "4/4", "3/4", "2/4", "6/8" };
+        const int timeSigBeats[] = { 4, 3, 2, 6 };
+        int currentSigIdx = 0;
+        int currentBeats = m_metronome.beatsPerBar();
+        for (int i = 0; i < 4; ++i) {
+            if (timeSigBeats[i] == currentBeats) {
+                currentSigIdx = i;
+                break;
+            }
+        }
+        ImGui::SetNextItemWidth(55);
+        if (ImGui::Combo("##TimeSig", &currentSigIdx, timeSigOptions, 4)) {
+            m_metronome.setBeatsPerBar(timeSigBeats[currentSigIdx]);
+        }
+        ImGui::SameLine(0, 6);
 
         // Vector Beat LEDs
         {
+            const int totalBeats = m_metronome.beatsPerBar();
             const int currentBeat = m_metronome.currentBeat();
             ImDrawList* dl = ImGui::GetWindowDrawList();
             ImVec2 curPos = ImGui::GetCursorScreenPos();
-            const float dotRadius = 5.0f;
-            const float dotSpacing = 14.0f;
+            const float dotRadius = 4.5f;
+            const float dotSpacing = 12.0f;
 
-            for (int b = 0; b < 4; ++b) {
-                float cx = curPos.x + 6.0f + (b * dotSpacing);
-                float cy = curPos.y + 12.0f;
+            for (int b = 0; b < totalBeats; ++b) {
+                float cx = curPos.x + 5.0f + (b * dotSpacing);
+                float cy = curPos.y + 11.0f;
                 bool active = metroPlaying && (b == currentBeat);
 
                 if (active) {
@@ -269,7 +287,7 @@ void RackView::renderPracticeRibbon() {
                     dl->AddCircle(ImVec2(cx, cy), dotRadius, IM_COL32(55, 60, 72, 255), 0, 1.0f);
                 }
             }
-            ImGui::Dummy(ImVec2(4 * dotSpacing + 8.0f, 22.0f));
+            ImGui::Dummy(ImVec2(totalBeats * dotSpacing + 8.0f, 22.0f));
         }
 
         // ----------------------------------------------------
@@ -432,6 +450,30 @@ void RackView::renderSignalRack() {
             auto* block = dynamic_cast<audio::ParallelSplitMergeBlock*>(node);
             renderParallelBlock(block, static_cast<int>(i));
         }
+
+        renderSignalCable(42.0f);
+    }
+
+    // 3.5. Serial Rack Insertion Slot Card (+ Add Plugin)
+    {
+        ImGui::BeginGroup();
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.15f, 0.19f, 0.6f));
+        ImGui::BeginChild("InsertSerialCard", ImVec2(92, 230), true);
+        ImGui::SetCursorPosY(85);
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.26f, 0.36f, 0.85f));
+        if (ImGui::Button("+ Add\nPlugin", ImVec2(76, 55))) {
+            m_insertTargetBlockIndex = -1;
+            m_insertTargetBranchIndex = -1;
+            m_showPluginBrowser = true;
+            m_focusPluginBrowser = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Insert a new plugin into the serial rack");
+        }
+        ImGui::PopStyleColor();
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+        ImGui::EndGroup();
 
         renderSignalCable(42.0f);
     }
@@ -1003,6 +1045,18 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
         }
         if (solo) ImGui::PopStyleColor();
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Solo %s", branch->name().c_str());
+
+        // Phase Invert button (Ø)
+        ImGui::SameLine(0, 4);
+        bool phaseInv = branch->isPhaseInvert();
+        char phaseLabel[32];
+        std::snprintf(phaseLabel, sizeof(phaseLabel), "O##%d_%zu", blockIndex, b);
+        if (phaseInv) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.45f, 0.15f, 1.0f));
+        if (ImGui::Button(phaseLabel, ImVec2(22, 20))) {
+            branch->setPhaseInvert(!phaseInv);
+        }
+        if (phaseInv) ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Phase Invert (180 deg polarity flip)");
 
         // Pan Slider
         ImGui::SameLine(0, 10);

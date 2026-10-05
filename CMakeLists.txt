@@ -106,3 +106,6 @@ add_executable(test_asio_driver
 )
 target_include_directories(test_asio_driver PRIVATE src)
 target_link_libraries(test_asio_driver PRIVATE ole32 uuid winmm avrt)
+
+enable_testing()
+add_test(NAME test_praccy COMMAND test_praccy)
