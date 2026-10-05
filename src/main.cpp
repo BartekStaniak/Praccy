@@ -20,6 +20,7 @@
 #include "state/app_config.h"
 #include "ui/theme.h"
 #include "ui/rack_view.h"
+#include "ui/thumbnail_manager.h"
 
 // Forward declare Win32 message handler from imgui_impl_win32.cpp
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -94,6 +95,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
+    praccy::ui::ThumbnailManager::instance().init(g_pd3dDevice);
 
     // ==========================================
     // Initialize Praccy Core Subsystems & Config
@@ -248,6 +250,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     asio.stop();
     asio.unloadDriver();
 
+    praccy::ui::ThumbnailManager::instance().shutdown();
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();

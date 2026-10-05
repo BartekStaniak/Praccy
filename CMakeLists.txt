@@ -29,6 +29,7 @@ set(PRACCY_SOURCES
     src/state/scene_manager.cpp
     src/state/app_config.cpp
     src/ui/rack_view.cpp
+    src/ui/thumbnail_manager.cpp
     resources/praccy.rc
 
     # Dear ImGui
@@ -45,6 +46,11 @@ set(PRACCY_SOURCES
 )
 
 add_executable(Praccy WIN32 ${PRACCY_SOURCES})
+
+# Copy bundled resources to build output
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/thumbnails")
+    file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/resources/thumbnails" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/resources")
+endif()
 
 target_include_directories(Praccy PRIVATE
     src
@@ -66,6 +72,7 @@ target_link_libraries(Praccy PRIVATE
     ole32
     uuid
     gdi32
+    gdiplus
     user32
     kernel32
 )

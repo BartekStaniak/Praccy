@@ -70,6 +70,9 @@ private:
     int m_insertTargetBlockIndex{-1};
     int m_insertTargetBranchIndex{-1};
     audio::PluginSlot* m_dspTweakSlot{nullptr};
+
+    int m_expandedSlotIndex{-1};
+    float m_expandPulseTimer{0.0f};
 };
 
 } // namespace praccy::ui

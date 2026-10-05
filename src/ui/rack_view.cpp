@@ -1,4 +1,5 @@
 #include "rack_view.h"
+#include "thumbnail_manager.h"
 #include "../plugins/builtin_dsp.h"
 #include "../plugins/clap_host.h"
 #include "../plugins/vst3_host.h"
@@ -10,6 +11,67 @@
 #include <algorithm>
 
 namespace praccy::ui {
+
+static bool renderCenteredSplitButton(const char* id, const ImVec2& size = ImVec2(24, 20)) {
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+    bool clicked = ImGui::InvisibleButton(id, size);
+    bool hovered = ImGui::IsItemHovered();
+    bool held = ImGui::IsItemActive();
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    ImU32 bgCol;
+    if (held)         bgCol = IM_COL32(35, 65, 105, 255);
+    else if (hovered) bgCol = IM_COL32(50, 85, 135, 255);
+    else              bgCol = IM_COL32(40, 60, 95, 220);
+
+    ImU32 borderCol = hovered ? IM_COL32(80, 130, 195, 255) : IM_COL32(55, 80, 120, 200);
+    ImU32 iconCol   = hovered ? IM_COL32(245, 250, 255, 255) : IM_COL32(200, 215, 235, 255);
+
+    dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), bgCol, 4.0f);
+    dl->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), borderCol, 4.0f);
+
+    float cx = std::floor(pos.x + size.x * 0.5f);
+    float cy = std::floor(pos.y + size.y * 0.5f);
+
+    const float barHalfW = 1.0f;
+    const float barHalfH = 4.5f;
+    const float offset = 2.5f;
+
+    dl->AddRectFilled(ImVec2(cx - offset - barHalfW, cy - barHalfH), ImVec2(cx - offset + barHalfW, cy + barHalfH), iconCol, 0.5f);
+    dl->AddRectFilled(ImVec2(cx + offset - barHalfW, cy - barHalfH), ImVec2(cx + offset + barHalfW, cy + barHalfH), iconCol, 0.5f);
+
+    return clicked;
+}
+
+static bool renderCenteredDeleteButton(const char* id, const ImVec2& size = ImVec2(22, 20)) {
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+    bool clicked = ImGui::InvisibleButton(id, size);
+    bool hovered = ImGui::IsItemHovered();
+    bool held = ImGui::IsItemActive();
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    ImU32 bgCol;
+    if (held)         bgCol = IM_COL32(165, 45, 45, 255);
+    else if (hovered) bgCol = IM_COL32(185, 55, 55, 255);
+    else              bgCol = IM_COL32(135, 45, 45, 220);
+
+    ImU32 borderCol = hovered ? IM_COL32(230, 90, 90, 255) : IM_COL32(170, 60, 60, 200);
+    ImU32 iconCol   = hovered ? IM_COL32(255, 255, 255, 255) : IM_COL32(245, 215, 215, 255);
+
+    dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), bgCol, 4.0f);
+    dl->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), borderCol, 4.0f);
+
+    float cx = std::floor(pos.x + size.x * 0.5f);
+    float cy = std::floor(pos.y + size.y * 0.5f);
+
+    const float arm = std::min(4.0f, (size.y - 6.0f) * 0.5f);
+    dl->AddLine(ImVec2(cx - arm, cy - arm), ImVec2(cx + arm, cy + arm), iconCol, 1.8f);
+    dl->AddLine(ImVec2(cx - arm, cy + arm), ImVec2(cx + arm, cy - arm), iconCol, 1.8f);
+
+    return clicked;
+}
 
 RackView::RackView(audio::GraphEngine& graph,
                    audio::AsioManager& asio,
@@ -38,6 +100,12 @@ RackView::RackView(audio::GraphEngine& graph,
 }
 
 void RackView::render() {
+    ThumbnailManager::instance().update();
+    if (m_expandPulseTimer > 0.0f) {
+        m_expandPulseTimer -= ImGui::GetIO().DeltaTime * 2.8f;
+        if (m_expandPulseTimer < 0.0f) m_expandPulseTimer = 0.0f;
+    }
+
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
     ImGuiWindowFlags windowFlags = ImGuiWindowFlags_NoTitleBar |
@@ -607,200 +675,226 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bran
 
         if (branchIndex == -1) {
             // Split into Parallel button
-            ImGui::SameLine(cardWidth - 66.0f);
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.24f, 0.32f, 0.44f, 0.85f));
+            ImGui::SameLine(cardWidth - 62.0f);
             char splitBtnId[32];
-            std::snprintf(splitBtnId, sizeof(splitBtnId), "||##Sp_%d", slotIndex);
-            if (ImGui::Button(splitBtnId, ImVec2(24, 20))) {
+            std::snprintf(splitBtnId, sizeof(splitBtnId), "##Sp_%d", slotIndex);
+            if (renderCenteredSplitButton(splitBtnId, ImVec2(24, 20))) {
                 m_graph.splitSerialNodeIntoParallel(slotIndex);
-                ImGui::PopStyleColor();
                 ImGui::EndChild();
                 ImGui::PopStyleColor();
                 ImGui::EndGroup();
                 return;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Split into Parallel A/B Branches");
-            ImGui::PopStyleColor();
 
             // Delete slot button
-            ImGui::SameLine(0, 4);
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.52f, 0.20f, 0.20f, 0.85f));
+            ImGui::SameLine(0, 5);
             char delBtnId[32];
-            std::snprintf(delBtnId, sizeof(delBtnId), "X##Del_%d", slotIndex);
-            if (ImGui::Button(delBtnId, ImVec2(22, 20))) {
+            std::snprintf(delBtnId, sizeof(delBtnId), "##Del_%d", slotIndex);
+            if (renderCenteredDeleteButton(delBtnId, ImVec2(22, 20))) {
                 if (pluginInst) {
                     plugins::PluginWindowManager::instance().closePluginWindow(pluginInst);
                 }
                 m_graph.removeSerialNode(slotIndex);
-                ImGui::PopStyleColor();
                 ImGui::EndChild();
                 ImGui::PopStyleColor();
                 ImGui::EndGroup();
                 return;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete Plugin Slot");
-            ImGui::PopStyleColor();
         }
     }
 
     ImGui::Spacing();
 
     // ----------------------------------------------------
-    // Row 2: Rich Hardware Faceplate & GUI Preview Screen
+    // Row 2: Plugin GUI Screenshot / Preview Screen
     // ----------------------------------------------------
     {
         const ImVec2 previewPos = ImGui::GetCursorScreenPos();
-        const float previewW = cardWidth - 16.0f;
-        const float previewH = 96.0f;
+        const float previewW = cardWidth - 16.0f; // 224.0f
+        const float previewH = 104.0f;
         ImDrawList* dl = ImGui::GetWindowDrawList();
 
-        // Faceplate outer chassis
-        ImU32 faceplateBg = bypassed ? IM_COL32(18, 20, 26, 255) : IM_COL32(23, 26, 35, 255);
-        ImU32 faceplateBorder = isWindowOpen ? IM_COL32(40, 210, 80, 255) : IM_COL32(45, 52, 68, 255);
-        dl->AddRectFilled(previewPos, ImVec2(previewPos.x + previewW, previewPos.y + previewH), faceplateBg, 5.0f);
-        dl->AddRect(previewPos, ImVec2(previewPos.x + previewW, previewPos.y + previewH), faceplateBorder, 5.0f, 0, isWindowOpen ? 1.5f : 1.0f);
+        Thumbnail* thumb = ThumbnailManager::instance().getThumbnail(slot->name());
 
-        // Rack screw rivets at top corners
-        dl->AddCircleFilled(ImVec2(previewPos.x + 6.0f, previewPos.y + 6.0f), 2.0f, IM_COL32(65, 70, 85, 255));
-        dl->AddCircleFilled(ImVec2(previewPos.x + previewW - 6.0f, previewPos.y + 6.0f), 2.0f, IM_COL32(65, 70, 85, 255));
+        // Frame background & border
+        ImU32 frameBg = bypassed ? IM_COL32(16, 18, 24, 255) : IM_COL32(20, 24, 32, 255);
+        ImU32 frameBorder = isWindowOpen ? IM_COL32(40, 215, 95, 255) : IM_COL32(48, 54, 70, 255);
+        float borderWidth = isWindowOpen ? 1.5f : 1.0f;
 
-        // Format tag & Vendor header
-        std::string formatTag = "[DSP]";
-        ImU32 tagColor = IM_COL32(245, 170, 45, 255);
-        std::string vendorText = "Built-In";
+        dl->AddRectFilled(previewPos, ImVec2(previewPos.x + previewW, previewPos.y + previewH), frameBg, 5.0f);
 
-        if (pluginInst) {
-            if (dynamic_cast<plugins::Vst3PluginInstance*>(pluginInst)) {
-                formatTag = "[VST3]";
-                tagColor = IM_COL32(65, 185, 255, 255);
-            } else {
-                formatTag = "[CLAP]";
-                tagColor = IM_COL32(220, 110, 240, 255);
-            }
-            vendorText = pluginInst->vendor();
-            if (vendorText.length() > 14) vendorText = vendorText.substr(0, 13) + "..";
+        // Invisible button to capture click and hover over the entire preview area
+        ImGui::SetCursorScreenPos(previewPos);
+        char previewBtnId[64];
+        std::snprintf(previewBtnId, sizeof(previewBtnId), "##GuiPreview_%d_%d", slotIndex, branchIndex);
+        bool previewClicked = ImGui::InvisibleButton(previewBtnId, ImVec2(previewW, previewH));
+        bool isPreviewHovered = ImGui::IsItemHovered();
+
+        if (isPreviewHovered) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            ImGui::SetTooltip(pluginInst ? "Click to Open / Focus %s GUI" : "Click to Open DSP Parameters", slot->name().c_str());
+            frameBorder = isWindowOpen ? IM_COL32(70, 240, 130, 255) : IM_COL32(75, 145, 235, 255);
+            borderWidth = 1.5f;
         }
 
-        dl->AddText(ImVec2(previewPos.x + 12.0f, previewPos.y + 6.0f), tagColor, formatTag.c_str());
-        dl->AddText(ImVec2(previewPos.x + 58.0f, previewPos.y + 6.0f), IM_COL32(130, 138, 155, 255), vendorText.c_str());
+        // Draw preview content:
+        if (thumb && thumb->srv) {
+            // Calculate aspect ratio fit within previewW x previewH with 2px margin
+            float maxW = previewW - 4.0f;
+            float maxH = previewH - 4.0f;
+            float aspect = (thumb->height > 0) ? (static_cast<float>(thumb->width) / static_cast<float>(thumb->height)) : 1.0f;
 
-        // Top right of faceplate: GUI Button / Status Lamp
-        const float guiBtnW = 68.0f;
-        const float guiBtnH = 18.0f;
-        const ImVec2 guiBtnPos(previewPos.x + previewW - guiBtnW - 8.0f, previewPos.y + 5.0f);
+            float drawW = maxW;
+            float drawH = maxW / aspect;
+            if (drawH > maxH) {
+                drawH = maxH;
+                drawW = maxH * aspect;
+            }
 
-        // Clickable region for OPEN GUI button
-        ImGui::SetCursorScreenPos(guiBtnPos);
-        char guiBtnId[32];
-        std::snprintf(guiBtnId, sizeof(guiBtnId), "##GuiBtn_%d_%d", slotIndex, branchIndex);
-        if (ImGui::InvisibleButton(guiBtnId, ImVec2(guiBtnW, guiBtnH))) {
+            ImVec2 imgMin(
+                std::floor(previewPos.x + (previewW - drawW) * 0.5f),
+                std::floor(previewPos.y + (previewH - drawH) * 0.5f)
+            );
+            ImVec2 imgMax(imgMin.x + drawW, imgMin.y + drawH);
+
+            ImU32 tintCol = bypassed ? IM_COL32(160, 160, 175, 180) : IM_COL32(255, 255, 255, 255);
+            dl->AddImageRounded((ImTextureID)thumb->srv, imgMin, imgMax, ImVec2(0, 0), ImVec2(1, 1), tintCol, 4.0f);
+
+            // Sleek format badge on top-left of image
+            std::string formatTag = "[DSP]";
+            ImU32 tagColor = IM_COL32(245, 170, 45, 230);
+            if (pluginInst) {
+                if (dynamic_cast<plugins::Vst3PluginInstance*>(pluginInst)) {
+                    formatTag = "VST3";
+                    tagColor = IM_COL32(65, 185, 255, 230);
+                } else {
+                    formatTag = "CLAP";
+                    tagColor = IM_COL32(220, 110, 240, 230);
+                }
+            }
+            ImVec2 badgePos(previewPos.x + 6.0f, previewPos.y + 6.0f);
+            ImVec2 badgeSz = ImGui::CalcTextSize(formatTag.c_str());
+            dl->AddRectFilled(ImVec2(badgePos.x - 2.0f, badgePos.y - 1.0f),
+                              ImVec2(badgePos.x + badgeSz.x + 4.0f, badgePos.y + badgeSz.y + 1.0f),
+                              IM_COL32(15, 18, 25, 200), 3.0f);
+            dl->AddText(badgePos, tagColor, formatTag.c_str());
+
+            // If window is open, draw an active "● OPEN" badge on top-right
+            if (isWindowOpen) {
+                const char* openTag = "● OPEN";
+                ImVec2 oSz = ImGui::CalcTextSize(openTag);
+                ImVec2 oPos(previewPos.x + previewW - oSz.x - 8.0f, previewPos.y + 6.0f);
+                dl->AddRectFilled(ImVec2(oPos.x - 3.0f, oPos.y - 1.0f),
+                                  ImVec2(oPos.x + oSz.x + 3.0f, oPos.y + oSz.y + 1.0f),
+                                  IM_COL32(18, 50, 28, 220), 3.0f);
+                dl->AddText(oPos, IM_COL32(50, 240, 110, 255), openTag);
+            }
+
+            // If hovered, draw subtle translucent glass overlay + "[ EXPAND GUI ↗ ]" prompt
+            if (isPreviewHovered) {
+                dl->AddRectFilled(previewPos, ImVec2(previewPos.x + previewW, previewPos.y + previewH),
+                                  IM_COL32(15, 20, 30, 90), 5.0f);
+                const char* expandPrompt = isWindowOpen ? "FOCUS WINDOW ↗" : "EXPAND GUI ↗";
+                ImVec2 pSz = ImGui::CalcTextSize(expandPrompt);
+                ImVec2 pPos(previewPos.x + (previewW - pSz.x) * 0.5f, previewPos.y + (previewH - pSz.y) * 0.5f);
+                dl->AddRectFilled(ImVec2(pPos.x - 8.0f, pPos.y - 3.0f),
+                                  ImVec2(pPos.x + pSz.x + 8.0f, pPos.y + pSz.y + 3.0f),
+                                  IM_COL32(18, 24, 38, 230), 4.0f);
+                dl->AddRect(ImVec2(pPos.x - 8.0f, pPos.y - 3.0f),
+                            ImVec2(pPos.x + pSz.x + 8.0f, pPos.y + pSz.y + 3.0f),
+                            IM_COL32(80, 140, 220, 200), 4.0f);
+                dl->AddText(pPos, IM_COL32(230, 240, 255, 255), expandPrompt);
+            }
+        } else {
+            // Procedural Faceplate Fallback (when no screenshot has been captured yet)
+            // Rivets at corners
+            dl->AddCircleFilled(ImVec2(previewPos.x + 6.0f, previewPos.y + 6.0f), 2.0f, IM_COL32(65, 70, 85, 255));
+            dl->AddCircleFilled(ImVec2(previewPos.x + previewW - 6.0f, previewPos.y + 6.0f), 2.0f, IM_COL32(65, 70, 85, 255));
+
+            std::string formatTag = "[DSP]";
+            ImU32 tagColor = IM_COL32(245, 170, 45, 255);
+            std::string vendorText = "Built-In";
+
+            if (pluginInst) {
+                if (dynamic_cast<plugins::Vst3PluginInstance*>(pluginInst)) {
+                    formatTag = "[VST3]";
+                    tagColor = IM_COL32(65, 185, 255, 255);
+                } else {
+                    formatTag = "[CLAP]";
+                    tagColor = IM_COL32(220, 110, 240, 255);
+                }
+                vendorText = pluginInst->vendor();
+                if (vendorText.length() > 14) vendorText = vendorText.substr(0, 13) + "..";
+            }
+
+            dl->AddText(ImVec2(previewPos.x + 12.0f, previewPos.y + 6.0f), tagColor, formatTag.c_str());
+            dl->AddText(ImVec2(previewPos.x + 60.0f, previewPos.y + 6.0f), IM_COL32(130, 138, 155, 255), vendorText.c_str());
+
+            // Center: Screen / Camera Icon & Click to Open
+            float midX = previewPos.x + previewW * 0.5f;
+            float midY = previewPos.y + 48.0f;
+
+            // Draw vector monitor icon
+            dl->AddRect(ImVec2(midX - 14.0f, midY - 12.0f), ImVec2(midX + 14.0f, midY + 8.0f),
+                        isPreviewHovered ? IM_COL32(100, 180, 255, 255) : IM_COL32(100, 115, 140, 255), 2.0f, 0, 1.5f);
+            dl->AddLine(ImVec2(midX, midY + 8.0f), ImVec2(midX, midY + 13.0f),
+                        isPreviewHovered ? IM_COL32(100, 180, 255, 255) : IM_COL32(100, 115, 140, 255), 1.5f);
+            dl->AddLine(ImVec2(midX - 6.0f, midY + 13.0f), ImVec2(midX + 6.0f, midY + 13.0f),
+                        isPreviewHovered ? IM_COL32(100, 180, 255, 255) : IM_COL32(100, 115, 140, 255), 1.5f);
+
+            const char* promptText = pluginInst ? "CLICK TO OPEN GUI" : "CLICK TO EDIT DSP";
+            ImVec2 pSz = ImGui::CalcTextSize(promptText);
+            dl->AddText(ImVec2(midX - pSz.x * 0.5f, previewPos.y + 70.0f),
+                        isPreviewHovered ? IM_COL32(230, 240, 255, 255) : IM_COL32(150, 160, 180, 255),
+                        promptText);
+
+            if (pluginInst) {
+                const char* subPrompt = "(Auto-captures preview)";
+                ImVec2 sSz = ImGui::CalcTextSize(subPrompt);
+                dl->AddText(ImVec2(midX - sSz.x * 0.5f, previewPos.y + 86.0f),
+                            IM_COL32(110, 120, 140, 220), subPrompt);
+            }
+        }
+
+        // Outer border
+        dl->AddRect(previewPos, ImVec2(previewPos.x + previewW, previewPos.y + previewH), frameBorder, 5.0f, 0, borderWidth);
+
+        // Click-to-expand handling & expansion animation
+        if (previewClicked) {
             if (pluginInst) {
                 plugins::PluginWindowManager::instance().openPluginWindow(pluginInst);
+                HWND hw = plugins::PluginWindowManager::instance().getWindow(pluginInst);
+                if (hw) {
+                    ThumbnailManager::instance().requestCapture(slot->name(), hw, 25);
+                }
             } else {
                 m_dspTweakSlot = slot;
             }
-        }
-        bool isGuiHovered = ImGui::IsItemHovered();
-        if (isGuiHovered) {
-            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-            ImGui::SetTooltip(pluginInst ? "Open / Focus %s Native GUI" : "Open DSP Parameters", slot->name().c_str());
+            m_expandedSlotIndex = slotIndex;
+            m_expandPulseTimer = 1.0f;
         }
 
-        // Render GUI button pill with glowing LED
-        ImU32 pillBg = isWindowOpen ? IM_COL32(24, 60, 36, 255) : (isGuiHovered ? IM_COL32(40, 50, 70, 255) : IM_COL32(28, 34, 46, 255));
-        ImU32 pillBorder = isWindowOpen ? IM_COL32(50, 220, 100, 255) : (isGuiHovered ? IM_COL32(90, 130, 190, 255) : IM_COL32(55, 62, 80, 255));
-        dl->AddRectFilled(guiBtnPos, ImVec2(guiBtnPos.x + guiBtnW, guiBtnPos.y + guiBtnH), pillBg, 3.0f);
-        dl->AddRect(guiBtnPos, ImVec2(guiBtnPos.x + guiBtnW, guiBtnPos.y + guiBtnH), pillBorder, 3.0f);
-
-        if (isWindowOpen) {
-            dl->AddCircleFilled(ImVec2(guiBtnPos.x + 8.0f, guiBtnPos.y + 9.0f), 3.0f, IM_COL32(50, 230, 90, 255));
-            dl->AddText(ImVec2(guiBtnPos.x + 16.0f, guiBtnPos.y + 3.0f), IM_COL32(90, 245, 130, 255), "WINDOW");
-        } else {
-            dl->AddCircleFilled(ImVec2(guiBtnPos.x + 8.0f, guiBtnPos.y + 9.0f), 2.5f, IM_COL32(120, 130, 150, 255));
-            dl->AddText(ImVec2(guiBtnPos.x + 16.0f, guiBtnPos.y + 3.0f), isGuiHovered ? IM_COL32(255, 255, 255, 255) : IM_COL32(160, 170, 190, 255), "OPEN GUI");
-        }
-
-        // Inner Divider
-        dl->AddLine(ImVec2(previewPos.x + 8.0f, previewPos.y + 26.0f),
-                    ImVec2(previewPos.x + previewW - 8.0f, previewPos.y + 26.0f),
-                    IM_COL32(36, 42, 56, 255), 1.0f);
-
-        // Center / Main section: Rotary Parameter Knobs
-        size_t numParams = pluginInst ? pluginInst->numParameters() : 0;
-        if (numParams > 0) {
-            size_t displayCount = std::min(numParams, size_t(3));
-            float knobRadius = 13.0f;
-            float stepX = (previewW - 16.0f) / static_cast<float>(displayCount);
-
-            for (size_t p = 0; p < displayCount; ++p) {
-                auto desc = pluginInst->getParameterDesc(p);
-                float val = pluginInst->getParameterValue(desc.id);
-                float kCenterX = previewPos.x + 8.0f + (p + 0.5f) * stepX;
-                float kCenterY = previewPos.y + 52.0f;
-
-                ImGui::SetCursorScreenPos(ImVec2(kCenterX - knobRadius - 4.0f, kCenterY - knobRadius - 4.0f));
-                char knobId[64];
-                std::snprintf(knobId, sizeof(knobId), "##Knob_%d_%d_%zu", slotIndex, branchIndex, p);
-
-                float minV = desc.minValue;
-                float maxV = (desc.maxValue > desc.minValue) ? desc.maxValue : desc.minValue + 1.0f;
-
-                float knobVal = val;
-                if (renderRotaryKnob(knobId, &knobVal, minV, maxV, knobRadius)) {
-                    pluginInst->setParameterValue(desc.id, knobVal);
-                }
-
-                // Param label below knob
-                std::string pName = desc.name;
-                if (pName.length() > 6) pName = pName.substr(0, 5) + ".";
-                ImVec2 tSz = ImGui::CalcTextSize(pName.c_str());
-                dl->AddText(ImVec2(kCenterX - tSz.x * 0.5f, previewPos.y + 76.0f),
-                            IM_COL32(160, 168, 185, 255), pName.c_str());
-            }
-        } else {
-            // Live dynamic oscilloscope waveform & EQ curve
-            float leftPeak = slot->meter().peakLeft();
-            float rightPeak = slot->meter().peakRight();
-            float activity = std::max(leftPeak, rightPeak);
-
-            const int numPoints = 24;
-            float step = (previewW - 24.0f) / static_cast<float>(numPoints - 1);
-            float startX = previewPos.x + 12.0f;
-            float midY = previewPos.y + 58.0f;
-            float amp = std::min(20.0f, 5.0f + activity * 35.0f);
-
-            static float s_phase = 0.0f;
-            s_phase += 0.04f;
-
-            ImVec2 lastPt(startX, midY);
-            for (int pt = 0; pt < numPoints; ++pt) {
-                float px = startX + pt * step;
-                float py = midY + std::sin(s_phase + pt * 0.45f) * amp * (0.3f + 0.7f * std::sin((pt / (float)numPoints) * 3.14159f));
-                if (pt > 0) {
-                    ImU32 waveCol = bypassed ? IM_COL32(70, 75, 90, 180) : IM_COL32(40, 200, 230, 220);
-                    dl->AddLine(lastPt, ImVec2(px, py), waveCol, 1.8f);
-                }
-                lastPt = ImVec2(px, py);
-            }
-
-            // Click faceplate prompt
-            ImVec2 pPrompt = ImVec2(previewPos.x + previewW * 0.5f - 40.0f, previewPos.y + 76.0f);
-            dl->AddText(pPrompt, IM_COL32(140, 150, 175, 200), "[ CLICK TO EDIT ]");
-
-            // Invisible button covering the area so clicking opens GUI
-            ImGui::SetCursorScreenPos(ImVec2(startX, previewPos.y + 28.0f));
-            char waveBtnId[32];
-            std::snprintf(waveBtnId, sizeof(waveBtnId), "##WaveClick_%d_%d", slotIndex, branchIndex);
-            if (ImGui::InvisibleButton(waveBtnId, ImVec2(previewW - 24.0f, 58.0f))) {
-                if (pluginInst) plugins::PluginWindowManager::instance().openPluginWindow(pluginInst);
-                else m_dspTweakSlot = slot;
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        // If window is currently open but we have no cached thumbnail yet, request capture
+        if (isWindowOpen && !thumb && pluginInst) {
+            HWND hw = plugins::PluginWindowManager::instance().getWindow(pluginInst);
+            if (hw) {
+                ThumbnailManager::instance().requestCapture(slot->name(), hw, 20);
             }
         }
 
-        // Return cursor below the faceplate preview
+        // Expanding pulse wave animation from center
+        if (m_expandedSlotIndex == slotIndex && m_expandPulseTimer > 0.0f) {
+            float progress = 1.0f - m_expandPulseTimer; // 0.0 -> 1.0
+            float radius = 15.0f + progress * (previewW * 0.7f);
+            int alpha = static_cast<int>((1.0f - progress) * 220);
+            ImVec2 center(previewPos.x + previewW * 0.5f, previewPos.y + previewH * 0.5f);
+            dl->AddCircle(center, radius, IM_COL32(60, 210, 255, alpha), 36, 2.5f);
+            dl->AddCircle(center, radius * 0.7f, IM_COL32(120, 240, 180, alpha / 2), 36, 1.5f);
+        }
+
+        // Return cursor below the preview screen
         ImGui::SetCursorScreenPos(ImVec2(previewPos.x, previewPos.y + previewH + 4.0f));
     }
 
@@ -853,10 +947,20 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bran
         }
     }
 
-    // Context Menu for MIDI Learn
+    // Context Menu for MIDI Learn & GUI Options
     char popupId[64];
     std::snprintf(popupId, sizeof(popupId), "SlotCtx_%d_%d", slotIndex, branchIndex);
     if (ImGui::BeginPopupContextItem(popupId)) {
+        if (pluginInst) {
+            if (ImGui::MenuItem("Open Plugin GUI Window")) {
+                plugins::PluginWindowManager::instance().openPluginWindow(pluginInst);
+            }
+            HWND hWin = plugins::PluginWindowManager::instance().getWindow(pluginInst);
+            if (hWin && ImGui::MenuItem("Capture GUI Preview Screenshot")) {
+                ThumbnailManager::instance().captureWindow(slot->name(), hWin);
+            }
+            ImGui::Separator();
+        }
         if (ImGui::MenuItem("MIDI Learn: Bypass Toggle")) {
             m_midi.startLearning(midi::BindingTargetType::SlotBypass, slotIndex, branchIndex);
         }
@@ -901,23 +1005,21 @@ void RackView::renderMiniHardwareSlot(audio::PluginSlot* slot, int blockIndex, s
     ImGui::TextColored(isBypassed ? ImVec4(0.6f, 0.6f, 0.6f, 1.0f) : ImVec4(0.95f, 0.95f, 1.0f, 1.0f),
                        "%s", sName.c_str());
 
-    ImGui::SameLine(slotW - 30.0f);
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.48f, 0.18f, 0.18f, 0.85f));
+    ImGui::SameLine(slotW - 26.0f);
     char rmBtnId[32];
-    std::snprintf(rmBtnId, sizeof(rmBtnId), "x##rm_%d_%zu_%zu", blockIndex, branchIndex, slotIndex);
-    if (ImGui::Button(rmBtnId, ImVec2(18, 16))) {
+    std::snprintf(rmBtnId, sizeof(rmBtnId), "##rm_%d_%zu_%zu", blockIndex, branchIndex, slotIndex);
+    if (renderCenteredDeleteButton(rmBtnId, ImVec2(18, 16))) {
         if (pInst) plugins::PluginWindowManager::instance().closePluginWindow(pInst);
         auto* block = dynamic_cast<audio::ParallelSplitMergeBlock*>(m_graph.getNode(blockIndex));
         if (block) {
             auto* branch = block->getBranch(branchIndex);
             if (branch) branch->removeSlot(slotIndex);
         }
-        ImGui::PopStyleColor();
         ImGui::EndChild();
         ImGui::PopStyleColor();
         return;
     }
-    ImGui::PopStyleColor();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete Slot");
 
     // Row 2: [ACTIVE/BYP] and [GUI] buttons
     char bypId[32];
