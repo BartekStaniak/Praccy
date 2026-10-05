@@ -1,0 +1,27 @@
+# Build directories
+build/
+bin/
+out/
+.vs/
+*.user
+*.suo
+
+# CMake artifacts
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.ninja
+
+# OS files
+.DS_Store
+Thumbs.db
+[Dd]esktop.ini
+
+# Output binaries
+*.exe
+*.dll
+*.pdb
+*.lib
+*.exp
+*.ilk
