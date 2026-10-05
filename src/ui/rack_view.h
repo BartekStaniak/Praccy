@@ -38,6 +38,7 @@ private:
     void renderBottomBar();
     void renderMeter(const char* label, float level, float width, float height);
     void renderPluginBrowserModal();
+    void renderDspTweakModal();
 
     audio::GraphEngine& m_graph;
     audio::AsioManager& m_asio;
@@ -52,6 +53,10 @@ private:
 
     bool m_showPluginBrowser{false};
     char m_newPathBuffer[260]{0};
+
+    int m_insertTargetBlockIndex{-1};
+    int m_insertTargetBranchIndex{-1};
+    audio::PluginSlot* m_dspTweakSlot{nullptr};
 };
 
 } // namespace praccy::ui

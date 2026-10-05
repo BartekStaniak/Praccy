@@ -11,12 +11,15 @@ set(PRACCY_SOURCES
     src/audio/asio_manager.cpp
     src/audio/graph_engine.cpp
     src/plugins/clap_host.cpp
+    src/plugins/vst3_host.cpp
+    src/plugins/plugin_window.cpp
     src/plugins/builtin_dsp.cpp
     src/plugins/plugin_scanner.cpp
     src/midi/midi_manager.cpp
     src/tools/tuner.cpp
     src/tools/metronome.cpp
     src/state/scene_manager.cpp
+    src/state/app_config.cpp
     src/ui/rack_view.cpp
 
     # Dear ImGui
@@ -26,12 +29,17 @@ set(PRACCY_SOURCES
     third_party/imgui/imgui_widgets.cpp
     third_party/imgui/backends/imgui_impl_win32.cpp
     third_party/imgui/backends/imgui_impl_dx11.cpp
+
+    # VST3 Pluginterfaces Base
+    third_party/vst3_pluginterfaces/base/funknown.cpp
+    third_party/vst3_pluginterfaces/base/coreiids.cpp
 )
 
 add_executable(Praccy WIN32 ${PRACCY_SOURCES})
 
 target_include_directories(Praccy PRIVATE
     src
+    third_party
     third_party/imgui
     third_party/imgui/backends
     third_party/clap/include
@@ -67,7 +75,10 @@ add_executable(test_praccy
     src/tools/tuner.cpp
     src/tools/metronome.cpp
     src/state/scene_manager.cpp
+    src/state/app_config.cpp
 )
+target_include_directories(test_praccy PRIVATE src)
+
 
 add_executable(test_asio_driver
     tests/test_asio_driver.cpp

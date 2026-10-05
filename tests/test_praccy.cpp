@@ -209,6 +209,85 @@ void testSceneManager() {
     std::cout << "PASSED\n";
 }
 
+void testGraphEngineDynamicTopology() {
+    std::cout << "[TEST] Dynamic Topology (Split, Delete, Branch Slot Removal)... ";
+
+    audio::GraphEngine engine;
+    engine.prepare(48000.0, 128);
+
+    // 1. Add 3 slots
+    engine.addSerialNode(std::make_unique<audio::PluginSlot>(std::make_unique<plugins::OverdriveEffect>()));
+    engine.addSerialNode(std::make_unique<audio::PluginSlot>(std::make_unique<plugins::TubeAmpEffect>()));
+    engine.addSerialNode(std::make_unique<audio::PluginSlot>(std::make_unique<plugins::StereoDelayEffect>()));
+    assert(engine.numNodes() == 3);
+
+    // 2. Remove middle slot (TubeAmp)
+    engine.removeSerialNode(1);
+    assert(engine.numNodes() == 2);
+    assert(engine.getNode(0)->name() == "Praccy Drive");
+    assert(engine.getNode(1)->name() == "Praccy Stereo Delay");
+
+    // 3. Split node 0 (Drive) into parallel branches
+    engine.splitSerialNodeIntoParallel(0);
+    assert(engine.numNodes() == 2);
+    assert(engine.getNode(0)->type() == audio::NodeType::ParallelSplitMerge);
+
+    auto* block = dynamic_cast<audio::ParallelSplitMergeBlock*>(engine.getNode(0));
+    assert(block != nullptr);
+    assert(block->numBranches() == 2);
+
+    auto* branchA = block->getBranch(0);
+    auto* branchB = block->getBranch(1);
+    assert(branchA->numSlots() == 1);
+    assert(branchA->getSlot(0)->name() == "Praccy Drive");
+    assert(branchB->numSlots() == 0);
+
+    // 4. Add slot to Branch B and verify removal
+    branchB->addSlot(std::make_unique<audio::PluginSlot>(std::make_unique<plugins::TubeAmpEffect>()));
+    assert(branchB->numSlots() == 1);
+    branchB->removeSlot(0);
+    assert(branchB->numSlots() == 0);
+
+    // 5. Test input routing modes
+    audio::InputRoutingConfig inCfg;
+    inCfg.mode = audio::InputRoutingMode::MonoRight;
+    engine.setInputRouting(inCfg);
+    assert(engine.inputRouting().mode == audio::InputRoutingMode::MonoRight);
+
+    std::cout << "PASSED\n";
+}
+
+#include "state/app_config.h"
+
+void testAppConfigPersistence() {
+    std::cout << "[TEST] AppConfig Persistence (Save & Load)... ";
+
+    const std::string testPath = "test_config_temp.ini";
+
+    state::AppConfig cfg;
+    cfg.lastAsioDriver = "Yamaha Steinberg USB ASIO";
+    cfg.inputMode = audio::InputRoutingMode::MonoRight;
+    cfg.inputGainDb = 4.5f;
+    cfg.masterVolumeDb = -2.0f;
+    cfg.metronomeBpm = 135.0f;
+    cfg.customPluginPaths = {"D:\\VSTPlugins", "E:\\MyAudio"};
+
+    assert(cfg.save(testPath) == true);
+
+    state::AppConfig loaded;
+    assert(loaded.load(testPath) == true);
+    assert(loaded.lastAsioDriver == "Yamaha Steinberg USB ASIO");
+    assert(loaded.inputMode == audio::InputRoutingMode::MonoRight);
+    assert(std::abs(loaded.inputGainDb - 4.5f) < 1e-4f);
+    assert(std::abs(loaded.masterVolumeDb - (-2.0f)) < 1e-4f);
+    assert(std::abs(loaded.metronomeBpm - 135.0f) < 1e-4f);
+    assert(loaded.customPluginPaths.size() >= 2);
+
+    std::remove(testPath.c_str());
+
+    std::cout << "PASSED\n";
+}
+
 int main() {
     std::cout << "===========================================\n";
     std::cout << "   PRACCY CORE AUDIO ENGINE TEST SUITE   \n";
@@ -220,9 +299,11 @@ int main() {
     testTunerPitchDetection();
     testMetronome();
     testSceneManager();
+    testGraphEngineDynamicTopology();
+    testAppConfigPersistence();
 
     std::cout << "===========================================\n";
-    std::cout << "   ALL TESTS PASSED SUCCESSFULLY! (6/6)    \n";
+    std::cout << "   ALL TESTS PASSED SUCCESSFULLY! (8/8)    \n";
     std::cout << "===========================================\n";
     return 0;
 }

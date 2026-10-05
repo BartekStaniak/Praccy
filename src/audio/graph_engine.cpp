@@ -134,6 +134,12 @@ void ParallelBranch::addSlot(std::unique_ptr<PluginSlot> slot) {
     m_slots.push_back(std::move(slot));
 }
 
+void ParallelBranch::removeSlot(size_t index) {
+    if (index < m_slots.size()) {
+        m_slots.erase(m_slots.begin() + index);
+    }
+}
+
 PluginSlot* ParallelBranch::getSlot(size_t index) noexcept {
     if (index < m_slots.size()) return m_slots[index].get();
     return nullptr;
@@ -182,6 +188,12 @@ void ParallelSplitMergeBlock::reset() {
 ParallelBranch* ParallelSplitMergeBlock::addBranch(const std::string& branchName) {
     m_branches.push_back(std::make_unique<ParallelBranch>(branchName));
     return m_branches.back().get();
+}
+
+void ParallelSplitMergeBlock::removeBranch(size_t index) {
+    if (index < m_branches.size()) {
+        m_branches.erase(m_branches.begin() + index);
+    }
 }
 
 ParallelBranch* ParallelSplitMergeBlock::getBranch(size_t index) noexcept {
@@ -314,6 +326,39 @@ void GraphEngine::addSerialNode(std::unique_ptr<AudioNode> node) {
         node->prepare(m_sampleRate, m_maxBlockSize);
         m_nodes.push_back(std::move(node));
     }
+}
+
+void GraphEngine::removeSerialNode(size_t index) {
+    std::lock_guard<std::mutex> lock(m_graphMutex);
+    if (index < m_nodes.size()) {
+        m_nodes.erase(m_nodes.begin() + index);
+    }
+}
+
+void GraphEngine::splitSerialNodeIntoParallel(size_t index) {
+    std::lock_guard<std::mutex> lock(m_graphMutex);
+    if (index >= m_nodes.size()) return;
+
+    auto originalNode = std::move(m_nodes[index]);
+
+    auto parallelBlock = std::make_unique<ParallelSplitMergeBlock>("Parallel Split/Merge");
+    parallelBlock->prepare(m_sampleRate, m_maxBlockSize);
+
+    auto* branchA = parallelBlock->addBranch("Branch A");
+    branchA->prepare(m_sampleRate, m_maxBlockSize);
+    branchA->setPan(-0.5f);
+
+    auto* slotA = dynamic_cast<PluginSlot*>(originalNode.get());
+    if (slotA) {
+        originalNode.release();
+        branchA->addSlot(std::unique_ptr<PluginSlot>(slotA));
+    }
+
+    auto* branchB = parallelBlock->addBranch("Branch B");
+    branchB->prepare(m_sampleRate, m_maxBlockSize);
+    branchB->setPan(+0.5f);
+
+    m_nodes[index] = std::move(parallelBlock);
 }
 
 void GraphEngine::clearNodes() {

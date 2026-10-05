@@ -65,6 +65,7 @@ public:
     void reset();
 
     void addSlot(std::unique_ptr<PluginSlot> slot);
+    void removeSlot(size_t index);
     [[nodiscard]] size_t numSlots() const noexcept { return m_slots.size(); }
     [[nodiscard]] PluginSlot* getSlot(size_t index) noexcept;
 
@@ -119,6 +120,7 @@ public:
     [[nodiscard]] const std::string& name() const noexcept override { return m_name; }
 
     ParallelBranch* addBranch(const std::string& branchName);
+    void removeBranch(size_t index);
     [[nodiscard]] size_t numBranches() const noexcept { return m_branches.size(); }
     [[nodiscard]] ParallelBranch* getBranch(size_t index) noexcept;
 
@@ -166,6 +168,8 @@ public:
     void reset();
 
     void addSerialNode(std::unique_ptr<AudioNode> node);
+    void removeSerialNode(size_t index);
+    void splitSerialNodeIntoParallel(size_t index);
     void clearNodes();
 
     [[nodiscard]] size_t numNodes() const noexcept;

@@ -16,6 +16,8 @@
 #include "state/scene_manager.h"
 #include "plugins/builtin_dsp.h"
 #include "plugins/plugin_scanner.h"
+#include "plugins/plugin_window.h"
+#include "state/app_config.h"
 #include "ui/theme.h"
 #include "ui/rack_view.h"
 
@@ -83,10 +85,21 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
     // ==========================================
-    // Initialize Praccy Core Subsystems
+    // Initialize Praccy Core Subsystems & Config
     // ==========================================
+    praccy::state::AppConfig appConfig;
+    bool configLoaded = appConfig.load();
+
     praccy::audio::GraphEngine graph;
     graph.prepare(48000.0, 256);
+
+    if (configLoaded) {
+        praccy::audio::InputRoutingConfig inCfg;
+        inCfg.mode = appConfig.inputMode;
+        graph.setInputRouting(inCfg);
+        graph.setInputGainDb(appConfig.inputGainDb);
+        graph.setMasterVolumeDb(appConfig.masterVolumeDb);
+    }
 
     // Populate default guitar practice rig
     auto drive = std::make_unique<praccy::plugins::OverdriveEffect>();
@@ -102,6 +115,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     praccy::tools::Metronome metronome;
     metronome.prepare(48000.0);
+    if (configLoaded) {
+        metronome.setBpm(appConfig.metronomeBpm);
+    }
 
     praccy::midi::MidiManager midi;
     praccy::state::SceneManager scenes;
@@ -119,18 +135,37 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         metronome.process(out);
     });
 
-    // Auto-select and start available ASIO driver (prefer dedicated hardware USB interfaces)
+    // Auto-select and start ASIO driver (prioritizing last saved driver, then hardware USB)
     auto drivers = praccy::audio::AsioManager::enumerateDrivers();
     int activeDriverIdx = -1;
-    for (size_t i = 0; i < drivers.size(); ++i) {
-        if (drivers[i].name.find("USB") != std::string::npos) {
-            if (asio.loadDriver(drivers[i], hwnd)) {
-                activeDriverIdx = static_cast<int>(i);
-                asio.start();
-                break;
+
+    // 1. Try to restore last saved driver
+    if (configLoaded && !appConfig.lastAsioDriver.empty()) {
+        for (size_t i = 0; i < drivers.size(); ++i) {
+            if (drivers[i].name == appConfig.lastAsioDriver) {
+                if (asio.loadDriver(drivers[i], hwnd)) {
+                    activeDriverIdx = static_cast<int>(i);
+                    asio.start();
+                    break;
+                }
             }
         }
     }
+
+    // 2. Fall back to dedicated hardware USB interfaces
+    if (activeDriverIdx == -1) {
+        for (size_t i = 0; i < drivers.size(); ++i) {
+            if (drivers[i].name.find("USB") != std::string::npos) {
+                if (asio.loadDriver(drivers[i], hwnd)) {
+                    activeDriverIdx = static_cast<int>(i);
+                    asio.start();
+                    break;
+                }
+            }
+        }
+    }
+
+    // 3. Fall back to first working driver
     if (activeDriverIdx == -1) {
         for (size_t i = 0; i < drivers.size(); ++i) {
             if (asio.loadDriver(drivers[i], hwnd)) {
@@ -157,6 +192,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     });
 
     praccy::plugins::PluginScanner scanner;
+    if (configLoaded) {
+        for (const auto& cp : appConfig.customPluginPaths) {
+            scanner.addCustomSearchPath(cp);
+        }
+        scanner.scanAll();
+    }
     praccy::ui::RackView rackView(graph, asio, tuner, metronome, midi, scenes, scanner);
 
     // Main event loop
@@ -189,6 +230,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         // Present with vsync (1) to keep CPU overhead at near-zero
         g_pSwapChain->Present(1, 0);
     }
+
+    // Persist configuration
+    appConfig.inputMode = graph.inputRouting().mode;
+    appConfig.inputGainDb = graph.inputGainDb();
+    appConfig.masterVolumeDb = graph.masterVolumeDb();
+    appConfig.metronomeBpm = metronome.bpm();
+    if (asio.isLoaded()) {
+        appConfig.lastAsioDriver = asio.driverInfo().name;
+    }
+    appConfig.customPluginPaths = scanner.searchPaths();
+    appConfig.save();
+
+    // Close all open plugin GUI windows cleanly
+    praccy::plugins::PluginWindowManager::instance().closeAllWindows();
 
     asio.stop();
     asio.unloadDriver();

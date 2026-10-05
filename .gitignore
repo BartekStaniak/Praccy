@@ -25,3 +25,7 @@ Thumbs.db
 *.lib
 *.exp
 *.ilk
+
+# ImGui local state
+imgui.ini
+third_party/pluginterfaces
