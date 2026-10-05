@@ -18,6 +18,7 @@ inline void applyPraccyTheme() {
     style.FramePadding = ImVec2(8, 5);
     style.ItemSpacing = ImVec2(10, 8);
     style.ItemInnerSpacing = ImVec2(6, 6);
+    style.ButtonTextAlign = ImVec2(0.5f, 0.5f);
 
     ImVec4* colors = style.Colors;
     colors[ImGuiCol_Text]                  = ImVec4(0.92f, 0.94f, 0.96f, 1.00f);

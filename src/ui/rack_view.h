@@ -63,6 +63,7 @@ private:
     char m_pluginSearchQuery[128]{0};
     std::string m_selectedDeveloperFilter{"All"};
     std::string m_selectedFormatFilter{"All"};
+    bool m_showFavoritesFilter{false};
     int m_pluginSortMode{0}; // 0: Name A-Z, 1: Name Z-A, 2: Dev A-Z, 3: Format A-Z
 
     bool m_showSavePresetModal{false};

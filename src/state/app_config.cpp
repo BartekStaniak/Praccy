@@ -57,6 +57,8 @@ bool AppConfig::load(const std::string& customPath) {
             checkBetaUpdates = (val == "1" || val == "true");
         } else if (key == "custom_plugin_path") {
             customPluginPaths.push_back(val);
+        } else if (key == "favorite_plugin") {
+            favoritePlugins.push_back(val);
         }
     }
     return true;
@@ -77,6 +79,10 @@ bool AppConfig::save(const std::string& customPath) const {
 
     for (const auto& cp : customPluginPaths) {
         file << "custom_plugin_path=" << cp << "\n";
+    }
+
+    for (const auto& fp : favoritePlugins) {
+        file << "favorite_plugin=" << fp << "\n";
     }
 
     return true;

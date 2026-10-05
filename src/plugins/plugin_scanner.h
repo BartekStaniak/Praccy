@@ -2,6 +2,7 @@
 
 #include <string>
 #include <vector>
+#include <unordered_set>
 #include <filesystem>
 #include <mutex>
 #include <atomic>
@@ -54,12 +55,17 @@ public:
     [[nodiscard]] size_t numPlugins() const;
     [[nodiscard]] bool isScanning() const noexcept { return m_isScanning.load(); }
 
+    [[nodiscard]] bool isFavorite(const std::string& nameOrPath) const;
+    void toggleFavorite(const std::string& nameOrPath);
+    [[nodiscard]] size_t numFavorites() const;
+
     [[nodiscard]] std::vector<std::string> getDevelopers() const;
     [[nodiscard]] std::vector<PluginDescriptor> getFilteredPlugins(
         const std::string& searchQuery,
         const std::string& developerFilter,
         const std::string& formatFilter,
-        PluginSortMode sortMode
+        PluginSortMode sortMode,
+        bool favoritesOnly = false
     ) const;
 
 private:
@@ -70,6 +76,7 @@ private:
 
     std::vector<std::string> m_searchPaths;
     std::vector<PluginDescriptor> m_plugins;
+    std::unordered_set<std::string> m_favorites;
     mutable std::mutex m_mutex;
     std::atomic<bool> m_isScanning{false};
     std::atomic<bool> m_shouldStop{false};

@@ -1,4 +1,5 @@
 #include "plugin_scanner.h"
+#include "../state/app_config.h"
 #include <cstdlib>
 #include <iostream>
 #include <algorithm>
@@ -13,6 +14,14 @@ using GetFactoryProc = Steinberg::IPluginFactory* (PLUGIN_API *)();
 
 PluginScanner::PluginScanner() {
     addDefaultPaths();
+    // Load favorites from app config
+    state::AppConfig cfg;
+    if (cfg.load()) {
+        for (const auto& fav : cfg.favoritePlugins) {
+            m_favorites.insert(fav);
+        }
+    }
+
     // Register built-in effects immediately so they are available right away
     m_plugins.push_back(PluginDescriptor{
         .name = "Praccy Drive",
@@ -388,6 +397,30 @@ void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vec
     }
 }
 
+bool PluginScanner::isFavorite(const std::string& nameOrPath) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_favorites.find(nameOrPath) != m_favorites.end();
+}
+
+void PluginScanner::toggleFavorite(const std::string& nameOrPath) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_favorites.find(nameOrPath);
+    if (it != m_favorites.end()) {
+        m_favorites.erase(it);
+    } else {
+        m_favorites.insert(nameOrPath);
+    }
+    state::AppConfig cfg;
+    cfg.load();
+    cfg.favoritePlugins.assign(m_favorites.begin(), m_favorites.end());
+    cfg.save();
+}
+
+size_t PluginScanner::numFavorites() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_favorites.size();
+}
+
 std::vector<std::string> PluginScanner::getDevelopers() const {
     std::lock_guard<std::mutex> lock(m_mutex);
     std::set<std::string> devSet;
@@ -403,7 +436,8 @@ std::vector<PluginDescriptor> PluginScanner::getFilteredPlugins(
     const std::string& searchQuery,
     const std::string& developerFilter,
     const std::string& formatFilter,
-    PluginSortMode sortMode
+    PluginSortMode sortMode,
+    bool favoritesOnly
 ) const {
     std::lock_guard<std::mutex> lock(m_mutex);
     std::vector<PluginDescriptor> result;
@@ -412,6 +446,13 @@ std::vector<PluginDescriptor> PluginScanner::getFilteredPlugins(
     std::transform(qLower.begin(), qLower.end(), qLower.begin(), [](unsigned char c) { return std::tolower(c); });
 
     for (const auto& p : m_plugins) {
+        // Favorites filter
+        if (favoritesOnly) {
+            if (m_favorites.find(p.name) == m_favorites.end() && m_favorites.find(p.path) == m_favorites.end()) {
+                continue;
+            }
+        }
+
         // Format filter
         if (!formatFilter.empty() && formatFilter != "All") {
             if (p.typeString() != formatFilter) continue;
