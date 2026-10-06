@@ -88,11 +88,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     fontConfig.OversampleV = 2;
     static const ImWchar glyphRanges[] = {
         0x0020, 0x00FF, // Basic Latin + Latin Supplement
-        0x2600, 0x26FF, // Miscellaneous Symbols (★, ☆, etc.)
         0,
     };
     if (GetFileAttributesA("C:\\Windows\\Fonts\\segoeui.ttf") != INVALID_FILE_ATTRIBUTES) {
         io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 17.0f, &fontConfig, glyphRanges);
+        if (GetFileAttributesA("C:\\Windows\\Fonts\\seguisym.ttf") != INVALID_FILE_ATTRIBUTES) {
+            ImFontConfig symConfig = fontConfig;
+            symConfig.MergeMode = true;
+            static const ImWchar symRanges[] = {
+                0x2600, 0x26FF, // Miscellaneous Symbols (★, ☆, etc.)
+                0x2700, 0x27BF, // Dingbats
+                0,
+            };
+            io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisym.ttf", 17.0f, &symConfig, symRanges);
+        }
     } else {
         io.Fonts->AddFontDefault();
     }

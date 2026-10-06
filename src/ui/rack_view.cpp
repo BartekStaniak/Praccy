@@ -117,6 +117,22 @@ static bool CenteredButton(const char* label, const ImVec2& size = ImVec2(0, 0))
     return clicked;
 }
 
+static void drawStarGeometry(ImDrawList* dl, ImVec2 center, float rOuter, float rInner, ImU32 fillCol, ImU32 strokeCol = 0, float strokeThickness = 1.0f) {
+    const float pi = 3.1415926535f;
+    ImVec2 pts[10];
+    for (int i = 0; i < 10; ++i) {
+        float angle = -pi * 0.5f + (i * pi / 5.0f);
+        float r = (i % 2 == 0) ? rOuter : rInner;
+        pts[i] = ImVec2(center.x + std::cos(angle) * r, center.y + std::sin(angle) * r);
+    }
+    if (fillCol != 0) {
+        dl->AddConvexPolyFilled(pts, 10, fillCol);
+    }
+    if (strokeCol != 0) {
+        dl->AddPolyline(pts, 10, strokeCol, ImDrawFlags_Closed, strokeThickness);
+    }
+}
+
 static bool renderCenteredStarButton(const char* id, const ImVec2& size = ImVec2(24, 22), bool isFavorite = false) {
     ImVec2 pos = ImGui::GetCursorScreenPos();
     bool clicked = ImGui::InvisibleButton(id, size);
@@ -138,24 +154,12 @@ static bool renderCenteredStarButton(const char* id, const ImVec2& size = ImVec2
     float cx = std::floor(pos.x + size.x * 0.5f);
     float cy = std::floor(pos.y + size.y * 0.5f);
 
-    const float rOuter = 6.8f;
-    const float rInner = 2.9f;
-    const float pi = 3.1415926535f;
-
-    ImVec2 pts[10];
-    for (int i = 0; i < 10; ++i) {
-        float angle = -pi * 0.5f + (i * pi / 5.0f);
-        float r = (i % 2 == 0) ? rOuter : rInner;
-        pts[i] = ImVec2(cx + std::cos(angle) * r, cy + std::sin(angle) * r);
-    }
-
     if (isFavorite) {
         ImU32 fillCol = held ? IM_COL32(230, 175, 35, 255) : (hovered ? IM_COL32(255, 220, 75, 255) : IM_COL32(255, 195, 45, 255));
-        dl->AddConvexPolyFilled(pts, 10, fillCol);
-        dl->AddPolyline(pts, 10, IM_COL32(210, 145, 20, 255), ImDrawFlags_Closed, 1.0f);
+        drawStarGeometry(dl, ImVec2(cx, cy), 6.8f, 2.9f, fillCol, IM_COL32(210, 145, 20, 255), 1.0f);
     } else {
         ImU32 strokeCol = held ? IM_COL32(180, 190, 210, 255) : (hovered ? IM_COL32(220, 225, 240, 255) : IM_COL32(110, 118, 135, 200));
-        dl->AddPolyline(pts, 10, strokeCol, ImDrawFlags_Closed, 1.4f);
+        drawStarGeometry(dl, ImVec2(cx, cy), 6.8f, 2.9f, 0, strokeCol, 1.4f);
     }
 
     return clicked;
@@ -415,8 +419,8 @@ void RackView::renderPraccyLogo() {
         float textX = pickX + pickW + 10.0f;
         // Text: PRACCY (vertically centered alongside the pick logo)
         dl->AddText(ImVec2(textX, pos.y + (boxH * 0.5f) - 15.0f), IM_COL32(245, 195, 120, 255), "PRACCY");
-        // Version tag: v1.1.0
-        dl->AddText(ImVec2(textX, pos.y + (boxH * 0.5f) + 3.0f), IM_COL32(140, 150, 170, 220), "v1.1.0");
+        // Version tag: v1.1.1
+        dl->AddText(ImVec2(textX, pos.y + (boxH * 0.5f) + 3.0f), IM_COL32(140, 150, 170, 220), "v1.1.1");
     } else {
         // Fallback procedural medallion
         const float cx = pos.x + 24.0f;
@@ -432,7 +436,7 @@ void RackView::renderPraccyLogo() {
         dl->AddLine(ImVec2(cx + 5.5f, cy - 3.0f), ImVec2(cx + 5.5f, cy + 3.0f), IM_COL32(255, 160, 50, 255), 1.5f);
 
         dl->AddText(ImVec2(pos.x + 46.0f, pos.y + (boxH * 0.5f) - 15.0f), IM_COL32(255, 160, 45, 255), "PRACCY");
-        dl->AddText(ImVec2(pos.x + 46.0f, pos.y + (boxH * 0.5f) + 3.0f), IM_COL32(130, 140, 160, 200), "v1.1.0");
+        dl->AddText(ImVec2(pos.x + 46.0f, pos.y + (boxH * 0.5f) + 3.0f), IM_COL32(130, 140, 160, 200), "v1.1.1");
     }
 
     ImGui::Dummy(ImVec2(boxW, boxH));
@@ -2000,12 +2004,18 @@ void RackView::renderPluginBrowserModal() {
             }
 
             char favLabel[64];
-            std::snprintf(favLabel, sizeof(favLabel), "\xE2\x98\x85 Favourites (%zu)", m_scanner.numFavorites());
+            std::snprintf(favLabel, sizeof(favLabel), "     Favourites (%zu)###FavCat", m_scanner.numFavorites());
             if (ImGui::Selectable(favLabel, m_showFavoritesFilter)) {
                 m_showFavoritesFilter = true;
                 m_selectedDeveloperFilter = "All";
                 m_selectedFormatFilter = "All";
             }
+            ImVec2 favMin = ImGui::GetItemRectMin();
+            ImVec2 favMax = ImGui::GetItemRectMax();
+            float favCy = std::floor((favMin.y + favMax.y) * 0.5f);
+            float favCx = favMin.x + 8.5f;
+            drawStarGeometry(ImGui::GetWindowDrawList(), ImVec2(favCx, favCy), 5.5f, 2.3f,
+                             IM_COL32(255, 195, 45, 255), IM_COL32(210, 145, 20, 255), 1.0f);
 
             ImGui::Spacing();
             if (ImGui::TreeNodeEx("Formats", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -2064,8 +2074,17 @@ void RackView::renderPluginBrowserModal() {
                                    "Target: Parallel Block %d, Branch %d  |  %zu plugins matching",
                                    m_insertTargetBlockIndex + 1, m_insertTargetBranchIndex + 1, filtered.size());
             } else if (m_showFavoritesFilter) {
+                ImGui::TextColored(ImVec4(0.98f, 0.82f, 0.25f, 1.0f), "Viewing:");
+                ImGui::SameLine(0, 6.0f);
+                ImVec2 starPos = ImGui::GetCursorScreenPos();
+                float fontH = ImGui::GetFontSize();
+                ImVec2 starCenter = ImVec2(starPos.x + 7.0f, starPos.y + fontH * 0.5f);
+                drawStarGeometry(ImGui::GetWindowDrawList(), starCenter, 5.5f, 2.3f,
+                                 IM_COL32(255, 195, 45, 255), IM_COL32(210, 145, 20, 255), 1.0f);
+                ImGui::Dummy(ImVec2(15.0f, fontH));
+                ImGui::SameLine(0, 4.0f);
                 ImGui::TextColored(ImVec4(0.98f, 0.82f, 0.25f, 1.0f),
-                                   "Viewing: \xE2\x98\x85 Favourites  |  %zu plugins matching",
+                                   "Favourites  |  %zu plugins matching",
                                    filtered.size());
             } else {
                 ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f),
@@ -2296,7 +2315,7 @@ void RackView::renderUpdateModal() {
         ImGui::Separator();
         ImGui::Spacing();
 
-        ImGui::Text("Installed Version: %s", "v1.1.0");
+        ImGui::Text("Installed Version: %s", "v1.1.1");
         ImGui::Spacing();
 
         // Option to enable beta builds from dev branch
@@ -2540,7 +2559,7 @@ void RackView::renderSettingsModal() {
                 ImGui::Separator();
                 ImGui::Spacing();
 
-                ImGui::Text("Installed Version: %s", "v1.1.0");
+                ImGui::Text("Installed Version: %s", "v1.1.1");
                 ImGui::Spacing();
 
                 state::AppConfig cfg;
@@ -2563,7 +2582,7 @@ void RackView::renderSettingsModal() {
             // TAB 4: ABOUT
             if (ImGui::BeginTabItem("About")) {
                 ImGui::Spacing();
-                ImGui::TextColored(ImVec4(0.98f, 0.60f, 0.20f, 1.0f), "PRACCY v1.1.0");
+                ImGui::TextColored(ImVec4(0.98f, 0.60f, 0.20f, 1.0f), "PRACCY v1.1.1");
                 ImGui::TextDisabled("Lightweight, Low-Latency Guitar & Audio Practice Host");
                 ImGui::Separator();
                 ImGui::Spacing();
