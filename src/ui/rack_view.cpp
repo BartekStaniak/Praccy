@@ -117,7 +117,7 @@ static bool CenteredButton(const char* label, const ImVec2& size = ImVec2(0, 0))
     return clicked;
 }
 
-static void drawStarGeometry(ImDrawList* dl, ImVec2 center, float rOuter, float rInner, ImU32 fillCol, ImU32 strokeCol = 0, float strokeThickness = 1.0f) {
+static void drawStarGeometry(ImDrawList* dl, ImVec2 center, float rOuter, float rInner, ImU32 fillCol, ImU32 strokeCol = 0, float strokeThickness = 1.4f) {
     const float pi = 3.1415926535f;
     ImVec2 pts[10];
     for (int i = 0; i < 10; ++i) {
@@ -126,9 +126,16 @@ static void drawStarGeometry(ImDrawList* dl, ImVec2 center, float rOuter, float 
         pts[i] = ImVec2(center.x + std::cos(angle) * r, center.y + std::sin(angle) * r);
     }
     if (fillCol != 0) {
-        dl->AddConvexPolyFilled(pts, 10, fillCol);
+        // A 5-pointed star is concave, so convex poly filling causes severe distortion.
+        // Triangulating 10 triangles radiating from center covers the star polygon perfectly.
+        for (int i = 0; i < 10; ++i) {
+            int next = (i + 1) % 10;
+            dl->AddTriangleFilled(center, pts[i], pts[next], fillCol);
+        }
+        // Stroke perimeter with fillCol so outer boundaries exactly match the hollow star
+        dl->AddPolyline(pts, 10, fillCol, ImDrawFlags_Closed, strokeThickness);
     }
-    if (strokeCol != 0) {
+    if (strokeCol != 0 && strokeCol != fillCol) {
         dl->AddPolyline(pts, 10, strokeCol, ImDrawFlags_Closed, strokeThickness);
     }
 }
@@ -156,7 +163,7 @@ static bool renderCenteredStarButton(const char* id, const ImVec2& size = ImVec2
 
     if (isFavorite) {
         ImU32 fillCol = held ? IM_COL32(230, 175, 35, 255) : (hovered ? IM_COL32(255, 220, 75, 255) : IM_COL32(255, 195, 45, 255));
-        drawStarGeometry(dl, ImVec2(cx, cy), 6.8f, 2.9f, fillCol, IM_COL32(210, 145, 20, 255), 1.0f);
+        drawStarGeometry(dl, ImVec2(cx, cy), 6.8f, 2.9f, fillCol, 0, 1.4f);
     } else {
         ImU32 strokeCol = held ? IM_COL32(180, 190, 210, 255) : (hovered ? IM_COL32(220, 225, 240, 255) : IM_COL32(110, 118, 135, 200));
         drawStarGeometry(dl, ImVec2(cx, cy), 6.8f, 2.9f, 0, strokeCol, 1.4f);
@@ -2015,7 +2022,7 @@ void RackView::renderPluginBrowserModal() {
             float favCy = std::floor((favMin.y + favMax.y) * 0.5f);
             float favCx = favMin.x + 8.5f;
             drawStarGeometry(ImGui::GetWindowDrawList(), ImVec2(favCx, favCy), 5.5f, 2.3f,
-                             IM_COL32(255, 195, 45, 255), IM_COL32(210, 145, 20, 255), 1.0f);
+                             IM_COL32(255, 195, 45, 255), 0, 1.2f);
 
             ImGui::Spacing();
             if (ImGui::TreeNodeEx("Formats", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -2080,7 +2087,7 @@ void RackView::renderPluginBrowserModal() {
                 float fontH = ImGui::GetFontSize();
                 ImVec2 starCenter = ImVec2(starPos.x + 7.0f, starPos.y + fontH * 0.5f);
                 drawStarGeometry(ImGui::GetWindowDrawList(), starCenter, 5.5f, 2.3f,
-                                 IM_COL32(255, 195, 45, 255), IM_COL32(210, 145, 20, 255), 1.0f);
+                                 IM_COL32(255, 195, 45, 255), 0, 1.2f);
                 ImGui::Dummy(ImVec2(15.0f, fontH));
                 ImGui::SameLine(0, 4.0f);
                 ImGui::TextColored(ImVec4(0.98f, 0.82f, 0.25f, 1.0f),
