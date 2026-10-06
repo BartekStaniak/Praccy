@@ -69,7 +69,7 @@ static bool ResettableVSliderFloat(const char* label, const ImVec2& size, float*
     return changed;
 }
 
-static bool ResettableDragFloat(const char* label, float* v, float v_speed, float v_min, float v_max, float default_val, const char* format = "%.0f", ImGuiSliderFlags flags = 0) {
+[[maybe_unused]] static bool ResettableDragFloat(const char* label, float* v, float v_speed, float v_min, float v_max, float default_val, const char* format = "%.0f", ImGuiSliderFlags flags = 0) {
     ImGuiID id = ImGui::GetID(label);
     if (!ImGui::GetIO().MouseDown[0] && s_suppressResetId == id) {
         s_suppressResetId = 0;
@@ -265,31 +265,75 @@ static bool renderCenteredPauseButton(const char* id, const ImVec2& size = ImVec
     return clicked;
 }
 
-static void drawRoutingWire(ImDrawList* dl, ImVec2 p1, ImVec2 p2, bool withArrow = false) {
-    // Outer glow
-    dl->AddLine(p1, p2, IM_COL32(40, 95, 160, 90), 4.5f);
-    // Core wire
-    dl->AddLine(p1, p2, IM_COL32(110, 175, 255, 230), 2.0f);
+static bool renderCenteredMinimiseButton(const char* id, const ImVec2& size = ImVec2(24, 24), bool isMinimized = false) {
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+    bool clicked = ImGui::InvisibleButton(id, size);
+    bool hovered = ImGui::IsItemHovered();
+    bool held = ImGui::IsItemActive();
 
-    if (withArrow) {
-        float dx = p2.x - p1.x;
-        float dy = p2.y - p1.y;
-        float len = std::sqrt(dx * dx + dy * dy);
-        if (len > 6.0f) {
-            float nx = dx / len;
-            float ny = dy / len;
-            float px = -ny;
-            float py = nx;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
 
-            ImVec2 tip = p2;
-            const float arrowSize = 6.5f;
-            const float arrowW = 4.5f;
-            ImVec2 left(tip.x - nx * arrowSize + px * arrowW, tip.y - ny * arrowSize + py * arrowW);
-            ImVec2 right(tip.x - nx * arrowSize - px * arrowW, tip.y - ny * arrowSize - py * arrowW);
+    ImU32 bgCol;
+    if (held)         bgCol = IM_COL32(35, 52, 80, 255);
+    else if (hovered) bgCol = IM_COL32(48, 70, 105, 255);
+    else              bgCol = IM_COL32(30, 42, 60, 220);
 
-            dl->AddTriangleFilled(left, tip, right, IM_COL32(160, 215, 255, 255));
-        }
+    ImU32 borderCol = hovered ? IM_COL32(95, 145, 215, 255) : IM_COL32(55, 75, 105, 200);
+    ImU32 iconCol   = hovered ? IM_COL32(255, 255, 255, 255) : IM_COL32(185, 210, 240, 255);
+
+    dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), bgCol, 4.0f);
+    dl->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), borderCol, 4.0f);
+
+    float cx = std::floor(pos.x + size.x * 0.5f);
+    float cy = std::floor(pos.y + size.y * 0.5f);
+
+    if (isMinimized) {
+        // Proper Maximise / Expand glyph: window rectangle box with top header bar line
+        const float bArm = 4.0f;
+        dl->AddRect(ImVec2(cx - bArm, cy - bArm), ImVec2(cx + bArm, cy + bArm), iconCol, 1.0f, 0, 1.6f);
+        dl->AddLine(ImVec2(cx - bArm, cy - bArm + 2.5f), ImVec2(cx + bArm, cy - bArm + 2.5f), iconCol, 1.2f);
+    } else {
+        // Proper Minimise glyph: clean centered horizontal dash
+        const float arm = 4.5f;
+        dl->AddLine(ImVec2(cx - arm, cy), ImVec2(cx + arm, cy), iconCol, 2.0f);
     }
+
+    return clicked;
+}
+
+static void drawRoutingWire(ImDrawList* dl, ImVec2 p1, ImVec2 p2, bool /*withArrow*/ = false) {
+    if (std::abs(p1.y - p2.y) < 1.0f) {
+        // Collinear horizontal wire
+        dl->AddLine(p1, p2, IM_COL32(40, 95, 160, 90), 4.5f);
+        dl->AddLine(p1, p2, IM_COL32(110, 175, 255, 230), 2.0f);
+    } else {
+        // Smooth horizontal S-curve cubic Bezier
+        float dx = (p2.x - p1.x) * 0.5f;
+        ImVec2 cp1(p1.x + dx, p1.y);
+        ImVec2 cp2(p2.x - dx, p2.y);
+        dl->AddBezierCubic(p1, cp1, cp2, p2, IM_COL32(40, 95, 160, 90), 4.5f);
+        dl->AddBezierCubic(p1, cp1, cp2, p2, IM_COL32(110, 175, 255, 230), 2.0f);
+    }
+}
+
+static void renderBadgePill(const char* label, ImU32 bgCol, ImU32 borderCol, ImU32 textCol, float height = 24.0f) {
+    ImVec2 badgePos = ImGui::GetCursorScreenPos();
+    ImVec2 textSz = ImGui::CalcTextSize(label);
+    const float padX = 10.0f;
+    float badgeW = textSz.x + padX * 2.0f;
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 minPt = badgePos;
+    ImVec2 maxPt(badgePos.x + badgeW, badgePos.y + height);
+
+    dl->AddRectFilled(minPt, maxPt, bgCol, height * 0.5f);
+    dl->AddRect(minPt, maxPt, borderCol, height * 0.5f, 0, 1.2f);
+
+    float textX = badgePos.x + padX;
+    float textY = badgePos.y + (height - textSz.y) * 0.5f;
+    dl->AddText(ImVec2(textX, textY), textCol, label);
+
+    ImGui::Dummy(ImVec2(badgeW, height));
 }
 
 static bool renderCenteredPlusButton(const char* id, const ImVec2& size = ImVec2(52, 52), float iconRadius = 11.0f) {
@@ -326,6 +370,8 @@ RackView::RackView(audio::GraphEngine& graph,
                    audio::AsioManager& asio,
                    tools::InstrumentTuner& tuner,
                    tools::Metronome& metronome,
+                   tools::AudioPlayer& player,
+                   tools::QuickLooper& looper,
                    midi::MidiManager& midi,
                    state::SceneManager& scenes,
                    plugins::PluginScanner& scanner)
@@ -333,6 +379,8 @@ RackView::RackView(audio::GraphEngine& graph,
       m_asio(asio),
       m_tuner(tuner),
       m_metronome(metronome),
+      m_player(player),
+      m_looper(looper),
       m_midi(midi),
       m_scenes(scenes),
       m_scanner(scanner) {
@@ -352,7 +400,10 @@ void RackView::render() {
     ThumbnailManager::instance().update();
     if (m_expandPulseTimer > 0.0f) {
         m_expandPulseTimer -= ImGui::GetIO().DeltaTime * 2.8f;
-        if (m_expandPulseTimer < 0.0f) m_expandPulseTimer = 0.0f;
+        if (m_expandPulseTimer <= 0.0f) {
+            m_expandPulseTimer = 0.0f;
+            m_expandedSlot = nullptr;
+        }
     }
 
     ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -372,6 +423,19 @@ void RackView::render() {
         renderSignalRack();
         renderBottomBar();
 
+        // Scene Hotkeys 1 through 8
+        ImGuiIO& io = ImGui::GetIO();
+        if (!io.WantTextInput) {
+            for (int k = 0; k < 8 && k < static_cast<int>(m_scenes.numScenes()); ++k) {
+                if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_1 + k), false)) {
+                    m_scenes.applyScene(k, m_graph);
+                    const auto* sc = m_scenes.getScene(k);
+                    m_sceneFeedbackMsg = "Loaded " + (sc ? sc->name : ("Scene " + std::to_string(k + 1)));
+                    m_sceneFeedbackTimer = 2.5f;
+                }
+            }
+        }
+
         if (m_showPluginBrowser) {
             renderPluginBrowserModal();
         }
@@ -379,6 +443,7 @@ void RackView::render() {
         renderDspTweakModal();
         renderUpdateModal();
         renderSettingsModal();
+        renderPracticeToolsModal();
     }
     ImGui::End();
     ImGui::PopStyleVar();
@@ -426,8 +491,8 @@ void RackView::renderPraccyLogo() {
         float textX = pickX + pickW + 10.0f;
         // Text: PRACCY (vertically centered alongside the pick logo)
         dl->AddText(ImVec2(textX, pos.y + (boxH * 0.5f) - 15.0f), IM_COL32(245, 195, 120, 255), "PRACCY");
-        // Version tag: v1.1.1
-        dl->AddText(ImVec2(textX, pos.y + (boxH * 0.5f) + 3.0f), IM_COL32(140, 150, 170, 220), "v1.1.1");
+        // Version tag: v1.1.3
+        dl->AddText(ImVec2(textX, pos.y + (boxH * 0.5f) + 3.0f), IM_COL32(140, 150, 170, 220), "v1.1.3");
     } else {
         // Fallback procedural medallion
         const float cx = pos.x + 24.0f;
@@ -443,19 +508,14 @@ void RackView::renderPraccyLogo() {
         dl->AddLine(ImVec2(cx + 5.5f, cy - 3.0f), ImVec2(cx + 5.5f, cy + 3.0f), IM_COL32(255, 160, 50, 255), 1.5f);
 
         dl->AddText(ImVec2(pos.x + 46.0f, pos.y + (boxH * 0.5f) - 15.0f), IM_COL32(255, 160, 45, 255), "PRACCY");
-        dl->AddText(ImVec2(pos.x + 46.0f, pos.y + (boxH * 0.5f) + 3.0f), IM_COL32(130, 140, 160, 200), "v1.1.1");
+        dl->AddText(ImVec2(pos.x + 46.0f, pos.y + (boxH * 0.5f) + 3.0f), IM_COL32(130, 140, 160, 200), "v1.1.3");
     }
 
     ImGui::Dummy(ImVec2(boxW, boxH));
 }
 
-void RackView::renderStatusPill(bool isRunning, double sampleRate, int bufferSize, double latencyMs) {
-    char statusText[128];
-    if (isRunning) {
-        std::snprintf(statusText, sizeof(statusText), "ACTIVE  |  %.0f kHz  |  %d spls (%.1f ms)", sampleRate / 1000.0, bufferSize, latencyMs);
-    } else {
-        std::snprintf(statusText, sizeof(statusText), "STOPPED");
-    }
+bool RackView::renderStatusPill(bool isRunning, const char* statusText) {
+    if (!statusText) return false;
 
     const ImVec2 textSize = ImGui::CalcTextSize(statusText);
     const float pillW = textSize.x + 36.0f;
@@ -465,29 +525,76 @@ void RackView::renderStatusPill(bool isRunning, double sampleRate, int bufferSiz
 
     const ImVec2 screenPos = ImGui::GetCursorScreenPos();
     const ImVec2 pos(screenPos.x, screenPos.y + offsetY);
+
+    bool clicked = ImGui::InvisibleButton("##DspStatusPill", ImVec2(pillW, frameH));
+    bool hovered = ImGui::IsItemHovered();
+    bool held = ImGui::IsItemActive();
+
+    if (clicked) {
+        resetDspDropouts();
+    }
+
+    uint32_t drops = m_dspDropouts ? m_dspDropouts->load(std::memory_order_relaxed) : 0;
+
+    if (hovered) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        if (drops > 0) {
+            ImGui::SetTooltip("Real-time DSP Load %% & Dropout Meter\nDropouts: %u\nClick to reset dropout counter", drops);
+        } else {
+            ImGui::SetTooltip("Real-time DSP Load %% & Dropout Meter\nClick to reset dropout counter");
+        }
+    }
+
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
     // Background capsule pill
-    ImU32 bgCol = isRunning ? IM_COL32(20, 36, 26, 255) : IM_COL32(40, 24, 24, 255);
-    ImU32 borderCol = isRunning ? IM_COL32(45, 120, 60, 255) : IM_COL32(120, 45, 45, 255);
+    ImU32 bgCol;
+    ImU32 borderCol;
+    if (isRunning) {
+        if (drops > 0) {
+            bgCol = held ? IM_COL32(48, 36, 18, 255) : (hovered ? IM_COL32(40, 30, 16, 255) : IM_COL32(32, 24, 14, 255));
+            borderCol = held ? IM_COL32(240, 160, 40, 255) : (hovered ? IM_COL32(220, 140, 35, 255) : IM_COL32(180, 110, 30, 255));
+        } else {
+            bgCol = held ? IM_COL32(28, 50, 36, 255) : (hovered ? IM_COL32(24, 42, 30, 255) : IM_COL32(20, 36, 26, 255));
+            borderCol = held ? IM_COL32(70, 180, 95, 255) : (hovered ? IM_COL32(58, 150, 78, 255) : IM_COL32(45, 120, 60, 255));
+        }
+    } else {
+        bgCol = held ? IM_COL32(58, 34, 34, 255) : (hovered ? IM_COL32(48, 28, 28, 255) : IM_COL32(40, 24, 24, 255));
+        borderCol = held ? IM_COL32(170, 65, 65, 255) : (hovered ? IM_COL32(145, 55, 55, 255) : IM_COL32(120, 45, 45, 255));
+    }
+
     dl->AddRectFilled(pos, ImVec2(pos.x + pillW, pos.y + pillH), bgCol, 11.0f);
     dl->AddRect(pos, ImVec2(pos.x + pillW, pos.y + pillH), borderCol, 11.0f);
 
     // Glowing LED Dot
     ImVec2 dotCenter(pos.x + 12.0f, pos.y + (pillH * 0.5f));
     if (isRunning) {
-        dl->AddCircleFilled(dotCenter, 6.0f, IM_COL32(40, 240, 80, 80));
-        dl->AddCircleFilled(dotCenter, 3.5f, IM_COL32(50, 255, 90, 255));
+        if (drops > 0) {
+            dl->AddCircleFilled(dotCenter, 6.0f, IM_COL32(255, 140, 20, 80));
+            dl->AddCircleFilled(dotCenter, 3.5f, IM_COL32(255, 160, 40, 255));
+        } else {
+            dl->AddCircleFilled(dotCenter, 6.0f, IM_COL32(40, 240, 80, 80));
+            dl->AddCircleFilled(dotCenter, 3.5f, IM_COL32(50, 255, 90, 255));
+        }
     } else {
         dl->AddCircleFilled(dotCenter, 3.5f, IM_COL32(230, 60, 60, 255));
     }
 
     // Text Label inside pill
     ImVec2 textPos(pos.x + 24.0f, pos.y + ((pillH - textSize.y) * 0.5f));
-    ImU32 textCol = isRunning ? IM_COL32(210, 245, 220, 255) : IM_COL32(245, 180, 180, 255);
+    ImU32 textCol;
+    if (isRunning) {
+        if (drops > 0) {
+            textCol = hovered ? IM_COL32(255, 230, 200, 255) : IM_COL32(255, 215, 175, 255);
+        } else {
+            textCol = hovered ? IM_COL32(235, 255, 240, 255) : IM_COL32(210, 245, 220, 255);
+        }
+    } else {
+        textCol = hovered ? IM_COL32(255, 205, 205, 255) : IM_COL32(245, 180, 180, 255);
+    }
     dl->AddText(textPos, textCol, statusText);
 
-    ImGui::Dummy(ImVec2(pillW, frameH));
+    return clicked;
 }
 
 void RackView::renderPracticeRibbon() {
@@ -595,14 +702,54 @@ void RackView::renderPracticeRibbon() {
                 ImGui::Dummy(ImVec2(totalBeats * dotSpacing + 4.0f, fontH));
             }
 
-            ImGui::SetCursorPosY(38.0f);
-            float availW = ImGui::GetContentRegionAvail().x;
             const float gap = 6.0f;
             const float playW = 50.0f;
             const float sigW = 68.0f;
-            float bpmW = std::max(60.0f, availW - playW - sigW - (gap * 2.0f) - 2.0f);
 
-            // Push FramePadding so PLAY, BPM Drag, and TimeSig Combo share exact 24px height
+            // Position TAP button in top row directly aligned above the TimeSig dropdown
+            const float rightEdge = ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x;
+            const float comboStartX = rightEdge - sigW;
+
+            ImGui::SetCursorPos(ImVec2(comboStartX, 6.0f));
+
+            auto now = std::chrono::steady_clock::now();
+            bool tapFlash = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastTapFlash).count() < 120;
+            if (tapFlash) {
+                ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 150, 240, 255));
+                ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 255, 255, 255));
+            }
+            if (CenteredButton("TAP", ImVec2(sigW, 24.0f))) {
+                m_lastTapFlash = now;
+                // Remove tap times older than 2.5 seconds
+                while (!m_tapTimes.empty() && std::chrono::duration<double>(now - m_tapTimes.front()).count() > 2.5) {
+                    m_tapTimes.erase(m_tapTimes.begin());
+                }
+                if (!m_tapTimes.empty() && std::chrono::duration<double>(now - m_tapTimes.back()).count() > 2.5) {
+                    m_tapTimes.clear();
+                }
+                m_tapTimes.push_back(now);
+                if (m_tapTimes.size() > 6) {
+                    m_tapTimes.erase(m_tapTimes.begin());
+                }
+                if (m_tapTimes.size() >= 2) {
+                    double totalDurationSec = std::chrono::duration<double>(m_tapTimes.back() - m_tapTimes.front()).count();
+                    double avgIntervalSec = totalDurationSec / static_cast<double>(m_tapTimes.size() - 1);
+                    if (avgIntervalSec > 0.05) {
+                        float computedBpm = static_cast<float>(60.0 / avgIntervalSec);
+                        computedBpm = std::clamp(std::round(computedBpm), 40.0f, 260.0f);
+                        m_metronome.setBpm(computedBpm);
+                    }
+                }
+            }
+            if (tapFlash) {
+                ImGui::PopStyleColor(2);
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tap Tempo (Tap repeatedly to set BPM)");
+
+            ImGui::SetCursorPos(ImVec2(ImGui::GetStyle().WindowPadding.x, 36.0f));
+            float bpmW = std::max(60.0f, comboStartX - gap - (ImGui::GetStyle().WindowPadding.x + playW + gap));
+
+            // Push FramePadding so PLAY, Tempo button/input, and TimeSig Combo share exact 24px height
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 3.5f));
 
             if (metroPlaying) {
@@ -619,14 +766,41 @@ void RackView::renderPracticeRibbon() {
 
             ImGui::SameLine(0, gap);
 
-            float bpm = m_metronome.bpm();
-            ImGui::SetNextItemWidth(bpmW);
-            if (ResettableDragFloat("##BPM", &bpm, 1.0f, 40.0f, 260.0f, 120.0f, "%.0f BPM")) {
-                m_metronome.setBpm(bpm);
+            // Tempo Button / Direct Click-to-Type Input
+            float curBpm = m_metronome.bpm();
+            if (m_tempoEditing) {
+                ImGui::SetNextItemWidth(bpmW);
+                ImGui::SetKeyboardFocusHere();
+                if (ImGui::InputInt("##BPM_Edit", &m_tempoEditValue, 0, 0, ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll)) {
+                    m_tempoEditValue = std::clamp(m_tempoEditValue, 40, 260);
+                    m_metronome.setBpm(static_cast<float>(m_tempoEditValue));
+                    m_tempoEditing = false;
+                }
+                if (ImGui::IsItemDeactivated()) {
+                    m_tempoEditValue = std::clamp(m_tempoEditValue, 40, 260);
+                    m_metronome.setBpm(static_cast<float>(m_tempoEditValue));
+                    m_tempoEditing = false;
+                }
+                if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                    m_tempoEditing = false;
+                }
+            } else {
+                char bpmLabel[32];
+                std::snprintf(bpmLabel, sizeof(bpmLabel), "%.0f BPM##BPMBtn", curBpm);
+                if (CenteredButton(bpmLabel, ImVec2(bpmW, 24.0f))) {
+                    m_tempoEditing = true;
+                    m_tempoEditValue = static_cast<int>(std::round(curBpm));
+                }
+                if (ImGui::IsItemHovered()) {
+                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                        m_metronome.setBpm(120.0f);
+                        m_tempoEditing = false;
+                    }
+                    ImGui::SetTooltip("Tempo: %.0f BPM\nSingle-click to type tempo\nDouble-click to reset to 120 BPM", curBpm);
+                }
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tempo (Drag or click to edit, double-click to reset 120 BPM)");
 
-            ImGui::SameLine(0, gap);
+            ImGui::SameLine(comboStartX);
 
             const char* timeSigOptions[] = { "4/4", "3/4", "2/4", "6/8" };
             const int timeSigBeats[] = { 4, 3, 2, 6 };
@@ -942,9 +1116,9 @@ void RackView::renderSignalRack() {
     ImGui::BeginGroup();
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.16f, 0.18f, 0.22f, 1.0f));
     ImGui::BeginChild("OutputDestNode", ImVec2(100.0f, cardH), true);
-    ImGui::TextColored(ImVec4(0.35f, 0.80f, 1.0f, 1.0f), "[ OUTPUT ]");
-    ImGui::TextDisabled("To ASIO");
+    renderBadgePill("OUTPUT", IM_COL32(20, 38, 58, 255), IM_COL32(55, 120, 190, 255), IM_COL32(130, 195, 255, 255), 22.0f);
     ImGui::Spacing();
+    ImGui::TextDisabled("To ASIO");
     ImGui::Spacing();
     renderMeter("FinalL", m_graph.outputMeter().peakLeft(), 14, 120);
     ImGui::SameLine(0, 6);
@@ -969,18 +1143,12 @@ void RackView::renderSignalCable(float width) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
     // Sleek patch cable body
-    dl->AddLine(ImVec2(pos.x + 2.0f, centerY), ImVec2(pos.x + width - 8.0f, centerY), IM_COL32(32, 36, 46, 255), 5.0f);
-    dl->AddLine(ImVec2(pos.x + 2.0f, centerY), ImVec2(pos.x + width - 8.0f, centerY), IM_COL32(85, 105, 140, 255), 2.5f);
+    dl->AddLine(ImVec2(pos.x + 2.0f, centerY), ImVec2(pos.x + width - 2.0f, centerY), IM_COL32(32, 36, 46, 255), 5.0f);
+    dl->AddLine(ImVec2(pos.x + 2.0f, centerY), ImVec2(pos.x + width - 2.0f, centerY), IM_COL32(85, 105, 140, 255), 2.5f);
 
-    // Glowing Arrowhead at right tip
-    const float arrowSize = 6.0f;
-    const float tipX = pos.x + width - 2.0f;
-    dl->AddTriangleFilled(
-        ImVec2(tipX, centerY),
-        ImVec2(tipX - arrowSize - 2.0f, centerY - arrowSize),
-        ImVec2(tipX - arrowSize - 2.0f, centerY + arrowSize),
-        IM_COL32(110, 140, 195, 255)
-    );
+    // Cable socket jacks at ends
+    dl->AddCircleFilled(ImVec2(pos.x + 3.0f, centerY), 3.0f, IM_COL32(110, 140, 195, 255));
+    dl->AddCircleFilled(ImVec2(pos.x + width - 3.0f, centerY), 3.0f, IM_COL32(110, 140, 195, 255));
 
     ImGui::Dummy(ImVec2(width, cardH));
     ImGui::SameLine(0, 0);
@@ -993,7 +1161,8 @@ void RackView::renderInputCard(float cardY) {
     ImGui::BeginGroup();
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.16f, 0.18f, 0.22f, 1.0f));
     ImGui::BeginChild("InputGainNode", ImVec2(180, 224), true);
-    ImGui::TextColored(ImVec4(0.35f, 0.80f, 1.0f, 1.0f), "[ INPUT ]");
+    renderBadgePill("INPUT", IM_COL32(14, 46, 60, 255), IM_COL32(40, 155, 190, 255), IM_COL32(95, 225, 255, 255), 22.0f);
+    ImGui::Spacing();
 
     // Input Channel Routing Selector (Mono/Stereo)
     auto inputConfig = m_graph.inputRouting();
@@ -1056,10 +1225,17 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
 
     const float cardWidth = 240.0f;
     const float cardHeight = 224.0f;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 8.0f));
     ImGui::BeginChild(childId, ImVec2(cardWidth, cardHeight), true, ImGuiWindowFlags_NoScrollbar);
 
     auto* pluginInst = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
-    bool isWindowOpen = pluginInst ? plugins::PluginWindowManager::instance().isWindowOpen(pluginInst) : false;
+    bool hasGui = pluginInst && pluginInst->hasCustomGui();
+    bool isWindowOpen = false;
+    if (hasGui) {
+        isWindowOpen = plugins::PluginWindowManager::instance().isWindowOpen(pluginInst);
+    } else if (m_dspTweakSlot == slot) {
+        isWindowOpen = true;
+    }
 
     // ----------------------------------------------------
     // Row 1: Header (Plugin Name + [|| Split] + [|| Pause] + [X] Delete)
@@ -1070,18 +1246,21 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             displayName = displayName.substr(0, 13) + "..";
         }
 
+        ImGui::SetCursorPos(ImVec2(10.0f, 8.0f));
+        ImGui::AlignTextToFramePadding();
         ImGui::TextColored(bypassed ? ImVec4(0.55f, 0.58f, 0.65f, 1.0f) : ImVec4(0.98f, 0.98f, 1.0f, 1.0f),
                            "%s", displayName.c_str());
 
         if (branchIndex == -1) {
-            // Serial slot: Split + Bypass (Pause) + Delete
-            ImGui::SameLine(cardWidth - 82.0f);
+            // Serial slot: Split + Bypass (Pause) + Delete (width: 76px, ends at 230px -> starts at 154px)
+            ImGui::SameLine(154.0f);
 
             char splitBtnId[32];
             std::snprintf(splitBtnId, sizeof(splitBtnId), "##Sp_%d", slotIndex);
             if (renderCenteredSplitButton(splitBtnId, ImVec2(22, 20))) {
                 m_graph.splitSerialNodeIntoParallel(slotIndex);
                 ImGui::EndChild();
+                ImGui::PopStyleVar();
                 ImGui::PopStyleColor();
                 ImGui::EndGroup();
                 return;
@@ -1100,19 +1279,22 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             char delBtnId[32];
             std::snprintf(delBtnId, sizeof(delBtnId), "##Del_%d", slotIndex);
             if (renderCenteredDeleteButton(delBtnId, ImVec2(22, 20))) {
-                if (pluginInst) {
+                if (hasGui) {
                     plugins::PluginWindowManager::instance().closePluginWindow(pluginInst);
                 }
+                if (m_dspTweakSlot == slot) m_dspTweakSlot = nullptr;
+                if (m_expandedSlot == slot) m_expandedSlot = nullptr;
                 m_graph.removeSerialNode(slotIndex);
                 ImGui::EndChild();
+                ImGui::PopStyleVar();
                 ImGui::PopStyleColor();
                 ImGui::EndGroup();
                 return;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete Plugin Slot");
         } else {
-            // Branch slot: Bypass (Pause) + Delete
-            ImGui::SameLine(cardWidth - 54.0f);
+            // Branch slot: Bypass (Pause) + Delete (width: 49px, ends at 230px -> starts at 181px)
+            ImGui::SameLine(181.0f);
 
             char pauseBtnId[32];
             std::snprintf(pauseBtnId, sizeof(pauseBtnId), "##Ps_%d_%d_%d", slotIndex, blockIndex, branchIndex);
@@ -1125,15 +1307,18 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             char delBtnId[32];
             std::snprintf(delBtnId, sizeof(delBtnId), "##Del_%d_%d_%d", slotIndex, blockIndex, branchIndex);
             if (renderCenteredDeleteButton(delBtnId, ImVec2(22, 20))) {
-                if (pluginInst) {
+                if (hasGui) {
                     plugins::PluginWindowManager::instance().closePluginWindow(pluginInst);
                 }
+                if (m_dspTweakSlot == slot) m_dspTweakSlot = nullptr;
+                if (m_expandedSlot == slot) m_expandedSlot = nullptr;
                 auto* blk = dynamic_cast<audio::ParallelSplitMergeBlock*>(m_graph.getNode(blockIndex));
                 if (blk) {
                     auto* br = blk->getBranch(branchIndex);
                     if (br) br->removeSlot(slotIndex);
                 }
                 ImGui::EndChild();
+                ImGui::PopStyleVar();
                 ImGui::PopStyleColor();
                 ImGui::EndGroup();
                 return;
@@ -1142,15 +1327,14 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         }
     }
 
-    ImGui::Spacing();
-
     // ----------------------------------------------------
     // Row 2: Plugin GUI Screenshot / Preview Screen
     // ----------------------------------------------------
     {
+        ImGui::SetCursorPos(ImVec2(10.0f, 34.0f));
         const ImVec2 previewPos = ImGui::GetCursorScreenPos();
-        const float previewW = cardWidth - 16.0f; // 224.0f
-        const float previewH = 104.0f;
+        const float previewW = 220.0f;
+        const float previewH = 100.0f;
         ImDrawList* dl = ImGui::GetWindowDrawList();
 
         Thumbnail* thumb = ThumbnailManager::instance().getThumbnail(slot->name());
@@ -1171,7 +1355,11 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
 
         if (isPreviewHovered) {
             ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-            ImGui::SetTooltip(pluginInst ? "Click to Open / Focus %s GUI" : "Click to Open DSP Parameters", slot->name().c_str());
+            if (hasGui) {
+                ImGui::SetTooltip(isWindowOpen ? "Focus %s Window" : "Click to Open %s GUI", slot->name().c_str());
+            } else {
+                ImGui::SetTooltip(isWindowOpen ? "Close %s Parameters Window" : "Click to Open %s DSP Parameters", slot->name().c_str());
+            }
             frameBorder = isWindowOpen ? IM_COL32(70, 240, 130, 255) : IM_COL32(75, 145, 235, 255);
             borderWidth = 1.5f;
         }
@@ -1200,13 +1388,13 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             dl->AddImageRounded((ImTextureID)thumb->srv, imgMin, imgMax, ImVec2(0, 0), ImVec2(1, 1), tintCol, 4.0f);
 
             // Sleek format badge on top-left of image
-            std::string formatTag = "[DSP]";
+            std::string formatTag = "DSP";
             ImU32 tagColor = IM_COL32(245, 170, 45, 230);
             if (pluginInst) {
                 if (dynamic_cast<plugins::Vst3PluginInstance*>(pluginInst)) {
                     formatTag = "VST3";
                     tagColor = IM_COL32(65, 185, 255, 230);
-                } else {
+                } else if (dynamic_cast<plugins::ClapPluginInstance*>(pluginInst)) {
                     formatTag = "CLAP";
                     tagColor = IM_COL32(220, 110, 240, 230);
                 }
@@ -1245,22 +1433,24 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                 dl->AddText(pPos, IM_COL32(230, 240, 255, 255), expandPrompt);
             }
         } else {
-            // Procedural Faceplate Fallback (when no screenshot has been captured yet)
-            // Rivets at corners
+            // Procedural Faceplate Fallback
             dl->AddCircleFilled(ImVec2(previewPos.x + 6.0f, previewPos.y + 6.0f), 2.0f, IM_COL32(65, 70, 85, 255));
             dl->AddCircleFilled(ImVec2(previewPos.x + previewW - 6.0f, previewPos.y + 6.0f), 2.0f, IM_COL32(65, 70, 85, 255));
 
             std::string formatTag = "[DSP]";
             ImU32 tagColor = IM_COL32(245, 170, 45, 255);
-            std::string vendorText = "Built-In";
+            std::string vendorText = "Praccy Audio";
 
             if (pluginInst) {
                 if (dynamic_cast<plugins::Vst3PluginInstance*>(pluginInst)) {
                     formatTag = "[VST3]";
                     tagColor = IM_COL32(65, 185, 255, 255);
-                } else {
+                } else if (dynamic_cast<plugins::ClapPluginInstance*>(pluginInst)) {
                     formatTag = "[CLAP]";
                     tagColor = IM_COL32(220, 110, 240, 255);
+                } else {
+                    formatTag = "[DSP]";
+                    tagColor = IM_COL32(245, 170, 45, 255);
                 }
                 vendorText = pluginInst->vendor();
                 if (vendorText.length() > 14) vendorText = vendorText.substr(0, 13) + "..";
@@ -1269,38 +1459,74 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             dl->AddText(ImVec2(previewPos.x + 12.0f, previewPos.y + 6.0f), tagColor, formatTag.c_str());
             dl->AddText(ImVec2(previewPos.x + 60.0f, previewPos.y + 6.0f), IM_COL32(130, 138, 155, 255), vendorText.c_str());
 
-            // Center: Screen / Camera Icon & Click to Open
+            if (isWindowOpen) {
+                const char* openTag = "● OPEN";
+                ImVec2 oSz = ImGui::CalcTextSize(openTag);
+                ImVec2 oPos(previewPos.x + previewW - oSz.x - 8.0f, previewPos.y + 6.0f);
+                dl->AddRectFilled(ImVec2(oPos.x - 3.0f, oPos.y - 1.0f),
+                                  ImVec2(oPos.x + oSz.x + 3.0f, oPos.y + oSz.y + 1.0f),
+                                  IM_COL32(18, 50, 28, 220), 3.0f);
+                dl->AddText(oPos, IM_COL32(50, 240, 110, 255), openTag);
+            }
+
             float midX = previewPos.x + previewW * 0.5f;
-            float midY = previewPos.y + 48.0f;
+            float midY = previewPos.y + 42.0f;
 
-            // Draw vector monitor icon
-            dl->AddRect(ImVec2(midX - 14.0f, midY - 12.0f), ImVec2(midX + 14.0f, midY + 8.0f),
-                        isPreviewHovered ? IM_COL32(100, 180, 255, 255) : IM_COL32(100, 115, 140, 255), 2.0f, 0, 1.5f);
-            dl->AddLine(ImVec2(midX, midY + 8.0f), ImVec2(midX, midY + 13.0f),
-                        isPreviewHovered ? IM_COL32(100, 180, 255, 255) : IM_COL32(100, 115, 140, 255), 1.5f);
-            dl->AddLine(ImVec2(midX - 6.0f, midY + 13.0f), ImVec2(midX + 6.0f, midY + 13.0f),
-                        isPreviewHovered ? IM_COL32(100, 180, 255, 255) : IM_COL32(100, 115, 140, 255), 1.5f);
+            if (hasGui) {
+                // Monitor vector icon
+                dl->AddRect(ImVec2(midX - 14.0f, midY - 12.0f), ImVec2(midX + 14.0f, midY + 8.0f),
+                            isPreviewHovered ? IM_COL32(100, 180, 255, 255) : IM_COL32(100, 115, 140, 255), 2.0f, 0, 1.5f);
+                dl->AddLine(ImVec2(midX, midY + 8.0f), ImVec2(midX, midY + 13.0f),
+                            isPreviewHovered ? IM_COL32(100, 180, 255, 255) : IM_COL32(100, 115, 140, 255), 1.5f);
+                dl->AddLine(ImVec2(midX - 6.0f, midY + 13.0f), ImVec2(midX + 6.0f, midY + 13.0f),
+                            isPreviewHovered ? IM_COL32(100, 180, 255, 255) : IM_COL32(100, 115, 140, 255), 1.5f);
 
-            const char* promptText = pluginInst ? "CLICK TO OPEN GUI" : "CLICK TO EDIT DSP";
-            ImVec2 pSz = ImGui::CalcTextSize(promptText);
-            dl->AddText(ImVec2(midX - pSz.x * 0.5f, previewPos.y + 70.0f),
-                        isPreviewHovered ? IM_COL32(230, 240, 255, 255) : IM_COL32(150, 160, 180, 255),
-                        promptText);
+                const char* promptText = isWindowOpen ? "FOCUS WINDOW ↗" : "CLICK TO OPEN GUI";
+                ImVec2 pSz = ImGui::CalcTextSize(promptText);
+                dl->AddText(ImVec2(midX - pSz.x * 0.5f, previewPos.y + 64.0f),
+                            isPreviewHovered ? IM_COL32(230, 240, 255, 255) : IM_COL32(150, 160, 180, 255),
+                            promptText);
 
-            if (pluginInst) {
                 const char* subPrompt = "(Auto-captures preview)";
                 ImVec2 sSz = ImGui::CalcTextSize(subPrompt);
-                dl->AddText(ImVec2(midX - sSz.x * 0.5f, previewPos.y + 86.0f),
+                dl->AddText(ImVec2(midX - sSz.x * 0.5f, previewPos.y + 80.0f),
                             IM_COL32(110, 120, 140, 220), subPrompt);
+            } else {
+                // Built-in DSP Rotary Controls
+                float knobSpacing = 36.0f;
+                float knobRadius = 10.0f;
+                ImU32 knobCol = isPreviewHovered ? IM_COL32(250, 180, 60, 255) : IM_COL32(90, 105, 130, 255);
+                ImU32 knobBg = IM_COL32(24, 28, 38, 255);
+
+                for (int k = -1; k <= 1; ++k) {
+                    ImVec2 kCenter(midX + k * knobSpacing, midY - 2.0f);
+                    dl->AddCircleFilled(kCenter, knobRadius, knobBg);
+                    dl->AddCircle(kCenter, knobRadius, knobCol, 24, 1.5f);
+                    float angle = -2.356f + (k + 1) * 2.356f;
+                    ImVec2 pt(kCenter.x + std::cos(angle) * (knobRadius - 2.0f),
+                              kCenter.y + std::sin(angle) * (knobRadius - 2.0f));
+                    dl->AddLine(kCenter, pt, knobCol, 1.8f);
+                }
+
+                const char* promptText = isWindowOpen ? "PARAMETERS OPEN" : "CLICK TO TWEAK DSP";
+                ImVec2 pSz = ImGui::CalcTextSize(promptText);
+                ImU32 promptCol = isPreviewHovered ? IM_COL32(255, 215, 110, 255) :
+                                  (isWindowOpen ? IM_COL32(100, 240, 140, 255) : IM_COL32(190, 175, 150, 255));
+                dl->AddText(ImVec2(midX - pSz.x * 0.5f, previewPos.y + 64.0f), promptCol, promptText);
+
+                const char* subPrompt = isWindowOpen ? "(Click to close)" : "(Click to edit parameters)";
+                ImVec2 sSz = ImGui::CalcTextSize(subPrompt);
+                dl->AddText(ImVec2(midX - sSz.x * 0.5f, previewPos.y + 80.0f),
+                            IM_COL32(130, 135, 150, 220), subPrompt);
             }
         }
 
         // Outer border
         dl->AddRect(previewPos, ImVec2(previewPos.x + previewW, previewPos.y + previewH), frameBorder, 5.0f, 0, borderWidth);
 
-        // Click-to-expand handling & expansion animation
+        // Click-to-expand handling
         if (previewClicked) {
-            if (pluginInst) {
+            if (hasGui) {
                 plugins::PluginWindowManager::instance().openPluginWindow(pluginInst);
                 HWND hw = plugins::PluginWindowManager::instance().getWindow(pluginInst);
                 if (hw) {
@@ -1308,14 +1534,14 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                     ThumbnailManager::instance().requestCapture(slot->name(), hw, 15);
                 }
             } else {
-                m_dspTweakSlot = slot;
+                m_dspTweakSlot = (m_dspTweakSlot == slot) ? nullptr : slot;
             }
-            m_expandedSlotIndex = slotIndex;
+            m_expandedSlot = slot;
             m_expandPulseTimer = 1.0f;
         }
 
         // If window is currently open, schedule auto-capture or periodic refresh
-        if (isWindowOpen && pluginInst) {
+        if (isWindowOpen && hasGui && pluginInst) {
             HWND hw = plugins::PluginWindowManager::instance().getWindow(pluginInst);
             if (hw) {
                 ThumbnailManager::instance().requestCapture(slot->name(), hw, thumb ? 120 : 15);
@@ -1323,7 +1549,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         }
 
         // Expanding pulse wave animation from center
-        if (m_expandedSlotIndex == slotIndex && m_expandPulseTimer > 0.0f) {
+        if (m_expandedSlot == slot && m_expandPulseTimer > 0.0f) {
             float progress = 1.0f - m_expandPulseTimer; // 0.0 -> 1.0
             float radius = 15.0f + progress * (previewW * 0.7f);
             int alpha = static_cast<int>((1.0f - progress) * 220);
@@ -1331,16 +1557,13 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             dl->AddCircle(center, radius, IM_COL32(60, 210, 255, alpha), 36, 2.5f);
             dl->AddCircle(center, radius * 0.7f, IM_COL32(120, 240, 180, alpha / 2), 36, 1.5f);
         }
-
-        // Return cursor below the preview screen
-        ImGui::SetCursorScreenPos(ImVec2(previewPos.x, previewPos.y + previewH + 4.0f));
     }
-
-    ImGui::Spacing();
 
     // ----------------------------------------------------
     // Row 3: Stompbox Active / Bypass Button & Dry/Wet Slider
     // ----------------------------------------------------
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 3.5f));
+    ImGui::SetCursorPos(ImVec2(10.0f, 142.0f));
     {
         bool active = !bypassed;
         if (active) {
@@ -1353,51 +1576,59 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
 
         char btnId[32];
         std::snprintf(btnId, sizeof(btnId), "%s##Btn_%d_%d_%d", active ? "ACTIVE" : "BYPASS", slotIndex, blockIndex, branchIndex);
-        if (CenteredButton(btnId, ImVec2(66, 24))) {
+        if (CenteredButton(btnId, ImVec2(64, 24))) {
             slot->setBypassed(active);
         }
         ImGui::PopStyleColor(2);
 
-        ImGui::SameLine(0, 8);
+        ImGui::SameLine(0, 6);
 
         // Dry / Wet Slider
         float mix = slot->dryWet() * 100.0f;
         char mixLabel[32];
         std::snprintf(mixLabel, sizeof(mixLabel), "##Mix_%d_%d_%d", slotIndex, blockIndex, branchIndex);
-        ImGui::SetNextItemWidth(96);
+        ImGui::SetNextItemWidth(136);
         if (ResettableSliderFloat(mixLabel, &mix, 0.0f, 100.0f, 100.0f, "Mix: %.0f%%")) {
             slot->setDryWet(mix / 100.0f);
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Dry/Wet Mix (Double-click to reset 100%%)");
+
         ImGui::SameLine(0, 6);
-        renderMeter("SlotMtr", slot->meter().peakLeft(), 8, 22);
+        renderMeter("SlotMtr", slot->meter().peakLeft(), 8.0f, 24.0f);
     }
 
     // ----------------------------------------------------
     // Row 4: Output Trim Slider
     // ----------------------------------------------------
+    ImGui::SetCursorPos(ImVec2(10.0f, 174.0f));
     {
         float outTrim = slot->outputGainDb();
         char trimLabel[32];
         std::snprintf(trimLabel, sizeof(trimLabel), "##Trim_%d_%d_%d", slotIndex, blockIndex, branchIndex);
-        ImGui::SetNextItemWidth(cardWidth - 20.0f);
+        ImGui::SetNextItemWidth(220.0f);
         if (ResettableSliderFloat(trimLabel, &outTrim, -24.0f, +12.0f, 0.0f, "Trim: %+.1f dB")) {
             slot->setOutputGainDb(outTrim);
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Output Trim (Double-click to reset 0.0 dB)");
     }
+    ImGui::PopStyleVar(); // FramePadding
 
     // Context Menu for MIDI Learn & GUI Options
     char popupId[64];
     std::snprintf(popupId, sizeof(popupId), "SlotCtx_%d_%d_%d", slotIndex, blockIndex, branchIndex);
     if (ImGui::BeginPopupContextItem(popupId)) {
-        if (pluginInst) {
+        if (hasGui) {
             if (ImGui::MenuItem("Open Plugin GUI Window")) {
                 plugins::PluginWindowManager::instance().openPluginWindow(pluginInst);
             }
             HWND hWin = plugins::PluginWindowManager::instance().getWindow(pluginInst);
             if (hWin && ImGui::MenuItem("Capture GUI Preview Screenshot")) {
                 ThumbnailManager::instance().captureWindow(slot->name(), hWin);
+            }
+            ImGui::Separator();
+        } else if (pluginInst) {
+            if (ImGui::MenuItem("Edit DSP Parameters")) {
+                m_dspTweakSlot = slot;
             }
             ImGui::Separator();
         }
@@ -1411,7 +1642,9 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             m_midi.startLearning(midi::BindingTargetType::SlotOutputGain, slotIndex, branchIndex);
         }
         if (ImGui::MenuItem("Delete Slot")) {
-            if (pluginInst) plugins::PluginWindowManager::instance().closePluginWindow(pluginInst);
+            if (hasGui) plugins::PluginWindowManager::instance().closePluginWindow(pluginInst);
+            if (m_dspTweakSlot == slot) m_dspTweakSlot = nullptr;
+            if (m_expandedSlot == slot) m_expandedSlot = nullptr;
             if (branchIndex == -1) {
                 m_graph.removeSerialNode(slotIndex);
             } else {
@@ -1426,12 +1659,15 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
     }
 
     ImGui::EndChild();
-    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(); // WindowPadding
+    ImGui::PopStyleColor(); // ChildBg
     ImGui::EndGroup();
 }
 
 void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int blockIndex, float centerY) {
     if (!block) return;
+
+    ImGui::PushID(blockIndex);
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 winPos = ImGui::GetWindowPos();
@@ -1477,54 +1713,59 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
     const float forkStartX = startX;
     const float envX = forkStartX + forkLeadW;
 
+    const std::string key0 = "b" + std::to_string(blockIndex) + "_0";
+    const std::string key1 = "b" + std::to_string(blockIndex) + "_1";
+    bool min0 = m_branchMinimized[key0];
+    bool min1 = m_branchMinimized[key1];
+
+    const float port0Y = min0 ? (envY0 + envHeaderH * 0.5f) : card0MidY;
+    const float port1Y = min1 ? (envY1 + envHeaderH * 0.5f) : card1MidY;
+
+    int pendingDissolveKeepBranch = -99;
+
     // 1. Split Fork Junction & Wires entering Envelope Left Ports
     dl->AddCircleFilled(toScreen(forkStartX, centerY), 4.5f, IM_COL32(110, 175, 255, 255));
-    drawRoutingWire(dl, toScreen(forkStartX, centerY), toScreen(envX, card0MidY), true);
-    drawRoutingWire(dl, toScreen(forkStartX, centerY), toScreen(envX, card1MidY), true);
+    drawRoutingWire(dl, toScreen(forkStartX, centerY), toScreen(envX, port0Y), false);
+    drawRoutingWire(dl, toScreen(forkStartX, centerY), toScreen(envX, port1Y), false);
 
     // Left Input Ports on Envelopes
-    dl->AddCircleFilled(toScreen(envX, card0MidY), 6.0f, IM_COL32(18, 24, 34, 255));
-    dl->AddCircleFilled(toScreen(envX, card0MidY), 3.5f, IM_COL32(80, 185, 255, 255));
+    dl->AddCircleFilled(toScreen(envX, port0Y), 6.0f, IM_COL32(18, 24, 34, 255));
+    dl->AddCircleFilled(toScreen(envX, port0Y), 3.5f, IM_COL32(80, 185, 255, 255));
 
-    dl->AddCircleFilled(toScreen(envX, card1MidY), 6.0f, IM_COL32(32, 22, 18, 255));
-    dl->AddCircleFilled(toScreen(envX, card1MidY), 3.5f, IM_COL32(255, 170, 50, 255));
+    dl->AddCircleFilled(toScreen(envX, port1Y), 6.0f, IM_COL32(32, 22, 18, 255));
+    dl->AddCircleFilled(toScreen(envX, port1Y), 3.5f, IM_COL32(255, 170, 50, 255));
 
     // =========================================================================
     // 2. BRANCH A ENVELOPE (Top Chassis)
     // =========================================================================
     {
+        const float chassisH0 = min0 ? envHeaderH : envH;
         // Envelope Background & Border (Cool Cyan / Navy theme)
-        dl->AddRectFilled(toScreen(envX, envY0), toScreen(envX + envelopeW, envY0 + envH), IM_COL32(18, 22, 30, 235), 8.0f);
-        dl->AddRect(toScreen(envX, envY0), toScreen(envX + envelopeW, envY0 + envH), IM_COL32(45, 80, 120, 220), 8.0f, 0, 1.5f);
+        dl->AddRectFilled(toScreen(envX, envY0), toScreen(envX + envelopeW, envY0 + chassisH0), IM_COL32(18, 22, 30, 235), 8.0f);
+        dl->AddRect(toScreen(envX, envY0), toScreen(envX + envelopeW, envY0 + chassisH0), IM_COL32(45, 80, 120, 220), 8.0f, 0, 1.5f);
 
-        // Header Background Bar (Rounded top corners)
-        dl->AddRectFilled(toScreen(envX, envY0), toScreen(envX + envelopeW, envY0 + envHeaderH), IM_COL32(23, 29, 40, 255), 8.0f, ImDrawFlags_RoundCornersTop);
-        dl->AddLine(toScreen(envX, envY0 + envHeaderH), toScreen(envX + envelopeW, envY0 + envHeaderH), IM_COL32(45, 80, 120, 180), 1.0f);
+        // Header Background Bar (Rounded top corners, or fully rounded if minimized)
+        ImDrawFlags roundFlags0 = min0 ? ImDrawFlags_RoundCornersAll : ImDrawFlags_RoundCornersTop;
+        dl->AddRectFilled(toScreen(envX, envY0), toScreen(envX + envelopeW, envY0 + envHeaderH), IM_COL32(23, 29, 40, 255), 8.0f, roundFlags0);
+        if (!min0) {
+            dl->AddLine(toScreen(envX, envY0 + envHeaderH), toScreen(envX + envelopeW, envY0 + envHeaderH), IM_COL32(45, 80, 120, 180), 1.0f);
+        }
 
         // Header Controls
         if (br0) {
             ImGui::SetCursorPos(ImVec2(envX + 12.0f, envY0 + 6.0f));
             ImGui::BeginGroup();
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 3.5f));
 
-            // Branch A Badge
-            ImVec2 badgePos = ImGui::GetCursorScreenPos();
-            const char* badgeText = "BRANCH A";
-            ImVec2 badgeSz = ImGui::CalcTextSize(badgeText);
-            dl->AddRectFilled(ImVec2(badgePos.x - 3.0f, badgePos.y - 2.0f),
-                              ImVec2(badgePos.x + badgeSz.x + 5.0f, badgePos.y + badgeSz.y + 2.0f),
-                              IM_COL32(18, 48, 72, 255), 4.0f);
-            dl->AddRect(ImVec2(badgePos.x - 3.0f, badgePos.y - 2.0f),
-                        ImVec2(badgePos.x + badgeSz.x + 5.0f, badgePos.y + badgeSz.y + 2.0f),
-                        IM_COL32(50, 145, 215, 255), 4.0f);
-            dl->AddText(badgePos, IM_COL32(100, 215, 255, 255), badgeText);
-
-            ImGui::Dummy(ImVec2(badgeSz.x + 6.0f, 22.0f));
+            // Branch A Badge Pill
+            renderBadgePill("BRANCH A", IM_COL32(18, 48, 72, 255), IM_COL32(50, 145, 215, 255), IM_COL32(100, 215, 255, 255), 24.0f);
             ImGui::SameLine(0, 8);
 
             char countBuf[32];
             std::snprintf(countBuf, sizeof(countBuf), "(%zu %s)", numSlots0, numSlots0 == 1 ? "Slot" : "Slots");
+            ImGui::AlignTextToFramePadding();
             ImGui::TextDisabled("%s", countBuf);
-            ImGui::SameLine(0, 14);
+            ImGui::SameLine(0, 12);
 
             // Mute Button
             bool m0 = br0->isMuted();
@@ -1551,7 +1792,7 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
             if (p0) ImGui::PopStyleColor();
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Phase Invert (180° Polarity Flip)");
 
-            ImGui::SameLine(0, 10);
+            ImGui::SameLine(0, 8);
 
             // Pan Slider (Double-click reset to 0.0)
             float pan0 = br0->pan();
@@ -1567,50 +1808,88 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
             if (ResettableSliderFloat("##Gain0", &gain0, -36.0f, +12.0f, 0.0f, "%+.1f dB")) { br0->setGainDb(gain0); }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Branch A Gain (Double-click to reset 0.0 dB)");
 
+            ImGui::PopStyleVar();
             ImGui::EndGroup();
 
-            // Branch A Slots & Internal Wiring
-            float curX0 = envX + envPadX;
+            // Top-right controls: Minimise & Delete Branch A
+            float btnAreaX0 = envX + envelopeW - 58.0f;
+            ImGui::SetCursorPos(ImVec2(btnAreaX0, envY0 + 6.0f));
 
-            // Wire from envelope entry port to first slot/insert card
-            drawRoutingWire(dl, toScreen(envX, card0MidY), toScreen(curX0, card0MidY), false);
+            if (renderCenteredMinimiseButton("##minBr0", ImVec2(24, 24), min0)) {
+                m_branchMinimized[key0] = !min0;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(min0 ? "Maximise Branch A" : "Minimise Branch A");
 
-            for (size_t s = 0; s < numSlots0; ++s) {
-                auto* bSlot = br0->getSlot(s);
-                if (!bSlot) continue;
+            ImGui::SameLine(0, 4);
 
+            char delPopup0[32];
+            std::snprintf(delPopup0, sizeof(delPopup0), "DelConfirmBr0_%d", blockIndex);
+            if (renderCenteredDeleteButton("##delBr0", ImVec2(24, 24))) {
+                ImGui::OpenPopup(delPopup0);
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete Branch A (Branch B will be kept in rack)");
+
+            if (ImGui::BeginPopup(delPopup0)) {
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Delete Branch A?");
+                ImGui::TextDisabled("Branch B plugins will be moved into the rack.");
+                ImGui::Spacing();
+                if (ImGui::Button("Delete Branch", ImVec2(110, 24))) {
+                    pendingDissolveKeepBranch = 1;
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel", ImVec2(60, 24))) {
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
+
+            // If not minimized, render slots and internal wiring
+            if (!min0) {
+                float curX0 = envX + envPadX;
+
+                // Wire from envelope entry port to first slot/insert card
+                drawRoutingWire(dl, toScreen(envX, card0MidY), toScreen(curX0, card0MidY), false);
+
+                for (size_t s = 0; s < numSlots0; ++s) {
+                    auto* bSlot = br0->getSlot(s);
+                    if (!bSlot) continue;
+
+                    ImGui::SetCursorPos(ImVec2(curX0, card0Top));
+                    renderPluginSlot(bSlot, static_cast<int>(s), blockIndex, 0);
+                    curX0 += cardW;
+
+                    drawRoutingWire(dl, toScreen(curX0, card0MidY), toScreen(curX0 + slotWireW, card0MidY), false);
+                    curX0 += slotWireW;
+                }
+
+                // Branch A Inline Insert Button Card
                 ImGui::SetCursorPos(ImVec2(curX0, card0Top));
-                renderPluginSlot(bSlot, static_cast<int>(s), blockIndex, 0);
-                curX0 += cardW;
+                ImGui::BeginGroup();
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.15f, 0.19f, 0.6f));
+                char insertBr0Card[32];
+                std::snprintf(insertBr0Card, sizeof(insertBr0Card), "InsertBr0Card_%d", blockIndex);
+                ImGui::BeginChild(insertBr0Card, ImVec2(insertCardW, cardH), true, ImGuiWindowFlags_NoScrollbar);
+                ImGui::SetCursorPos(ImVec2((insertCardW - 48.0f) * 0.5f, (cardH - 48.0f) * 0.5f));
+                if (renderCenteredPlusButton("##AddPluginBr0", ImVec2(48.0f, 48.0f), 11.0f)) {
+                    m_insertTargetBlockIndex = blockIndex;
+                    m_insertTargetBranchIndex = 0;
+                    m_showPluginBrowser = true;
+                    m_focusPluginBrowser = true;
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                    ImGui::SetTooltip("Insert plugin into Branch A");
+                }
+                ImGui::EndChild();
+                ImGui::PopStyleColor();
+                ImGui::EndGroup();
+                curX0 += insertCardW;
 
-                drawRoutingWire(dl, toScreen(curX0, card0MidY), toScreen(curX0 + slotWireW, card0MidY), true);
-                curX0 += slotWireW;
-            }
-
-            // Branch A Inline Insert Button Card
-            ImGui::SetCursorPos(ImVec2(curX0, card0Top));
-            ImGui::BeginGroup();
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.15f, 0.19f, 0.6f));
-            ImGui::BeginChild("InsertBr0Card", ImVec2(insertCardW, cardH), true, ImGuiWindowFlags_NoScrollbar);
-            ImGui::SetCursorPos(ImVec2((insertCardW - 48.0f) * 0.5f, (cardH - 48.0f) * 0.5f));
-            if (renderCenteredPlusButton("##AddPluginBr0", ImVec2(48.0f, 48.0f), 11.0f)) {
-                m_insertTargetBlockIndex = blockIndex;
-                m_insertTargetBranchIndex = 0;
-                m_showPluginBrowser = true;
-                m_focusPluginBrowser = true;
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-                ImGui::SetTooltip("Insert plugin into Branch A");
-            }
-            ImGui::EndChild();
-            ImGui::PopStyleColor();
-            ImGui::EndGroup();
-            curX0 += insertCardW;
-
-            // Wire from insert card to envelope exit port
-            if (curX0 < envX + envelopeW) {
-                drawRoutingWire(dl, toScreen(curX0, card0MidY), toScreen(envX + envelopeW, card0MidY), false);
+                // Wire from insert card to envelope exit port
+                if (curX0 < envX + envelopeW) {
+                    drawRoutingWire(dl, toScreen(curX0, card0MidY), toScreen(envX + envelopeW, card0MidY), false);
+                }
             }
         }
     }
@@ -1619,38 +1898,33 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
     // 3. BRANCH B ENVELOPE (Bottom Chassis)
     // =========================================================================
     {
+        const float chassisH1 = min1 ? envHeaderH : envH;
         // Envelope Background & Border (Warm Amber theme)
-        dl->AddRectFilled(toScreen(envX, envY1), toScreen(envX + envelopeW, envY1 + envH), IM_COL32(26, 21, 19, 235), 8.0f);
-        dl->AddRect(toScreen(envX, envY1), toScreen(envX + envelopeW, envY1 + envH), IM_COL32(130, 75, 40, 220), 8.0f, 0, 1.5f);
+        dl->AddRectFilled(toScreen(envX, envY1), toScreen(envX + envelopeW, envY1 + chassisH1), IM_COL32(26, 21, 19, 235), 8.0f);
+        dl->AddRect(toScreen(envX, envY1), toScreen(envX + envelopeW, envY1 + chassisH1), IM_COL32(130, 75, 40, 220), 8.0f, 0, 1.5f);
 
-        // Header Background Bar (Rounded top corners)
-        dl->AddRectFilled(toScreen(envX, envY1), toScreen(envX + envelopeW, envY1 + envHeaderH), IM_COL32(35, 27, 23, 255), 8.0f, ImDrawFlags_RoundCornersTop);
-        dl->AddLine(toScreen(envX, envY1 + envHeaderH), toScreen(envX + envelopeW, envY1 + envHeaderH), IM_COL32(130, 75, 40, 180), 1.0f);
+        // Header Background Bar (Rounded top corners, or fully rounded if minimized)
+        ImDrawFlags roundFlags1 = min1 ? ImDrawFlags_RoundCornersAll : ImDrawFlags_RoundCornersTop;
+        dl->AddRectFilled(toScreen(envX, envY1), toScreen(envX + envelopeW, envY1 + envHeaderH), IM_COL32(35, 27, 23, 255), 8.0f, roundFlags1);
+        if (!min1) {
+            dl->AddLine(toScreen(envX, envY1 + envHeaderH), toScreen(envX + envelopeW, envY1 + envHeaderH), IM_COL32(130, 75, 40, 180), 1.0f);
+        }
 
         // Header Controls
         if (br1) {
             ImGui::SetCursorPos(ImVec2(envX + 12.0f, envY1 + 6.0f));
             ImGui::BeginGroup();
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 3.5f));
 
-            // Branch B Badge
-            ImVec2 badgePos = ImGui::GetCursorScreenPos();
-            const char* badgeText = "BRANCH B";
-            ImVec2 badgeSz = ImGui::CalcTextSize(badgeText);
-            dl->AddRectFilled(ImVec2(badgePos.x - 3.0f, badgePos.y - 2.0f),
-                              ImVec2(badgePos.x + badgeSz.x + 5.0f, badgePos.y + badgeSz.y + 2.0f),
-                              IM_COL32(65, 38, 20, 255), 4.0f);
-            dl->AddRect(ImVec2(badgePos.x - 3.0f, badgePos.y - 2.0f),
-                        ImVec2(badgePos.x + badgeSz.x + 5.0f, badgePos.y + badgeSz.y + 2.0f),
-                        IM_COL32(215, 120, 45, 255), 4.0f);
-            dl->AddText(badgePos, IM_COL32(255, 185, 75, 255), badgeText);
-
-            ImGui::Dummy(ImVec2(badgeSz.x + 6.0f, 22.0f));
+            // Branch B Badge Pill
+            renderBadgePill("BRANCH B", IM_COL32(65, 38, 20, 255), IM_COL32(215, 120, 45, 255), IM_COL32(255, 185, 75, 255), 24.0f);
             ImGui::SameLine(0, 8);
 
             char countBuf[32];
             std::snprintf(countBuf, sizeof(countBuf), "(%zu %s)", numSlots1, numSlots1 == 1 ? "Slot" : "Slots");
+            ImGui::AlignTextToFramePadding();
             ImGui::TextDisabled("%s", countBuf);
-            ImGui::SameLine(0, 14);
+            ImGui::SameLine(0, 12);
 
             // Mute Button
             bool m1 = br1->isMuted();
@@ -1677,7 +1951,7 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
             if (p1) ImGui::PopStyleColor();
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Phase Invert (180° Polarity Flip)");
 
-            ImGui::SameLine(0, 10);
+            ImGui::SameLine(0, 8);
 
             // Pan Slider (Double-click reset to 0.0)
             float pan1 = br1->pan();
@@ -1693,50 +1967,88 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
             if (ResettableSliderFloat("##Gain1", &gain1, -36.0f, +12.0f, 0.0f, "%+.1f dB")) { br1->setGainDb(gain1); }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Branch B Gain (Double-click to reset 0.0 dB)");
 
+            ImGui::PopStyleVar();
             ImGui::EndGroup();
 
-            // Branch B Slots & Internal Wiring
-            float curX1 = envX + envPadX;
+            // Top-right controls: Minimise & Delete Branch B
+            float btnAreaX1 = envX + envelopeW - 58.0f;
+            ImGui::SetCursorPos(ImVec2(btnAreaX1, envY1 + 6.0f));
 
-            // Wire from envelope entry port to first slot/insert card
-            drawRoutingWire(dl, toScreen(envX, card1MidY), toScreen(curX1, card1MidY), false);
+            if (renderCenteredMinimiseButton("##minBr1", ImVec2(24, 24), min1)) {
+                m_branchMinimized[key1] = !min1;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(min1 ? "Maximise Branch B" : "Minimise Branch B");
 
-            for (size_t s = 0; s < numSlots1; ++s) {
-                auto* bSlot = br1->getSlot(s);
-                if (!bSlot) continue;
+            ImGui::SameLine(0, 4);
 
+            char delPopup1[32];
+            std::snprintf(delPopup1, sizeof(delPopup1), "DelConfirmBr1_%d", blockIndex);
+            if (renderCenteredDeleteButton("##delBr1", ImVec2(24, 24))) {
+                ImGui::OpenPopup(delPopup1);
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete Branch B (Branch A will be kept in rack)");
+
+            if (ImGui::BeginPopup(delPopup1)) {
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Delete Branch B?");
+                ImGui::TextDisabled("Branch A plugins will be moved into the rack.");
+                ImGui::Spacing();
+                if (ImGui::Button("Delete Branch", ImVec2(110, 24))) {
+                    pendingDissolveKeepBranch = 0;
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel", ImVec2(60, 24))) {
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
+
+            // If not minimized, render slots and internal wiring
+            if (!min1) {
+                float curX1 = envX + envPadX;
+
+                // Wire from envelope entry port to first slot/insert card
+                drawRoutingWire(dl, toScreen(envX, card1MidY), toScreen(curX1, card1MidY), false);
+
+                for (size_t s = 0; s < numSlots1; ++s) {
+                    auto* bSlot = br1->getSlot(s);
+                    if (!bSlot) continue;
+
+                    ImGui::SetCursorPos(ImVec2(curX1, card1Top));
+                    renderPluginSlot(bSlot, static_cast<int>(s), blockIndex, 1);
+                    curX1 += cardW;
+
+                    drawRoutingWire(dl, toScreen(curX1, card1MidY), toScreen(curX1 + slotWireW, card1MidY), false);
+                    curX1 += slotWireW;
+                }
+
+                // Branch B Inline Insert Button Card
                 ImGui::SetCursorPos(ImVec2(curX1, card1Top));
-                renderPluginSlot(bSlot, static_cast<int>(s), blockIndex, 1);
-                curX1 += cardW;
+                ImGui::BeginGroup();
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.15f, 0.19f, 0.6f));
+                char insertBr1Card[32];
+                std::snprintf(insertBr1Card, sizeof(insertBr1Card), "InsertBr1Card_%d", blockIndex);
+                ImGui::BeginChild(insertBr1Card, ImVec2(insertCardW, cardH), true, ImGuiWindowFlags_NoScrollbar);
+                ImGui::SetCursorPos(ImVec2((insertCardW - 48.0f) * 0.5f, (cardH - 48.0f) * 0.5f));
+                if (renderCenteredPlusButton("##AddPluginBr1", ImVec2(48.0f, 48.0f), 11.0f)) {
+                    m_insertTargetBlockIndex = blockIndex;
+                    m_insertTargetBranchIndex = 1;
+                    m_showPluginBrowser = true;
+                    m_focusPluginBrowser = true;
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                    ImGui::SetTooltip("Insert plugin into Branch B");
+                }
+                ImGui::EndChild();
+                ImGui::PopStyleColor();
+                ImGui::EndGroup();
+                curX1 += insertCardW;
 
-                drawRoutingWire(dl, toScreen(curX1, card1MidY), toScreen(curX1 + slotWireW, card1MidY), true);
-                curX1 += slotWireW;
-            }
-
-            // Branch B Inline Insert Button Card
-            ImGui::SetCursorPos(ImVec2(curX1, card1Top));
-            ImGui::BeginGroup();
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.15f, 0.19f, 0.6f));
-            ImGui::BeginChild("InsertBr1Card", ImVec2(insertCardW, cardH), true, ImGuiWindowFlags_NoScrollbar);
-            ImGui::SetCursorPos(ImVec2((insertCardW - 48.0f) * 0.5f, (cardH - 48.0f) * 0.5f));
-            if (renderCenteredPlusButton("##AddPluginBr1", ImVec2(48.0f, 48.0f), 11.0f)) {
-                m_insertTargetBlockIndex = blockIndex;
-                m_insertTargetBranchIndex = 1;
-                m_showPluginBrowser = true;
-                m_focusPluginBrowser = true;
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-                ImGui::SetTooltip("Insert plugin into Branch B");
-            }
-            ImGui::EndChild();
-            ImGui::PopStyleColor();
-            ImGui::EndGroup();
-            curX1 += insertCardW;
-
-            // Wire from insert card to envelope exit port
-            if (curX1 < envX + envelopeW) {
-                drawRoutingWire(dl, toScreen(curX1, card1MidY), toScreen(envX + envelopeW, card1MidY), false);
+                // Wire from insert card to envelope exit port
+                if (curX1 < envX + envelopeW) {
+                    drawRoutingWire(dl, toScreen(curX1, card1MidY), toScreen(envX + envelopeW, card1MidY), false);
+                }
             }
         }
     }
@@ -1745,57 +2057,69 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
     // 4. CONVERGENCE & COMBINER NODE
     // =========================================================================
     // Right Exit Ports on Envelopes
-    dl->AddCircleFilled(toScreen(envX + envelopeW, card0MidY), 6.0f, IM_COL32(18, 24, 34, 255));
-    dl->AddCircleFilled(toScreen(envX + envelopeW, card0MidY), 3.5f, IM_COL32(80, 185, 255, 255));
+    dl->AddCircleFilled(toScreen(envX + envelopeW, port0Y), 6.0f, IM_COL32(18, 24, 34, 255));
+    dl->AddCircleFilled(toScreen(envX + envelopeW, port0Y), 3.5f, IM_COL32(80, 185, 255, 255));
 
-    dl->AddCircleFilled(toScreen(envX + envelopeW, card1MidY), 6.0f, IM_COL32(32, 22, 18, 255));
-    dl->AddCircleFilled(toScreen(envX + envelopeW, card1MidY), 3.5f, IM_COL32(255, 170, 50, 255));
+    dl->AddCircleFilled(toScreen(envX + envelopeW, port1Y), 6.0f, IM_COL32(32, 22, 18, 255));
+    dl->AddCircleFilled(toScreen(envX + envelopeW, port1Y), 3.5f, IM_COL32(255, 170, 50, 255));
 
     const float convLeadW = 36.0f;
-    const float combinerX = envX + envelopeW + convLeadW;
+    const float combW = 104.0f;
+    const float combH = 60.0f;
+    const float combLeft = envX + envelopeW + convLeadW;
+    const float combTop = centerY - (combH * 0.5f);
 
-    drawRoutingWire(dl, toScreen(envX + envelopeW, card0MidY), toScreen(combinerX, centerY), true);
-    drawRoutingWire(dl, toScreen(envX + envelopeW, card1MidY), toScreen(combinerX, centerY), true);
+    drawRoutingWire(dl, toScreen(envX + envelopeW, port0Y), toScreen(combLeft, centerY), false);
+    drawRoutingWire(dl, toScreen(envX + envelopeW, port1Y), toScreen(combLeft, centerY), false);
 
-    // Combiner node [ + ]
-    const float combSize = 44.0f;
-    ImGui::SetCursorPos(ImVec2(combinerX - (combSize * 0.5f), centerY - (combSize * 0.5f)));
+    // Combiner card background
+    dl->AddRectFilled(toScreen(combLeft, combTop), toScreen(combLeft + combW, combTop + combH), IM_COL32(20, 25, 34, 250), 6.0f);
+    dl->AddRect(toScreen(combLeft, combTop), toScreen(combLeft + combW, combTop + combH), IM_COL32(60, 100, 150, 220), 6.0f, 0, 1.2f);
 
-    char combBtnId[32];
-    std::snprintf(combBtnId, sizeof(combBtnId), "##Combiner_%d", blockIndex);
-    if (renderCenteredPlusButton(combBtnId, ImVec2(combSize, combSize), 10.0f)) {
-        ImGui::OpenPopup("CombinerPopup");
+    // Combiner Ports
+    dl->AddCircleFilled(toScreen(combLeft, centerY), 4.0f, IM_COL32(110, 175, 255, 255));
+    dl->AddCircleFilled(toScreen(combLeft + combW, centerY), 4.0f, IM_COL32(110, 175, 255, 255));
+
+    ImGui::SetCursorPos(ImVec2(combLeft + 6.0f, combTop + 6.0f));
+    ImGui::BeginGroup();
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f, 2.0f));
+
+    ImGui::SetCursorPosX(combLeft + (combW - ImGui::CalcTextSize("SUM / BLEND").x) * 0.5f);
+    ImGui::TextColored(ImVec4(0.55f, 0.75f, 0.95f, 1.0f), "SUM / BLEND");
+
+    float blend = block->blend();
+    ImGui::SetCursorPosX(combLeft + 8.0f);
+    ImGui::SetNextItemWidth(combW - 16.0f);
+    if (ResettableSliderFloat("##ABBlend", &blend, -1.0f, 1.0f, 0.0f, "A:B %+.2f")) {
+        block->setBlend(blend);
     }
     if (ImGui::IsItemHovered()) {
-        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-        ImGui::SetTooltip("Combiner Node (Sums Branch A + B to Stereo)\nClick for options or to remove split");
+        ImGui::SetTooltip("Branch A / B Crossfade Blend\n0.00: 50/50 Equal Sum\n-1.00: 100%% Branch A\n+1.00: 100%% Branch B\nDouble-click to center");
     }
 
-    if (ImGui::BeginPopup("CombinerPopup")) {
-        ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.95f, 1.0f), "Parallel Split / Combiner Options");
-        ImGui::Separator();
-        if (ImGui::MenuItem("Remove Parallel Split (Dissolve Branches)")) {
-            for (size_t b = 0; b < block->numBranches(); ++b) {
-                auto* br = block->getBranch(b);
-                if (br) {
-                    for (size_t s = 0; s < br->numSlots(); ++s) {
-                        auto* slot = br->getSlot(s);
-                        if (slot) {
-                            auto* pInst = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
-                            if (pInst) plugins::PluginWindowManager::instance().closePluginWindow(pInst);
-                        }
-                    }
-                }
-            }
-            m_graph.removeSerialNode(blockIndex);
-            ImGui::EndPopup();
-            return;
-        }
-        ImGui::EndPopup();
-    }
+    ImGui::PopStyleVar();
+    ImGui::EndGroup();
 
     // Set cursor to the right edge of combiner node for downstream serial routing
-    ImGui::SetCursorPosX(combinerX + (combSize * 0.5f));
+    ImGui::SetCursorPosX(combLeft + combW);
+
+    // Handle deferred branch dissolve if triggered
+    if (pendingDissolveKeepBranch >= 0) {
+        int branchToDelete = (pendingDissolveKeepBranch == 1) ? 0 : 1;
+        auto* delBr = block->getBranch(branchToDelete);
+        if (delBr) {
+            for (size_t s = 0; s < delBr->numSlots(); ++s) {
+                auto* slot = delBr->getSlot(s);
+                if (slot) {
+                    auto* pInst = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
+                    if (pInst) plugins::PluginWindowManager::instance().closePluginWindow(pInst);
+                }
+            }
+        }
+        m_graph.dissolveParallelBlock(blockIndex, pendingDissolveKeepBranch);
+    }
+
+    ImGui::PopID();
 }
 
 bool RackView::renderRotaryKnob(const char* label, float* value, float minVal, float maxVal, float radius, const char* format, float defaultVal) {
@@ -1892,6 +2216,22 @@ void RackView::renderBottomBar() {
         ImGui::SetTooltip("Open Audio, Plugin, and Host Settings");
     }
 
+    ImGui::SameLine(0, 8);
+    // Practice Tools (Looper & Backing Track Player) toggle button
+    bool toolsActive = m_showPracticeToolsModal;
+    if (toolsActive) {
+        ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(35, 90, 145, 255));
+    }
+    if (CenteredButton("Practice Tools", ImVec2(105.0f, 26.0f))) {
+        m_showPracticeToolsModal = !m_showPracticeToolsModal;
+    }
+    if (toolsActive) {
+        ImGui::PopStyleColor();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Open Practice Tools (Riff Looper & WAV Backing Track Player)");
+    }
+
     ImGui::SameLine(0, 14);
     ImGui::AlignTextToFramePadding();
 
@@ -1906,29 +2246,37 @@ void RackView::renderBottomBar() {
         ImGui::TextDisabled("MIDI: %s", m_midi.lastActivityDescription().c_str());
     }
 
-    // Right side: ASIO Activity Pill
+    // Right side: ASIO Activity & Real-Time DSP Status Pill
     const double sr = m_asio.currentSampleRate();
     const int bufSize = m_asio.currentBufferSize();
     const double latencyMs = (sr > 0.0) ? (static_cast<double>(bufSize) / sr * 1000.0) : 0.0;
+    float dspLoad = m_dspLoadPercent ? m_dspLoadPercent->load(std::memory_order_relaxed) : 0.0f;
+    uint32_t drops = m_dspDropouts ? m_dspDropouts->load(std::memory_order_relaxed) : 0;
 
-    char statusText[128];
+    char statusText[160];
     if (m_asio.isRunning()) {
-        std::snprintf(statusText, sizeof(statusText), "ACTIVE  |  %.0f kHz  |  %d spls (%.1f ms)",
-                      sr / 1000.0, bufSize, latencyMs);
+        if (drops > 0) {
+            std::snprintf(statusText, sizeof(statusText), "ACTIVE  |  %.0f kHz  |  %d spls (%.1f ms)  |  DSP: %.0f%%  |  DROPS: %u",
+                          sr / 1000.0, bufSize, latencyMs, dspLoad, drops);
+        } else {
+            std::snprintf(statusText, sizeof(statusText), "ACTIVE  |  %.0f kHz  |  %d spls (%.1f ms)  |  DSP: %.0f%%",
+                          sr / 1000.0, bufSize, latencyMs, dspLoad);
+        }
     } else {
         std::snprintf(statusText, sizeof(statusText), "STOPPED");
     }
 
     const float pillW = ImGui::CalcTextSize(statusText).x + 36.0f;
     const float availW = ImGui::GetContentRegionAvail().x;
+    const float rightMargin = 14.0f;
 
-    if (availW > pillW) {
-        ImGui::SameLine(ImGui::GetCursorPosX() + availW - pillW);
+    if (availW > pillW + rightMargin) {
+        ImGui::SameLine(ImGui::GetCursorPosX() + availW - pillW - rightMargin);
     } else {
         ImGui::SameLine(0, 12);
     }
 
-    renderStatusPill(m_asio.isRunning(), sr, bufSize, latencyMs);
+    renderStatusPill(m_asio.isRunning(), statusText);
 }
 
 void RackView::renderMeter(const char* label, float level, float width, float height) {
@@ -2269,7 +2617,10 @@ void RackView::renderDspTweakModal() {
         return;
     }
 
-    ImGui::SetNextWindowSize(ImVec2(380, 280), ImGuiCond_Appearing);
+    const size_t numParams = pInst->numParameters();
+    float winHeight = std::max(220.0f, 130.0f + static_cast<float>(numParams) * 36.0f);
+    ImGui::SetNextWindowSize(ImVec2(390, winHeight), ImGuiCond_Appearing);
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     bool open = true;
     char titleBuf[64];
     std::snprintf(titleBuf, sizeof(titleBuf), "%s Parameters##DspTweak", m_dspTweakSlot->name().c_str());
@@ -2278,16 +2629,23 @@ void RackView::renderDspTweakModal() {
         ImGui::TextColored(ImVec4(0.98f, 0.60f, 0.20f, 1.0f), "%s", m_dspTweakSlot->name().c_str());
         ImGui::TextDisabled("Vendor: %s | Version: %s", pInst->vendor().c_str(), pInst->version().c_str());
         ImGui::Separator();
+        ImGui::Spacing();
 
-        const size_t numParams = pInst->numParameters();
         if (numParams == 0) {
             ImGui::TextDisabled("No modifiable parameters available.");
         } else {
+            float availW = ImGui::GetContentRegionAvail().x;
             for (size_t i = 0; i < numParams; ++i) {
                 auto desc = pInst->getParameterDesc(i);
                 float val = pInst->getParameterValue(desc.id);
+
+                ImGui::AlignTextToFramePadding();
+                ImGui::Text("%s", desc.name.c_str());
+                ImGui::SameLine(95.0f);
+                ImGui::SetNextItemWidth(availW - 95.0f);
+
                 char label[64];
-                std::snprintf(label, sizeof(label), "%s##p_%zu", desc.name.c_str(), i);
+                std::snprintf(label, sizeof(label), "##p_%zu", i);
                 if (ResettableSliderFloat(label, &val, desc.minValue, desc.maxValue, desc.defaultValue, "%.2f")) {
                     pInst->setParameterValue(desc.id, val);
                 }
@@ -2299,6 +2657,7 @@ void RackView::renderDspTweakModal() {
 
         ImGui::Spacing();
         ImGui::Separator();
+        ImGui::Spacing();
         if (CenteredButton("Close", ImVec2(80, 24))) {
             open = false;
         }
@@ -2322,7 +2681,7 @@ void RackView::renderUpdateModal() {
         ImGui::Separator();
         ImGui::Spacing();
 
-        ImGui::Text("Installed Version: %s", "v1.1.1");
+        ImGui::Text("Installed Version: %s", "v1.1.3");
         ImGui::Spacing();
 
         // Option to enable beta builds from dev branch
@@ -2566,7 +2925,7 @@ void RackView::renderSettingsModal() {
                 ImGui::Separator();
                 ImGui::Spacing();
 
-                ImGui::Text("Installed Version: %s", "v1.1.1");
+                ImGui::Text("Installed Version: %s", "v1.1.3");
                 ImGui::Spacing();
 
                 state::AppConfig cfg;
@@ -2589,7 +2948,7 @@ void RackView::renderSettingsModal() {
             // TAB 4: ABOUT
             if (ImGui::BeginTabItem("About")) {
                 ImGui::Spacing();
-                ImGui::TextColored(ImVec4(0.98f, 0.60f, 0.20f, 1.0f), "PRACCY v1.1.1");
+                ImGui::TextColored(ImVec4(0.98f, 0.60f, 0.20f, 1.0f), "PRACCY v1.1.3");
                 ImGui::TextDisabled("Lightweight, Low-Latency Guitar & Audio Practice Host");
                 ImGui::Separator();
                 ImGui::Spacing();
@@ -2617,6 +2976,222 @@ void RackView::renderSettingsModal() {
         ImGui::Separator();
         if (CenteredButton("Close", ImVec2(90, 26))) {
             m_showSettingsModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::EndPopup();
+    }
+}
+
+void RackView::renderPracticeToolsModal() {
+    if (!m_showPracticeToolsModal) return;
+
+    ImGui::OpenPopup("Practice Tools##Modal");
+    ImGui::SetNextWindowSize(ImVec2(680, 480), ImGuiCond_Appearing);
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+
+    if (ImGui::BeginPopupModal("Practice Tools##Modal", &m_showPracticeToolsModal, ImGuiWindowFlags_NoResize)) {
+        ImGui::TextColored(ImVec4(0.98f, 0.60f, 0.20f, 1.0f), "PRACTICE TOOLS SUITE");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        if (ImGui::BeginTabBar("PracticeToolsTabs")) {
+            // =========================================================
+            // TAB 1: ONE-CLICK QUICK RIFF LOOPER
+            // =========================================================
+            if (ImGui::BeginTabItem("Quick Riff Looper")) {
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(0.40f, 0.75f, 1.0f, 1.0f), "60-SECOND STEREO RIFF LOOPER");
+                ImGui::TextDisabled("Smart 1-button looper: Rec -> Play -> Dub -> Play. Jam over your rhythm loops effortlessly.");
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                auto loopState = m_looper.state();
+                const char* stateStr = "EMPTY";
+                ImVec4 stateColor = ImVec4(0.55f, 0.60f, 0.70f, 1.0f);
+                if (loopState == tools::LooperState::Recording) {
+                    stateStr = "RECORDING";
+                    stateColor = ImVec4(1.0f, 0.25f, 0.25f, 1.0f);
+                } else if (loopState == tools::LooperState::Playing) {
+                    stateStr = "PLAYING";
+                    stateColor = ImVec4(0.25f, 0.95f, 0.40f, 1.0f);
+                } else if (loopState == tools::LooperState::Overdubbing) {
+                    stateStr = "OVERDUBBING";
+                    stateColor = ImVec4(1.0f, 0.70f, 0.15f, 1.0f);
+                } else if (loopState == tools::LooperState::Stopped) {
+                    stateStr = "STOPPED";
+                    stateColor = ImVec4(0.70f, 0.75f, 0.85f, 1.0f);
+                }
+
+                ImGui::Text("Looper Status:");
+                ImGui::SameLine();
+                ImGui::TextColored(stateColor, "[ %s ]", stateStr);
+
+                if (m_looper.loopLengthSeconds() > 0.05) {
+                    ImGui::SameLine(0, 16);
+                    ImGui::TextDisabled("Length: %.1f sec", m_looper.loopLengthSeconds());
+                }
+
+                ImGui::Spacing();
+
+                // Progress Bar
+                float progress = m_looper.playheadNormalized();
+                char progressOverlay[64];
+                if (loopState == tools::LooperState::Recording) {
+                    std::snprintf(progressOverlay, sizeof(progressOverlay), "Recording: %.1f s", m_looper.loopLengthSeconds());
+                } else if (m_looper.loopLengthSeconds() > 0.05) {
+                    std::snprintf(progressOverlay, sizeof(progressOverlay), "%.1f / %.1f s", progress * m_looper.loopLengthSeconds(), m_looper.loopLengthSeconds());
+                } else {
+                    std::snprintf(progressOverlay, sizeof(progressOverlay), "Ready");
+                }
+                ImGui::ProgressBar(progress, ImVec2(ImGui::GetContentRegionAvail().x - 10.0f, 22.0f), progressOverlay);
+                ImGui::Spacing();
+
+                // Action Buttons
+                const char* mainBtnLabel = "START RECORD";
+                ImVec4 mainBtnCol = ImVec4(0.75f, 0.20f, 0.20f, 1.0f);
+                if (loopState == tools::LooperState::Recording) {
+                    mainBtnLabel = "FINISH & PLAY";
+                    mainBtnCol = ImVec4(0.18f, 0.65f, 0.30f, 1.0f);
+                } else if (loopState == tools::LooperState::Playing) {
+                    mainBtnLabel = "OVERDUB";
+                    mainBtnCol = ImVec4(0.85f, 0.50f, 0.10f, 1.0f);
+                } else if (loopState == tools::LooperState::Overdubbing) {
+                    mainBtnLabel = "PLAY";
+                    mainBtnCol = ImVec4(0.18f, 0.65f, 0.30f, 1.0f);
+                } else if (loopState == tools::LooperState::Stopped) {
+                    mainBtnLabel = "RESUME PLAY";
+                    mainBtnCol = ImVec4(0.18f, 0.65f, 0.30f, 1.0f);
+                }
+
+                ImGui::PushStyleColor(ImGuiCol_Button, mainBtnCol);
+                if (CenteredButton(mainBtnLabel, ImVec2(150.0f, 36.0f))) {
+                    m_looper.triggerAction();
+                }
+                ImGui::PopStyleColor();
+
+                ImGui::SameLine(0, 12);
+                if (CenteredButton("STOP", ImVec2(90.0f, 36.0f))) {
+                    m_looper.stop();
+                }
+                ImGui::SameLine(0, 12);
+                if (CenteredButton("CLEAR LOOP", ImVec2(110.0f, 36.0f))) {
+                    m_looper.clear();
+                }
+
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                // Volume slider
+                float loopVol = m_looper.volume();
+                ImGui::Text("Looper Output Level:");
+                ImGui::SetNextItemWidth(260.0f);
+                if (ResettableSliderFloat("##LooperVol", &loopVol, 0.0f, 1.5f, 1.0f, "%.2fx")) {
+                    m_looper.setVolume(loopVol);
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Looper playback gain (Double-click to reset 1.0)");
+
+                ImGui::EndTabItem();
+            }
+
+            // =========================================================
+            // TAB 2: WAV BACKING TRACK PLAYER
+            // =========================================================
+            if (ImGui::BeginTabItem("Backing Track Player")) {
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(0.40f, 0.75f, 1.0f, 1.0f), "RIFF & BACKING TRACK WAV PLAYER");
+                ImGui::TextDisabled("Load any WAV file to play backing tracks, drum loops, or songs along with your guitar.");
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                ImGui::Text("Audio File Path:");
+                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 90.0f);
+                ImGui::InputTextWithHint("##WavFilePath", "Path to .wav file...", m_audioFilePathBuffer, sizeof(m_audioFilePathBuffer));
+                ImGui::SameLine(0, 8);
+                if (CenteredButton("Load", ImVec2(75.0f, 26.0f))) {
+                    if (m_audioFilePathBuffer[0] != '\0') {
+                        m_player.loadWavFile(m_audioFilePathBuffer);
+                    }
+                }
+
+                ImGui::Spacing();
+
+                if (m_player.isLoaded()) {
+                    ImGui::TextColored(ImVec4(0.30f, 0.85f, 0.45f, 1.0f), "Loaded: %s", m_player.fileName().c_str());
+                    double dur = m_player.durationSeconds();
+                    double pos = m_player.positionSeconds();
+                    int curMin = static_cast<int>(pos) / 60;
+                    int curSec = static_cast<int>(pos) % 60;
+                    int totMin = static_cast<int>(dur) / 60;
+                    int totSec = static_cast<int>(dur) % 60;
+                    ImGui::TextDisabled("Time: %02d:%02d / %02d:%02d", curMin, curSec, totMin, totSec);
+
+                    // Seek bar
+                    float normPos = m_player.positionNormalized();
+                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 10.0f);
+                    if (ImGui::SliderFloat("##SeekTrack", &normPos, 0.0f, 1.0f, "")) {
+                        m_player.seek(normPos);
+                    }
+
+                    ImGui::Spacing();
+
+                    // Playback Controls
+                    bool isPlaying = m_player.isPlaying();
+                    if (isPlaying) {
+                        ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(185, 45, 45, 255));
+                    } else {
+                        ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(40, 140, 70, 255));
+                    }
+                    if (CenteredButton(isPlaying ? "PAUSE" : "PLAY", ImVec2(90.0f, 32.0f))) {
+                        if (isPlaying) m_player.pause();
+                        else m_player.play();
+                    }
+                    ImGui::PopStyleColor();
+
+                    ImGui::SameLine(0, 8);
+                    if (CenteredButton("STOP", ImVec2(75.0f, 32.0f))) {
+                        m_player.stop();
+                    }
+
+                    ImGui::SameLine(0, 8);
+                    if (CenteredButton("REWIND", ImVec2(85.0f, 32.0f))) {
+                        m_player.seek(0.0f);
+                    }
+
+                    ImGui::SameLine(0, 14);
+                    bool looping = m_player.isLooping();
+                    if (looping) ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(35, 95, 160, 255));
+                    if (CenteredButton(looping ? "LOOP: ON" : "LOOP: OFF", ImVec2(95.0f, 32.0f))) {
+                        m_player.setLooping(!looping);
+                    }
+                    if (looping) ImGui::PopStyleColor();
+
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::Spacing();
+
+                    float playerVol = m_player.volume();
+                    ImGui::Text("Playback Volume:");
+                    ImGui::SetNextItemWidth(260.0f);
+                    if (ResettableSliderFloat("##PlayerVol", &playerVol, 0.0f, 1.5f, 1.0f, "%.2fx")) {
+                        m_player.setVolume(playerVol);
+                    }
+                } else {
+                    ImGui::TextDisabled("(No audio file loaded. Enter path to a WAV file above and click Load)");
+                }
+
+                ImGui::EndTabItem();
+            }
+
+            ImGui::EndTabBar();
+        }
+
+        float bottomY = std::max(ImGui::GetCursorPosY() + 12.0f, 435.0f);
+        ImGui::SetCursorPosY(bottomY);
+        ImGui::Separator();
+        if (CenteredButton("Close", ImVec2(90, 26))) {
+            m_showPracticeToolsModal = false;
             ImGui::CloseCurrentPopup();
         }
 

@@ -11,6 +11,11 @@
 
 #include "../plugins/plugin_scanner.h"
 
+#include "../tools/audio_player.h"
+#include "../tools/quick_looper.h"
+#include <chrono>
+#include <unordered_map>
+
 namespace praccy::ui {
 
 class RackView {
@@ -19,15 +24,26 @@ public:
              audio::AsioManager& asio,
              tools::InstrumentTuner& tuner,
              tools::Metronome& metronome,
+             tools::AudioPlayer& player,
+             tools::QuickLooper& looper,
              midi::MidiManager& midi,
              state::SceneManager& scenes,
              plugins::PluginScanner& scanner);
 
     void render();
+    void setDspStats(std::atomic<float>* load, std::atomic<uint32_t>* dropouts) {
+        m_dspLoadPercent = load;
+        m_dspDropouts = dropouts;
+    }
+    void resetDspDropouts() {
+        if (m_dspDropouts) {
+            m_dspDropouts->store(0, std::memory_order_relaxed);
+        }
+    }
 
 private:
     void renderPraccyLogo();
-    void renderStatusPill(bool isRunning, double sampleRate, int bufferSize, double latencyMs);
+    bool renderStatusPill(bool isRunning, const char* statusText);
     void renderPracticeRibbon();
     void renderSignalRack();
     void renderSignalCable(float width = 36.0f);
@@ -37,6 +53,7 @@ private:
     void renderSceneBar();
     void renderBottomBar();
     void renderSettingsModal();
+    void renderPracticeToolsModal();
     void renderMeter(const char* label, float level, float width, float height);
     void renderPluginBrowserModal();
     void renderDspTweakModal();
@@ -49,9 +66,23 @@ private:
     audio::AsioManager& m_asio;
     tools::InstrumentTuner& m_tuner;
     tools::Metronome& m_metronome;
+    tools::AudioPlayer& m_player;
+    tools::QuickLooper& m_looper;
     midi::MidiManager& m_midi;
     state::SceneManager& m_scenes;
     plugins::PluginScanner& m_scanner;
+
+    std::atomic<float>* m_dspLoadPercent{nullptr};
+    std::atomic<uint32_t>* m_dspDropouts{nullptr};
+
+    std::vector<std::chrono::steady_clock::time_point> m_tapTimes;
+    std::chrono::steady_clock::time_point m_lastTapFlash{};
+    bool m_tempoEditing{false};
+    int m_tempoEditValue{120};
+
+    std::unordered_map<std::string, bool> m_branchMinimized;
+    bool m_showPracticeToolsModal{false};
+    char m_audioFilePathBuffer[260]{0};
 
     std::vector<audio::AsioDriverDesc> m_cachedDrivers;
     int m_selectedDriverIdx{0};
@@ -75,7 +106,7 @@ private:
     int m_insertTargetBranchIndex{-1};
     audio::PluginSlot* m_dspTweakSlot{nullptr};
 
-    int m_expandedSlotIndex{-1};
+    audio::PluginSlot* m_expandedSlot{nullptr};
     float m_expandPulseTimer{0.0f};
 
     bool m_showUpdateModal{false};

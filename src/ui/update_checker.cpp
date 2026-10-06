@@ -119,7 +119,7 @@ void UpdateChecker::checkForUpdates(bool includeBeta) {
 
 void UpdateChecker::runCheck(bool includeBeta) {
     UpdateInfo result;
-    result.currentVersion = "v1.1.1";
+    result.currentVersion = "v1.1.3";
     result.isBeta = includeBeta;
 
     // Helper lambda to parse release asset from a release JSON snippet

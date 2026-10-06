@@ -140,6 +140,15 @@ void ParallelBranch::removeSlot(size_t index) {
     }
 }
 
+std::unique_ptr<PluginSlot> ParallelBranch::takeSlot(size_t index) {
+    if (index < m_slots.size()) {
+        auto ptr = std::move(m_slots[index]);
+        m_slots.erase(m_slots.begin() + index);
+        return ptr;
+    }
+    return nullptr;
+}
+
 PluginSlot* ParallelBranch::getSlot(size_t index) noexcept {
     if (index < m_slots.size()) return m_slots[index].get();
     return nullptr;
@@ -220,15 +229,27 @@ void ParallelSplitMergeBlock::process(AudioProcessContext& ctx) {
         }
     }
 
+    const float blendVal = m_blend.load(std::memory_order_relaxed);
+
     // Process and sum active branches
-    for (auto& branch : m_branches) {
+    for (size_t bIdx = 0; bIdx < m_branches.size(); ++bIdx) {
+        auto& branch = m_branches[bIdx];
         if (branch->isMuted()) continue;
         if (hasSolo && !branch->isSolo()) continue;
 
         branch->process(ctx);
         auto branchOut = branch->buffer().view(numSamples);
 
-        const float gain = DspUtils::dbToGain(branch->gainDb()) * (branch->isPhaseInvert() ? -1.0f : 1.0f);
+        float blendWeight = 1.0f;
+        if (m_branches.size() == 2) {
+            if (bIdx == 0) {
+                blendWeight = (blendVal <= 0.0f) ? 1.0f : (1.0f - blendVal);
+            } else if (bIdx == 1) {
+                blendWeight = (blendVal >= 0.0f) ? 1.0f : (1.0f + blendVal);
+            }
+        }
+
+        const float gain = DspUtils::dbToGain(branch->gainDb()) * blendWeight * (branch->isPhaseInvert() ? -1.0f : 1.0f);
         float panL = 1.0f, panR = 1.0f;
         DspUtils::calculateStereoPan(branch->pan(), panL, panR);
 
@@ -359,6 +380,34 @@ void GraphEngine::splitSerialNodeIntoParallel(size_t index) {
     branchB->setPan(+0.5f);
 
     m_nodes[index] = std::move(parallelBlock);
+}
+
+void GraphEngine::dissolveParallelBlock(size_t blockIndex, int branchToKeep) {
+    std::lock_guard<std::mutex> lock(m_graphMutex);
+    if (blockIndex >= m_nodes.size()) return;
+
+    auto* block = dynamic_cast<ParallelSplitMergeBlock*>(m_nodes[blockIndex].get());
+    if (!block) return;
+
+    // Collect preserved slots from the branch to keep
+    std::vector<std::unique_ptr<PluginSlot>> preservedSlots;
+    if (branchToKeep >= 0 && static_cast<size_t>(branchToKeep) < block->numBranches()) {
+        auto* br = block->getBranch(branchToKeep);
+        if (br) {
+            while (br->numSlots() > 0) {
+                auto slotPtr = br->takeSlot(0);
+                if (slotPtr) preservedSlots.push_back(std::move(slotPtr));
+            }
+        }
+    }
+
+    // Remove the parallel block
+    m_nodes.erase(m_nodes.begin() + blockIndex);
+
+    // Splice preserved slots into the serial chain at blockIndex
+    for (size_t i = 0; i < preservedSlots.size(); ++i) {
+        m_nodes.insert(m_nodes.begin() + blockIndex + i, std::move(preservedSlots[i]));
+    }
 }
 
 void GraphEngine::clearNodes() {

@@ -13,6 +13,8 @@
 #include "tools/tuner.h"
 #include "tools/metronome.h"
 #include "midi/midi_manager.h"
+#include "tools/audio_player.h"
+#include "tools/quick_looper.h"
 #include "state/scene_manager.h"
 #include "plugins/builtin_dsp.h"
 #include "plugins/plugin_scanner.h"
@@ -137,17 +139,70 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         metronome.setBpm(appConfig.metronomeBpm);
     }
 
+    praccy::tools::AudioPlayer player;
+    player.prepare(48000.0);
+
+    praccy::tools::QuickLooper looper;
+    looper.prepare(48000.0);
+
+    std::atomic<float> dspLoadPercent{0.0f};
+    std::atomic<uint32_t> dspDropouts{0};
+
     praccy::midi::MidiManager midi;
     praccy::state::SceneManager scenes;
 
     // Initialize ASIO
     praccy::audio::AsioManager asio;
     asio.setAudioCallback([&](const praccy::audio::AudioBufferView& in, praccy::audio::AudioBufferView& out) {
-        if (in.numChannels() > 0) {
-            tuner.process(in.channel(0), in.numSamples());
+        auto t0 = std::chrono::high_resolution_clock::now();
+
+        // 1. Instrument Tuner - respects active input routing channel
+        const uint32_t inCh = in.numChannels();
+        if (inCh > 0) {
+            auto inCfg = graph.inputRouting();
+            const float* tunerSrc = in.channel(0);
+            if (inCfg.mode == praccy::audio::InputRoutingMode::MonoRight && inCh > 1) {
+                tunerSrc = in.channel(1);
+            } else if (inCfg.mode == praccy::audio::InputRoutingMode::MonoChannel ||
+                       inCfg.mode == praccy::audio::InputRoutingMode::StereoCustom) {
+                uint32_t ch = std::min(static_cast<uint32_t>(inCfg.channelLeft), inCh - 1);
+                tunerSrc = in.channel(ch);
+            } else if (inCfg.mode == praccy::audio::InputRoutingMode::Stereo && inCh > 1) {
+                static thread_local std::vector<float> s_tunerMixBuf;
+                if (s_tunerMixBuf.size() < in.numSamples()) s_tunerMixBuf.resize(in.numSamples());
+                const float* l = in.channel(0);
+                const float* r = in.channel(1);
+                for (uint32_t i = 0; i < in.numSamples(); ++i) {
+                    s_tunerMixBuf[i] = 0.5f * (l[i] + r[i]);
+                }
+                tunerSrc = s_tunerMixBuf.data();
+            }
+            tuner.process(tunerSrc, in.numSamples());
         }
+
+        // 2. Process Audio Graph Engine
         graph.process(in, out);
+
+        // 3. Process Practice Tools (Looper, Backing Track Player, Metronome)
+        looper.process(in, out);
+        player.process(out);
         metronome.process(out);
+
+        // 4. Measure real-time DSP cycle duration vs available buffer time slice
+        auto t1 = std::chrono::high_resolution_clock::now();
+        double elapsedUs = std::chrono::duration<double, std::micro>(t1 - t0).count();
+        double sampleRate = asio.currentSampleRate();
+        if (sampleRate > 0.0) {
+            double budgetUs = (static_cast<double>(in.numSamples()) / sampleRate) * 1e6;
+            if (budgetUs > 0.0) {
+                float curLoad = static_cast<float>((elapsedUs / budgetUs) * 100.0);
+                if (curLoad > 100.0f) {
+                    dspDropouts.fetch_add(1, std::memory_order_relaxed);
+                }
+                float prevLoad = dspLoadPercent.load(std::memory_order_relaxed);
+                dspLoadPercent.store(prevLoad * 0.9f + curLoad * 0.1f, std::memory_order_relaxed);
+            }
+        }
     });
 
     // Auto-select and start ASIO driver (prioritizing last saved driver, then hardware USB)
@@ -215,7 +270,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     // Launch asynchronous non-blocking plugin scanner in the background
     scanner.scanAll();
 
-    praccy::ui::RackView rackView(graph, asio, tuner, metronome, midi, scenes, scanner);
+    praccy::ui::RackView rackView(graph, asio, tuner, metronome, player, looper, midi, scenes, scanner);
+    rackView.setDspStats(&dspLoadPercent, &dspDropouts);
 
     // Pre-render and present the first frame to the swapchain backbuffer
     // BEFORE showing the window. This completely eliminates any white window flash or hang,

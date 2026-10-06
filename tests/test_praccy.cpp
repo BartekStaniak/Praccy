@@ -10,6 +10,8 @@
 #include "plugins/builtin_dsp.h"
 #include "tools/tuner.h"
 #include "tools/metronome.h"
+#include "tools/audio_player.h"
+#include "tools/quick_looper.h"
 #include "state/scene_manager.h"
 
 using namespace praccy;
@@ -292,6 +294,108 @@ void testAppConfigPersistence() {
     std::cout << "PASSED\n";
 }
 
+void testParallelBlockBlendAndDissolve() {
+    std::cout << "[TEST] ParallelBlock Blend & Dissolve... ";
+
+    audio::GraphEngine engine;
+    engine.prepare(48000.0, 128);
+
+    auto splitBlock = std::make_unique<audio::ParallelSplitMergeBlock>("Split A/B");
+    auto* b0 = splitBlock->addBranch("Branch A");
+    auto* b1 = splitBlock->addBranch("Branch B");
+
+    auto amp = std::make_unique<plugins::TubeAmpEffect>();
+    b0->addSlot(std::make_unique<audio::PluginSlot>(std::move(amp)));
+
+    auto delay = std::make_unique<plugins::StereoDelayEffect>();
+    b1->addSlot(std::make_unique<audio::PluginSlot>(std::move(delay)));
+
+    // Test blend
+    splitBlock->setBlend(-0.5f);
+    assert(std::abs(splitBlock->blend() - (-0.5f)) < 1e-5f);
+    splitBlock->setBlend(0.0f);
+    assert(std::abs(splitBlock->blend()) < 1e-5f);
+
+    engine.addSerialNode(std::move(splitBlock));
+    assert(engine.numNodes() == 1);
+
+    // Dissolve keeping Branch B (promotes Delay B to serial chain)
+    engine.dissolveParallelBlock(0, 1);
+    assert(engine.numNodes() == 1);
+    auto* remainingSlot = dynamic_cast<audio::PluginSlot*>(engine.getNode(0));
+    assert(remainingSlot != nullptr);
+    assert(remainingSlot->name() == "Praccy Stereo Delay");
+
+    std::cout << "PASSED\n";
+}
+
+void testQuickLooper() {
+    std::cout << "[TEST] QuickLooper State Transitions... ";
+
+    tools::QuickLooper looper;
+    looper.prepare(48000.0, 5);
+
+    assert(looper.state() == tools::LooperState::Empty);
+
+    // Empty -> Recording
+    looper.triggerAction();
+    assert(looper.state() == tools::LooperState::Recording);
+
+    // Process a dummy buffer while recording
+    audio::OwnedAudioBuffer inBuf(2, 256);
+    audio::OwnedAudioBuffer outBuf(2, 256);
+    auto inView = inBuf.view(256);
+    auto outView = outBuf.view(256);
+    for (uint32_t s = 0; s < 256; ++s) {
+        inView.channel(0)[s] = 0.5f;
+        inView.channel(1)[s] = 0.5f;
+    }
+    for (int b = 0; b < 5; ++b) {
+        looper.process(inView, outView);
+    }
+
+    // Recording -> Playing
+    looper.triggerAction();
+    assert(looper.state() == tools::LooperState::Playing);
+    assert(looper.loopLengthSeconds() > 0.0);
+
+    // Playing -> Overdubbing
+    looper.triggerAction();
+    assert(looper.state() == tools::LooperState::Overdubbing);
+
+    // Overdubbing -> Playing
+    looper.triggerAction();
+    assert(looper.state() == tools::LooperState::Playing);
+
+    // Stop and Clear
+    looper.stop();
+    assert(looper.state() == tools::LooperState::Stopped);
+
+    looper.clear();
+    assert(looper.state() == tools::LooperState::Empty);
+
+    std::cout << "PASSED\n";
+}
+
+void testAudioPlayer() {
+    std::cout << "[TEST] AudioPlayer Initialization & Controls... ";
+
+    tools::AudioPlayer player;
+    player.prepare(48000.0);
+
+    assert(!player.isLoaded());
+    assert(!player.isPlaying());
+    assert(player.isLooping());
+
+    player.setLooping(false);
+    assert(!player.isLooping());
+
+    player.setVolume(1.25f);
+    assert(std::abs(player.volume() - 1.25f) < 1e-4f);
+
+    std::cout << "PASSED\n";
+}
+
 int main() {
     std::cout << "===========================================\n";
     std::cout << "   PRACCY CORE AUDIO ENGINE TEST SUITE   \n";
@@ -305,9 +409,12 @@ int main() {
     testSceneManager();
     testGraphEngineDynamicTopology();
     testAppConfigPersistence();
+    testParallelBlockBlendAndDissolve();
+    testQuickLooper();
+    testAudioPlayer();
 
     std::cout << "===========================================\n";
-    std::cout << "   ALL TESTS PASSED SUCCESSFULLY! (8/8)    \n";
+    std::cout << "   ALL TESTS PASSED SUCCESSFULLY! (11/11)  \n";
     std::cout << "===========================================\n";
     return 0;
 }

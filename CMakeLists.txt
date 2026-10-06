@@ -7,7 +7,7 @@ if(WIN32)
     endif()
 endif()
 
-project(Praccy VERSION 1.1.1 LANGUAGES CXX C RC)
+project(Praccy VERSION 1.1.3 LANGUAGES CXX C RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,6 +26,8 @@ set(PRACCY_SOURCES
     src/midi/midi_manager.cpp
     src/tools/tuner.cpp
     src/tools/metronome.cpp
+    src/tools/audio_player.cpp
+    src/tools/quick_looper.cpp
     src/state/scene_manager.cpp
     src/state/app_config.cpp
     src/ui/rack_view.cpp
@@ -96,6 +98,8 @@ add_executable(test_praccy
     src/plugins/plugin_window.cpp
     src/tools/tuner.cpp
     src/tools/metronome.cpp
+    src/tools/audio_player.cpp
+    src/tools/quick_looper.cpp
     src/state/scene_manager.cpp
     src/state/app_config.cpp
     third_party/vst3_pluginterfaces/base/funknown.cpp

@@ -66,6 +66,7 @@ public:
 
     void addSlot(std::unique_ptr<PluginSlot> slot);
     void removeSlot(size_t index);
+    std::unique_ptr<PluginSlot> takeSlot(size_t index);
     [[nodiscard]] size_t numSlots() const noexcept { return m_slots.size(); }
     [[nodiscard]] PluginSlot* getSlot(size_t index) noexcept;
 
@@ -124,10 +125,14 @@ public:
     [[nodiscard]] size_t numBranches() const noexcept { return m_branches.size(); }
     [[nodiscard]] ParallelBranch* getBranch(size_t index) noexcept;
 
+    void setBlend(float blend) noexcept { m_blend.store(std::clamp(blend, -1.0f, 1.0f), std::memory_order_relaxed); }
+    [[nodiscard]] float blend() const noexcept { return m_blend.load(std::memory_order_relaxed); }
+
 private:
     std::string m_name;
     std::vector<std::unique_ptr<ParallelBranch>> m_branches;
     OwnedAudioBuffer m_mixBuffer;
+    std::atomic<float> m_blend{0.0f};
 };
 
 /**
@@ -170,6 +175,7 @@ public:
     void addSerialNode(std::unique_ptr<AudioNode> node);
     void removeSerialNode(size_t index);
     void splitSerialNodeIntoParallel(size_t index);
+    void dissolveParallelBlock(size_t blockIndex, int branchToKeep);
     void clearNodes();
 
     [[nodiscard]] size_t numNodes() const noexcept;
