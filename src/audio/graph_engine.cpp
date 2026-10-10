@@ -51,8 +51,8 @@ void PluginSlot::process(AudioProcessContext& ctx) {
     const bool currentlyBypassed = isBypassed();
     const bool transitioning = m_bypassRamp.isTransitioning();
 
-    // If fully bypassed and not transitioning, pure pass-through
-    if (currentlyBypassed && !transitioning) {
+    // If fully bypassed, faulted, or not transitioning, pure pass-through
+    if ((currentlyBypassed && !transitioning) || m_innerNode->isFaulted()) {
         ctx.output.copyFrom(ctx.input);
         m_meter.process(ctx.output.channel(0), ctx.output.numChannels() > 1 ? ctx.output.channel(1) : nullptr, numSamples);
         return;
@@ -76,6 +76,13 @@ void PluginSlot::process(AudioProcessContext& ctx) {
         .numSamples = numSamples
     };
     m_innerNode->process(innerCtx);
+
+    // If plugin faulted during execution, safely bypass with dry signal
+    if (m_innerNode->isFaulted()) {
+        ctx.output.copyFrom(dryView);
+        m_meter.process(ctx.output.channel(0), ctx.output.numChannels() > 1 ? ctx.output.channel(1) : nullptr, numSamples);
+        return;
+    }
 
     // Apply output trim
     const float outGain = DspUtils::dbToGain(m_outputGainDb.load(std::memory_order_relaxed));
@@ -114,52 +121,224 @@ void PluginSlot::process(AudioProcessContext& ctx) {
 // ==========================================
 
 ParallelBranch::ParallelBranch(std::string name)
-    : m_name(std::move(name)) {}
+    : m_name(std::move(name)) {
+    m_uiSlots.reserve(MAX_BRANCH_SLOTS);
+    m_activeSlots.reserve(MAX_BRANCH_SLOTS);
+}
+
+ParallelBranch::~ParallelBranch() {
+    // 1. Drain any remaining items from command queue
+    SlotCommand cmd;
+    while (m_commandQueue.try_dequeue(cmd)) {
+        cmd.slot.reset();
+    }
+
+    // 2. Drain any stashed reclamations
+    for (size_t i = 0; i < m_stashedCount; ++i) {
+        m_stashedReclamations[i].reset();
+    }
+    m_stashedCount = 0;
+
+    // 3. Drain reclamation queue
+    collectReclaimedSlots();
+
+    // 4. Clear active slots
+    m_activeSlots.clear();
+    m_uiSlots.clear();
+}
 
 void ParallelBranch::prepare(double sampleRate, uint32_t maxBlockSize) {
+    m_sampleRate = sampleRate;
+    m_maxBlockSize = maxBlockSize;
     m_branchBuffer.resize(2, maxBlockSize);
     m_slotTemp.resize(2, maxBlockSize);
-    for (auto& slot : m_slots) {
-        slot->prepare(sampleRate, maxBlockSize);
+    m_activeSlots.reserve(MAX_BRANCH_SLOTS);
+
+    // Drain any pending commands before preparing
+    SlotCommand cmd;
+    while (m_commandQueue.try_dequeue(cmd)) {
+        if (cmd.type == SlotCommandType::Add && cmd.slot) {
+            m_activeSlots.push_back(std::move(cmd.slot));
+        }
+    }
+
+    for (auto& slot : m_activeSlots) {
+        if (slot) slot->prepare(sampleRate, maxBlockSize);
     }
 }
 
 void ParallelBranch::reset() {
-    for (auto& slot : m_slots) {
-        slot->reset();
+    for (auto& slot : m_activeSlots) {
+        if (slot) slot->reset();
     }
 }
 
 void ParallelBranch::addSlot(std::unique_ptr<PluginSlot> slot) {
-    m_slots.push_back(std::move(slot));
+    if (!slot) return;
+    collectReclaimedSlots();
+
+    // Guarantee that slot scratch buffers are allocated on UI thread before entering realtime queue
+    slot->prepare(m_sampleRate, m_maxBlockSize);
+
+    PluginSlot* rawPtr = slot.get();
+    m_uiSlots.push_back(rawPtr);
+
+    SlotCommand cmd = SlotCommand::makeAdd(std::move(slot));
+    if (!m_commandQueue.try_enqueue(std::move(cmd))) {
+        // Queue full fallback: roll back shadow registry to prevent dangling pointers
+        m_uiSlots.pop_back();
+    }
 }
 
 void ParallelBranch::removeSlot(size_t index) {
-    if (index < m_slots.size()) {
-        m_slots.erase(m_slots.begin() + index);
-    }
+    collectReclaimedSlots();
+    if (index >= m_uiSlots.size()) return;
+
+    PluginSlot* targetPtr = m_uiSlots[index];
+    m_uiSlots.erase(m_uiSlots.begin() + index);
+
+    SlotCommand cmd = SlotCommand::makeRemove(index, targetPtr);
+    m_commandQueue.try_enqueue(std::move(cmd));
 }
 
 std::unique_ptr<PluginSlot> ParallelBranch::takeSlot(size_t index) {
-    if (index < m_slots.size()) {
-        auto ptr = std::move(m_slots[index]);
-        m_slots.erase(m_slots.begin() + index);
+    collectReclaimedSlots();
+
+    // 1. If command queue has unconsumed commands, drain them into active slots
+    SlotCommand cmd;
+    while (m_commandQueue.try_dequeue(cmd)) {
+        if (cmd.type == SlotCommandType::Add && cmd.slot) {
+            m_activeSlots.push_back(std::move(cmd.slot));
+        } else if (cmd.type == SlotCommandType::Remove) {
+            auto it = m_activeSlots.end();
+            if (cmd.targetSlot != nullptr) {
+                it = std::find_if(m_activeSlots.begin(), m_activeSlots.end(),
+                    [&](const auto& s) { return s.get() == cmd.targetSlot; });
+            } else if (cmd.index < m_activeSlots.size()) {
+                it = m_activeSlots.begin() + cmd.index;
+            }
+            if (it != m_activeSlots.end()) {
+                m_activeSlots.erase(it);
+            }
+        }
+    }
+
+    // 2. Identify target slot from UI shadow
+    PluginSlot* targetPtr = nullptr;
+    if (index < m_uiSlots.size()) {
+        targetPtr = m_uiSlots[index];
+        m_uiSlots.erase(m_uiSlots.begin() + index);
+    }
+
+    // 3. Extract and return from active slots
+    if (targetPtr) {
+        auto it = std::find_if(m_activeSlots.begin(), m_activeSlots.end(),
+            [&](const auto& s) { return s.get() == targetPtr; });
+        if (it != m_activeSlots.end()) {
+            auto ptr = std::move(*it);
+            m_activeSlots.erase(it);
+            return ptr;
+        }
+    }
+
+    if (index < m_activeSlots.size()) {
+        auto ptr = std::move(m_activeSlots[index]);
+        m_activeSlots.erase(m_activeSlots.begin() + index);
         return ptr;
     }
+
     return nullptr;
 }
 
-PluginSlot* ParallelBranch::getSlot(size_t index) noexcept {
-    if (index < m_slots.size()) return m_slots[index].get();
-    return nullptr;
+void ParallelBranch::collectReclaimedSlots() noexcept {
+    std::unique_ptr<PluginSlot> reclaimed;
+    while (m_reclaimQueue.try_dequeue(reclaimed)) {
+        reclaimed.reset();
+    }
+}
+
+void ParallelBranch::stashForReclamation(std::unique_ptr<PluginSlot> slot) noexcept {
+    if (m_stashedCount < m_stashedReclamations.size()) {
+        m_stashedReclamations[m_stashedCount++] = std::move(slot);
+    } else {
+        // Emergency overflow: retain in active slots in bypassed state to avoid audio-thread destruction
+        slot->setBypassed(true);
+        m_activeSlots.push_back(std::move(slot));
+    }
+}
+
+void ParallelBranch::flushStashedReclamations() noexcept {
+    while (m_stashedCount > 0) {
+        if (m_reclaimQueue.try_enqueue(std::move(m_stashedReclamations[m_stashedCount - 1]))) {
+            --m_stashedCount;
+        } else {
+            break;
+        }
+    }
 }
 
 void ParallelBranch::process(AudioProcessContext& ctx) {
     const uint32_t numSamples = ctx.numSamples;
+    if (numSamples == 0) return;
+
+    // 1. Drain pending commands from UI thread (Wait-Free)
+    SlotCommand cmd;
+    while (m_commandQueue.try_dequeue(cmd)) {
+        switch (cmd.type) {
+            case SlotCommandType::Add: {
+                if (cmd.slot) {
+                    if (m_activeSlots.size() < MAX_BRANCH_SLOTS) {
+                        m_activeSlots.push_back(std::move(cmd.slot));
+                    } else {
+                        // Max capacity reached: reject to reclaim queue without destructing here
+                        if (!m_reclaimQueue.try_enqueue(std::move(cmd.slot))) {
+                            stashForReclamation(std::move(cmd.slot));
+                        }
+                    }
+                }
+                break;
+            }
+            case SlotCommandType::Remove: {
+                auto it = m_activeSlots.end();
+                if (cmd.targetSlot != nullptr) {
+                    it = std::find_if(m_activeSlots.begin(), m_activeSlots.end(),
+                        [&](const auto& s) { return s.get() == cmd.targetSlot; });
+                } else if (cmd.index < m_activeSlots.size()) {
+                    it = m_activeSlots.begin() + cmd.index;
+                }
+
+                if (it != m_activeSlots.end()) {
+                    auto removed = std::move(*it);
+                    m_activeSlots.erase(it);
+                    if (!m_reclaimQueue.try_enqueue(std::move(removed))) {
+                        stashForReclamation(std::move(removed));
+                    }
+                }
+                break;
+            }
+            case SlotCommandType::Clear: {
+                for (auto& s : m_activeSlots) {
+                    if (s) {
+                        if (!m_reclaimQueue.try_enqueue(std::move(s))) {
+                            stashForReclamation(std::move(s));
+                        }
+                    }
+                }
+                m_activeSlots.clear();
+                break;
+            }
+        }
+    }
+
+    // 2. Attempt to flush any previously stashed items
+    flushStashedReclamations();
+
+    // 3. Audio Processing through active slots
     auto branchView = m_branchBuffer.view(numSamples);
     branchView.copyFrom(ctx.input);
 
-    for (auto& slot : m_slots) {
+    for (auto& slot : m_activeSlots) {
+        if (!slot) continue;
         auto tempView = m_slotTemp.view(numSamples);
         AudioProcessContext slotCtx{
             .input = branchView,
@@ -208,6 +387,12 @@ void ParallelSplitMergeBlock::removeBranch(size_t index) {
 ParallelBranch* ParallelSplitMergeBlock::getBranch(size_t index) noexcept {
     if (index < m_branches.size()) return m_branches[index].get();
     return nullptr;
+}
+
+void ParallelSplitMergeBlock::collectReclaimedSlots() noexcept {
+    for (auto& branch : m_branches) {
+        if (branch) branch->collectReclaimedSlots();
+    }
 }
 
 void ParallelSplitMergeBlock::process(AudioProcessContext& ctx) {
@@ -327,6 +512,10 @@ void GraphEngine::prepare(double sampleRate, uint32_t maxBlockSize) {
     m_noiseGate.prepare(sampleRate);
     m_mainProcessingBuffer.resize(2, maxBlockSize);
     m_scratchBuffer.resize(2, maxBlockSize);
+    m_retiringBuffer.resize(2, maxBlockSize);
+    m_activeBuffer.resize(2, maxBlockSize);
+    const uint32_t rampSamples = static_cast<uint32_t>(sampleRate * 0.010);
+    m_sceneCrossfadeRamp.reset(std::max(1u, rampSamples));
 
     std::lock_guard<std::mutex> lock(m_graphMutex);
     for (auto& node : m_nodes) {
@@ -413,6 +602,35 @@ void GraphEngine::dissolveParallelBlock(size_t blockIndex, int branchToKeep) {
 void GraphEngine::clearNodes() {
     std::lock_guard<std::mutex> lock(m_graphMutex);
     m_nodes.clear();
+    m_retiringNodes.clear();
+    m_sceneCrossfadeRamp.reset(1);
+}
+
+void GraphEngine::crossfadeToNodes(std::vector<std::unique_ptr<AudioNode>> newNodes) {
+    std::lock_guard<std::mutex> lock(m_graphMutex);
+    for (auto& node : newNodes) {
+        if (node) {
+            node->prepare(m_sampleRate, m_maxBlockSize);
+        }
+    }
+    m_retiringNodes = std::move(m_nodes);
+    m_nodes = std::move(newNodes);
+    const uint32_t rampSamples = static_cast<uint32_t>(m_sampleRate * 0.010);
+    m_sceneCrossfadeRamp.reset(std::max(1u, rampSamples));
+    m_sceneCrossfadeRamp.startTransition(true);
+}
+
+void GraphEngine::processReclamation() noexcept {
+    std::unique_lock<std::mutex> lock(m_graphMutex, std::try_to_lock);
+    if (!lock.owns_lock()) return;
+    if (!m_sceneCrossfadeRamp.isTransitioning() && !m_retiringNodes.empty()) {
+        m_retiringNodes.clear();
+    }
+    for (auto& node : m_nodes) {
+        if (auto* splitBlock = dynamic_cast<ParallelSplitMergeBlock*>(node.get())) {
+            splitBlock->collectReclaimedSlots();
+        }
+    }
 }
 
 size_t GraphEngine::numNodes() const noexcept {
@@ -476,16 +694,61 @@ void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& ha
     {
         std::unique_lock<std::mutex> lock(m_graphMutex, std::try_to_lock);
         if (lock.owns_lock()) {
-            for (auto& node : m_nodes) {
-                auto scratchView = m_scratchBuffer.view(numSamples);
-                AudioProcessContext ctx{
-                    .input = mainView,
-                    .output = scratchView,
-                    .sampleRate = m_sampleRate,
-                    .numSamples = numSamples
-                };
-                node->process(ctx);
-                mainView.copyFrom(scratchView);
+            if (m_sceneCrossfadeRamp.isTransitioning()) {
+                // 1. Process Retiring (Outgoing) Chain
+                auto retView = m_retiringBuffer.view(numSamples);
+                retView.copyFrom(mainView);
+                for (auto& node : m_retiringNodes) {
+                    auto stepScratch = m_scratchBuffer.view(numSamples);
+                    AudioProcessContext ctx{
+                        .input = retView,
+                        .output = stepScratch,
+                        .sampleRate = m_sampleRate,
+                        .numSamples = numSamples
+                    };
+                    node->process(ctx);
+                    retView.copyFrom(stepScratch);
+                }
+
+                // 2. Process Active (Incoming) Chain
+                auto actView = m_activeBuffer.view(numSamples);
+                actView.copyFrom(mainView);
+                for (auto& node : m_nodes) {
+                    auto stepScratch = m_scratchBuffer.view(numSamples);
+                    AudioProcessContext ctx{
+                        .input = actView,
+                        .output = stepScratch,
+                        .sampleRate = m_sampleRate,
+                        .numSamples = numSamples
+                    };
+                    node->process(ctx);
+                    actView.copyFrom(stepScratch);
+                }
+
+                // 3. Sample-by-Sample EqualPower Crossfade
+                const uint32_t numCh = mainView.numChannels();
+                for (uint32_t s = 0; s < numSamples; ++s) {
+                    float gainOut = 0.0f, gainIn = 0.0f;
+                    m_sceneCrossfadeRamp.getNextGains(gainOut, gainIn);
+                    for (uint32_t ch = 0; ch < numCh; ++ch) {
+                        float* out = mainView.channel(ch);
+                        const float* oldS = retView.channel(ch);
+                        const float* newS = actView.channel(ch);
+                        out[s] = (oldS[s] * gainOut) + (newS[s] * gainIn);
+                    }
+                }
+            } else {
+                for (auto& node : m_nodes) {
+                    auto scratchView = m_scratchBuffer.view(numSamples);
+                    AudioProcessContext ctx{
+                        .input = mainView,
+                        .output = scratchView,
+                        .sampleRate = m_sampleRate,
+                        .numSamples = numSamples
+                    };
+                    node->process(ctx);
+                    mainView.copyFrom(scratchView);
+                }
             }
         }
     }

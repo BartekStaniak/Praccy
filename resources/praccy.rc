@@ -1,5 +1,10 @@
 // Praccy Windows Resource Script
-#define IDI_APP_ICON 101
+#include "resource.h"
 
-IDI_APP_ICON ICON "icon.ico"
-1            ICON "icon.ico"
+// Application Icons
+IDI_APP_ICON            ICON    "icon.ico"
+1                       ICON    "icon.ico"
+
+// Embedded TrueType Fonts (RT_RCDATA / type 10)
+IDR_FONT_INTER          RCDATA  "fonts/Inter-Regular.ttf"
+IDR_FONT_JETBRAINS_MONO RCDATA  "fonts/JetBrainsMono-Regular.ttf"

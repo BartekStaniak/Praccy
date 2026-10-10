@@ -13,7 +13,231 @@
 #include <sstream>
 #include <algorithm>
 
+#include "miniz.h"
+
 namespace praccy::ui {
+
+bool sanitizeZipEntryPath(const std::string& entryName, std::filesystem::path& outSafeRelativePath) {
+    if (entryName.empty()) {
+        return false;
+    }
+
+    // 1. Reject paths starting with / or \ (absolute paths)
+    if (entryName.front() == '/' || entryName.front() == '\\') {
+        return false;
+    }
+
+    // 2. Reject drive-qualified paths (e.g. "C:foo", "D:/bar")
+    if (entryName.size() >= 2 && entryName[1] == ':') {
+        return false;
+    }
+
+    // 3. Reject UNC network paths (e.g. "\\server\share" or "//server/share")
+    if (entryName.rfind("\\\\", 0) == 0 || entryName.rfind("//", 0) == 0) {
+        return false;
+    }
+
+    // 4. Normalize backslashes to forward slashes
+    std::string normalized = entryName;
+    std::replace(normalized.begin(), normalized.end(), '\\', '/');
+
+    // 5. Tokenize path components by '/'
+    std::vector<std::string> segments;
+    std::string segment;
+    std::stringstream ss(normalized);
+
+    // List of reserved MS-DOS / Windows device names
+    static const std::vector<std::string> reservedNames = {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+    };
+
+    while (std::getline(ss, segment, '/')) {
+        if (segment.empty()) {
+            continue; // Ignore redundant slashes like "a//b"
+        }
+
+        // Strict Zip Slip defense: disallow "." and ".." components
+        if (segment == "." || segment == "..") {
+            return false;
+        }
+
+        // Reject invalid Windows filename characters: < > : " | ? * or control characters
+        for (char c : segment) {
+            if (static_cast<unsigned char>(c) < 32 || c == '<' || c == '>' || c == ':' ||
+                c == '"' || c == '|' || c == '?' || c == '*') {
+                return false;
+            }
+        }
+
+        // Reject trailing dots or spaces which Windows silently truncates
+        if (segment.back() == '.' || segment.back() == ' ') {
+            return false;
+        }
+
+        // Check against reserved Windows device names
+        std::string upper = segment;
+        auto dotPos = upper.find('.');
+        if (dotPos != std::string::npos) {
+            upper = upper.substr(0, dotPos);
+        }
+        std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+        for (const auto& res : reservedNames) {
+            if (upper == res) {
+                return false;
+            }
+        }
+
+        segments.push_back(segment);
+    }
+
+    if (segments.empty()) {
+        return false;
+    }
+
+    // 6. Reconstruct sanitized relative path
+    std::filesystem::path rel;
+    for (const auto& seg : segments) {
+        rel /= seg;
+    }
+
+    outSafeRelativePath = rel;
+    return true;
+}
+
+bool extractZipArchive(const std::filesystem::path& zipPath,
+                       const std::filesystem::path& destDir,
+                       std::string& outError)
+{
+    std::error_code ec;
+    if (!std::filesystem::exists(zipPath, ec) || !std::filesystem::is_regular_file(zipPath, ec)) {
+        outError = "Archive file not found: " + zipPath.string();
+        return false;
+    }
+
+    std::filesystem::create_directories(destDir, ec);
+    auto canonicalDest = std::filesystem::weakly_canonical(destDir, ec);
+    if (ec) {
+        outError = "Failed to canonicalize destination directory: " + ec.message();
+        return false;
+    }
+
+    // Open ZIP file with wide-character support on Windows
+    FILE* fp = _wfopen(zipPath.wstring().c_str(), L"rb");
+    if (!fp) {
+        outError = "Failed to open zip archive: " + zipPath.string();
+        return false;
+    }
+
+    mz_zip_archive zip;
+    memset(&zip, 0, sizeof(zip));
+    if (!mz_zip_reader_init_cfile(&zip, fp, 0, 0)) {
+        fclose(fp);
+        outError = "Corrupted or invalid ZIP archive.";
+        return false;
+    }
+
+    mz_uint numFiles = mz_zip_reader_get_num_files(&zip);
+    constexpr uint64_t MAX_SINGLE_FILE = 250ULL * 1024 * 1024;        // 250 MB
+    constexpr uint64_t MAX_TOTAL_UNCOMPRESSED = 500ULL * 1024 * 1024; // 500 MB
+    constexpr mz_uint MAX_FILE_COUNT = 10000;
+    uint64_t totalUncompressed = 0;
+
+    if (numFiles > MAX_FILE_COUNT) {
+        mz_zip_reader_end(&zip);
+        fclose(fp);
+        outError = "ZIP archive contains too many entries (exceeds safe threshold).";
+        return false;
+    }
+
+    for (mz_uint i = 0; i < numFiles; ++i) {
+        mz_zip_archive_file_stat stat;
+        if (!mz_zip_reader_file_stat(&zip, i, &stat)) {
+            mz_zip_reader_end(&zip);
+            fclose(fp);
+            outError = "Failed to read ZIP entry header at index " + std::to_string(i);
+            return false;
+        }
+
+        std::string rawName = stat.m_filename;
+
+        // Zip Bomb checks
+        totalUncompressed += stat.m_uncomp_size;
+        if (stat.m_uncomp_size > MAX_SINGLE_FILE || totalUncompressed > MAX_TOTAL_UNCOMPRESSED) {
+            mz_zip_reader_end(&zip);
+            fclose(fp);
+            outError = "ZIP entry exceeds safe uncompressed size limits (potential decompression bomb).";
+            return false;
+        }
+
+        // Strict Zip Slip Sanitization
+        std::filesystem::path safeRel;
+        if (!sanitizeZipEntryPath(rawName, safeRel)) {
+            mz_zip_reader_end(&zip);
+            fclose(fp);
+            outError = "Security violation: detected Zip Slip path traversal in entry: " + rawName;
+            return false;
+        }
+
+        std::filesystem::path targetPath = canonicalDest / safeRel;
+        auto canonicalTarget = std::filesystem::weakly_canonical(targetPath, ec);
+        if (ec) {
+            mz_zip_reader_end(&zip);
+            fclose(fp);
+            outError = "Failed to resolve destination path: " + targetPath.string();
+            return false;
+        }
+
+        // Verify destination prefix containment
+        auto destW = canonicalDest.wstring();
+        auto targetW = canonicalTarget.wstring();
+        if (targetW.compare(0, destW.size(), destW) != 0 ||
+            (targetW.size() > destW.size() && targetW[destW.size()] != L'\\' && targetW[destW.size()] != L'/')) {
+            mz_zip_reader_end(&zip);
+            fclose(fp);
+            outError = "Security violation: extracted entry escapes target directory: " + rawName;
+            return false;
+        }
+
+        // Directory entry handling
+        if (stat.m_is_directory || (!rawName.empty() && (rawName.back() == '/' || rawName.back() == '\\'))) {
+            std::filesystem::create_directories(canonicalTarget, ec);
+            continue;
+        }
+
+        // Regular file extraction
+        std::filesystem::create_directories(canonicalTarget.parent_path(), ec);
+
+        size_t uncompSize = 0;
+        void* pData = mz_zip_reader_extract_to_heap(&zip, i, &uncompSize, 0);
+        if (!pData) {
+            mz_zip_reader_end(&zip);
+            fclose(fp);
+            outError = "Failed to decompress file: " + rawName;
+            return false;
+        }
+
+        std::ofstream outFile(canonicalTarget, std::ios::binary | std::ios::trunc);
+        if (!outFile.is_open()) {
+            mz_free(pData);
+            mz_zip_reader_end(&zip);
+            fclose(fp);
+            outError = "Failed to write target file: " + canonicalTarget.string();
+            return false;
+        }
+
+        if (uncompSize > 0) {
+            outFile.write(reinterpret_cast<const char*>(pData), uncompSize);
+        }
+        outFile.close();
+        mz_free(pData);
+    }
+
+    mz_zip_reader_end(&zip);
+    fclose(fp);
+    return true;
+}
 
 UpdateChecker& UpdateChecker::instance() {
     static UpdateChecker s_instance;
@@ -326,15 +550,13 @@ void UpdateChecker::runDownload() {
     std::filesystem::remove_all(extractDir, ec);
     std::filesystem::create_directories(extractDir, ec);
 
-    // 1. Try Windows built-in tar
-    std::string tarCmd = "tar -xf \"" + zipPath.string() + "\" -C \"" + extractDir.string() + "\"";
-    int tarRet = std::system(tarCmd.c_str());
-
-    // 2. If tar failed, fall back to PowerShell Expand-Archive
-    if (tarRet != 0) {
-        std::string psCmd = "powershell -NoProfile -NonInteractive -Command \"Expand-Archive -Path '" +
-            zipPath.string() + "' -DestinationPath '" + extractDir.string() + "' -Force\"";
-        std::system(psCmd.c_str());
+    // In-process archive extraction replacing external shells
+    std::string extractError;
+    if (!extractZipArchive(zipPath, extractDir, extractError)) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_info.status = UpdateStatus::Error;
+        m_info.errorMessage = "Failed to extract update package: " + extractError;
+        return;
     }
 
     // Locate the extracted Praccy.exe
@@ -377,59 +599,35 @@ bool UpdateChecker::applyUpdateAndRestart() {
         return false;
     }
 
+    std::error_code ec;
+    if (std::filesystem::equivalent(newExePath, currentExe, ec)) {
+        return false; // Prevent overwriting self if paths are identical
+    }
+
     DWORD currentPid = GetCurrentProcessId();
-    auto updateDir = std::filesystem::path(state::AppConfig::getConfigDir()) / "updates";
-    auto batPath = updateDir / "apply_update.bat";
-
-    // Write updater batch script
-    std::ofstream bat(batPath);
-    if (!bat.is_open()) return false;
-
-    bat << "@echo off\n";
-    bat << "setlocal\n";
-    bat << "set \"PID=%~1\"\n";
-    bat << "set \"SRC=%~2\"\n";
-    bat << "set \"DST=%~3\"\n";
-    bat << "set \"SRCDIR=%~dp2\"\n";
-    bat << "set \"DSTDIR=%~dp3\"\n";
-    bat << "\n";
-    bat << "timeout /t 1 /nobreak >nul\n";
-    bat << "\n";
-    bat << ":wait_loop\n";
-    bat << "tasklist /fi \"PID eq %PID%\" 2>nul | find \"%PID%\" >nul\n";
-    bat << "if %errorlevel% equ 0 (\n";
-    bat << "    timeout /t 1 /nobreak >nul\n";
-    bat << "    goto wait_loop\n";
-    bat << ")\n";
-    bat << "\n";
-    bat << "copy /y \"%SRC%\" \"%DST%\" >nul\n";
-    bat << "if exist \"%SRCDIR%resources\" (\n";
-    bat << "    xcopy /e /i /y \"%SRCDIR%resources\" \"%DSTDIR%resources\" >nul\n";
-    bat << ")\n";
-    bat << "\n";
-    bat << "start \"\" \"%DST%\"\n";
-    bat << "exit\n";
-    bat.close();
-
-    // Prepare CreateProcess command
-    std::wstring wBat = batPath.wstring();
     std::wstring wNew = std::filesystem::path(newExePath).wstring();
     std::wstring wCur = currentExe;
 
-    std::wstring cmdLine = L"cmd.exe /c \"" + wBat + L"\" " + std::to_wstring(currentPid) + L" \"" + wNew + L"\" \"" + wCur + L"\"";
+    // Launch extracted Praccy.exe in --apply-update mode
+    // Command line format: "<newExe>" --apply-update <pid> "<destExe>"
+    std::wstring cmdLine = L"\"" + wNew + L"\" --apply-update " + std::to_wstring(currentPid) + L" \"" + wCur + L"\"";
 
     STARTUPINFOW si{};
     si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-
     PROCESS_INFORMATION pi{};
-    BOOL ok = CreateProcessW(nullptr, cmdLine.data(), nullptr, nullptr, FALSE,
-                             CREATE_NO_WINDOW | DETACHED_PROCESS, nullptr, nullptr, &si, &pi);
+
+    BOOL ok = CreateProcessW(
+        wNew.c_str(),
+        cmdLine.data(),
+        nullptr, nullptr, FALSE,
+        CREATE_NEW_PROCESS_GROUP,
+        nullptr, nullptr, &si, &pi
+    );
 
     if (ok) {
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
+        // Cleanly exit current application process
         ExitProcess(0);
     }
 

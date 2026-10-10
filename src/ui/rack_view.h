@@ -6,14 +6,16 @@
 #include "../tools/metronome.h"
 #include "../midi/midi_manager.h"
 #include "../state/scene_manager.h"
-#include <vector>
-#include <string>
-
 #include "../plugins/plugin_scanner.h"
-
 #include "../tools/audio_player.h"
 #include "../tools/quick_looper.h"
+#include "modals/plugin_browser_modal.h"
+#include "modals/settings_modal.h"
+#include "modals/practice_tools_modal.h"
+#include <vector>
+#include <string>
 #include <chrono>
+#include <memory>
 #include <unordered_map>
 
 namespace praccy::ui {
@@ -41,6 +43,8 @@ public:
         }
     }
 
+    void triggerHudToast(std::string message);
+
 private:
     void renderPraccyLogo();
     bool renderStatusPill(bool isRunning, const char* statusText);
@@ -52,15 +56,11 @@ private:
     void renderParallelBlock(audio::ParallelSplitMergeBlock* block, int blockIndex, float centerY);
     void renderSceneBar();
     void renderBottomBar();
-    void renderSettingsModal();
-    void renderPracticeToolsModal();
     void renderMeter(const char* label, float level, float width, float height);
-    void renderPluginBrowserModal();
     void renderDspTweakModal();
     bool renderRotaryKnob(const char* label, float* value, float minVal, float maxVal, float radius, const char* format = "%.1f", float defaultVal = 0.0f);
     void renderUpdateModal();
-
-    bool m_showSettingsModal{false};
+    void renderFloatingHudToast();
 
     audio::GraphEngine& m_graph;
     audio::AsioManager& m_asio;
@@ -72,6 +72,10 @@ private:
     state::SceneManager& m_scenes;
     plugins::PluginScanner& m_scanner;
 
+    std::unique_ptr<PluginBrowserModal> m_pluginBrowserModal;
+    std::unique_ptr<SettingsModal> m_settingsModal;
+    std::unique_ptr<PracticeToolsModal> m_practiceToolsModal;
+
     std::atomic<float>* m_dspLoadPercent{nullptr};
     std::atomic<uint32_t>* m_dspDropouts{nullptr};
 
@@ -81,31 +85,15 @@ private:
     int m_tempoEditValue{120};
 
     std::unordered_map<std::string, bool> m_branchMinimized;
-    bool m_showPracticeToolsModal{false};
-    char m_audioFilePathBuffer[260]{0};
-
-    std::vector<audio::AsioDriverDesc> m_cachedDrivers;
-    int m_selectedDriverIdx{0};
-
-    bool m_showPluginBrowser{false};
-    bool m_focusPluginBrowser{false};
-    char m_newPathBuffer[260]{0};
-
-    char m_pluginSearchQuery[128]{0};
-    std::string m_selectedDeveloperFilter{"All"};
-    std::string m_selectedFormatFilter{"All"};
-    bool m_showFavoritesFilter{false};
-    int m_pluginSortMode{0}; // 0: Name A-Z, 1: Name Z-A, 2: Dev A-Z, 3: Format A-Z
 
     bool m_showSavePresetModal{false};
     char m_presetNameBuffer[64]{0};
-    std::string m_sceneFeedbackMsg;
-    float m_sceneFeedbackTimer{0.0f};
 
-    int m_insertTargetBlockIndex{-1};
-    int m_insertTargetBranchIndex{-1};
+    std::string m_hudToastText;
+    float m_hudToastTimer{0.0f};
+    static constexpr float kHudToastDuration = 1.8f;
+
     audio::PluginSlot* m_dspTweakSlot{nullptr};
-
     audio::PluginSlot* m_expandedSlot{nullptr};
     float m_expandPulseTimer{0.0f};
 

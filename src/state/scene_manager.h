@@ -60,6 +60,7 @@ public:
     [[nodiscard]] int activeSceneIndex() const noexcept { return m_activeSceneIndex; }
     void setActiveSceneIndex(int idx) noexcept { m_activeSceneIndex = idx; }
     [[nodiscard]] size_t numScenes() const noexcept { return m_scenes.size(); }
+    [[nodiscard]] const std::vector<ScenePreset>& scenes() const noexcept { return m_scenes; }
     [[nodiscard]] const ScenePreset* getScene(size_t index) const noexcept;
     void setSceneName(size_t index, const std::string& name);
 

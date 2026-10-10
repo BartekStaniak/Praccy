@@ -10,6 +10,8 @@
 #include <iostream>
 #include <iomanip>
 
+#include "../utils/parse_utils.h"
+
 namespace praccy::state {
 
 static std::string bytesToHex(const std::vector<uint8_t>& data) {
@@ -21,14 +23,7 @@ static std::string bytesToHex(const std::vector<uint8_t>& data) {
 }
 
 static std::vector<uint8_t> hexToBytes(const std::string& hex) {
-    std::vector<uint8_t> bytes;
-    if (hex.length() % 2 != 0) return bytes;
-    bytes.reserve(hex.length() / 2);
-    for (size_t i = 0; i < hex.length(); i += 2) {
-        uint8_t b = static_cast<uint8_t>(std::stoul(hex.substr(i, 2), nullptr, 16));
-        bytes.push_back(b);
-    }
-    return bytes;
+    return praccy::utils::hexToBytes(hex);
 }
 
 SceneManager::SceneManager() {
@@ -258,18 +253,21 @@ bool SceneManager::applyScene(int sceneIndex, audio::GraphEngine& graph) {
     const auto& scene = m_scenes[sceneIndex];
     m_activeSceneIndex = sceneIndex;
 
-    graph.clearNodes();
+    std::vector<std::unique_ptr<audio::AudioNode>> newNodes;
 
     for (const auto& np : scene.nodes) {
         if (np.kind == NodePreset::Kind::Plugin) {
             auto slot = createSlotFromPreset(np.slot);
             if (slot) {
-                graph.addSerialNode(std::move(slot));
+                slot->prepare(graph.sampleRate(), graph.maxBlockSize());
+                newNodes.push_back(std::move(slot));
             }
         } else if (np.kind == NodePreset::Kind::ParallelBlock) {
             auto block = std::make_unique<audio::ParallelSplitMergeBlock>();
+            block->prepare(graph.sampleRate(), graph.maxBlockSize());
             for (const auto& bp : np.branches) {
                 auto* branch = block->addBranch(bp.name);
+                branch->prepare(graph.sampleRate(), graph.maxBlockSize());
                 branch->setGainDb(bp.gainDb);
                 branch->setPan(bp.pan);
                 branch->setMuted(bp.muted);
@@ -279,15 +277,16 @@ bool SceneManager::applyScene(int sceneIndex, audio::GraphEngine& graph) {
                 for (const auto& sp : bp.slots) {
                     auto slot = createSlotFromPreset(sp);
                     if (slot) {
+                        slot->prepare(graph.sampleRate(), graph.maxBlockSize());
                         branch->addSlot(std::move(slot));
                     }
                 }
             }
-            graph.addSerialNode(std::move(block));
+            newNodes.push_back(std::move(block));
         }
     }
 
-    graph.prepare(graph.sampleRate(), graph.maxBlockSize());
+    graph.crossfadeToNodes(std::move(newNodes));
     m_statusMessage = "Loaded preset: " + scene.name;
     return true;
 }
@@ -399,18 +398,22 @@ bool SceneManager::loadPresetChain(const std::string& name, audio::GraphEngine& 
     if (it == m_userPresets.end()) return false;
 
     plugins::PluginWindowManager::instance().closeAllWindows();
-    graph.clearNodes();
+
+    std::vector<std::unique_ptr<audio::AudioNode>> newNodes;
 
     for (const auto& np : it->nodes) {
         if (np.kind == NodePreset::Kind::Plugin) {
             auto slot = createSlotFromPreset(np.slot);
             if (slot) {
-                graph.addSerialNode(std::move(slot));
+                slot->prepare(graph.sampleRate(), graph.maxBlockSize());
+                newNodes.push_back(std::move(slot));
             }
         } else if (np.kind == NodePreset::Kind::ParallelBlock) {
             auto block = std::make_unique<audio::ParallelSplitMergeBlock>();
+            block->prepare(graph.sampleRate(), graph.maxBlockSize());
             for (const auto& bp : np.branches) {
                 auto* branch = block->addBranch(bp.name);
+                branch->prepare(graph.sampleRate(), graph.maxBlockSize());
                 branch->setGainDb(bp.gainDb);
                 branch->setPan(bp.pan);
                 branch->setMuted(bp.muted);
@@ -420,15 +423,16 @@ bool SceneManager::loadPresetChain(const std::string& name, audio::GraphEngine& 
                 for (const auto& sp : bp.slots) {
                     auto slot = createSlotFromPreset(sp);
                     if (slot) {
+                        slot->prepare(graph.sampleRate(), graph.maxBlockSize());
                         branch->addSlot(std::move(slot));
                     }
                 }
             }
-            graph.addSerialNode(std::move(block));
+            newNodes.push_back(std::move(block));
         }
     }
 
-    graph.prepare(graph.sampleRate(), graph.maxBlockSize());
+    graph.crossfadeToNodes(std::move(newNodes));
     m_statusMessage = "Loaded preset: " + name;
     return true;
 }
@@ -537,7 +541,7 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
         auto itName = kv.find("name");
         if (itName != kv.end()) sp.name = itName->second;
         auto itNodes = kv.find("numNodes");
-        size_t count = (itNodes != kv.end()) ? std::stoul(itNodes->second) : 0;
+        size_t count = (itNodes != kv.end()) ? praccy::utils::parseInteger<size_t>(itNodes->second, 0) : 0;
 
         for (size_t n = 0; n < count; ++n) {
             std::string pfx = "node_" + std::to_string(n) + "_";
@@ -549,26 +553,26 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
                 np.slot.path = kv.count(pfx + "path") ? kv.at(pfx + "path") : "";
                 np.slot.type = kv.count(pfx + "type") ? kv.at(pfx + "type") : "BuiltIn";
                 np.slot.bypassed = kv.count(pfx + "bypassed") && kv.at(pfx + "bypassed") == "1";
-                np.slot.dryWet = kv.count(pfx + "dryWet") ? std::stof(kv.at(pfx + "dryWet")) : 1.0f;
-                np.slot.inputGainDb = kv.count(pfx + "inGain") ? std::stof(kv.at(pfx + "inGain")) : 0.0f;
-                np.slot.outputGainDb = kv.count(pfx + "outGain") ? std::stof(kv.at(pfx + "outGain")) : 0.0f;
+                np.slot.dryWet = kv.count(pfx + "dryWet") ? praccy::utils::parseFloat(kv.at(pfx + "dryWet"), 1.0f) : 1.0f;
+                np.slot.inputGainDb = kv.count(pfx + "inGain") ? praccy::utils::parseFloat(kv.at(pfx + "inGain"), 0.0f) : 0.0f;
+                np.slot.outputGainDb = kv.count(pfx + "outGain") ? praccy::utils::parseFloat(kv.at(pfx + "outGain"), 0.0f) : 0.0f;
                 if (kv.count(pfx + "state")) {
                     np.slot.state = hexToBytes(kv.at(pfx + "state"));
                 }
             } else {
                 np.kind = NodePreset::Kind::ParallelBlock;
-                size_t numBr = kv.count(pfx + "numBranches") ? std::stoul(kv.at(pfx + "numBranches")) : 0;
+                size_t numBr = kv.count(pfx + "numBranches") ? praccy::utils::parseInteger<size_t>(kv.at(pfx + "numBranches"), 0) : 0;
                 for (size_t b = 0; b < numBr; ++b) {
                     std::string bpfx = pfx + "b_" + std::to_string(b) + "_";
                     BranchPreset bp;
                     bp.name = kv.count(bpfx + "name") ? kv.at(bpfx + "name") : "Branch";
-                    bp.gainDb = kv.count(bpfx + "gain") ? std::stof(kv.at(bpfx + "gain")) : 0.0f;
-                    bp.pan = kv.count(bpfx + "pan") ? std::stof(kv.at(bpfx + "pan")) : 0.0f;
+                    bp.gainDb = kv.count(bpfx + "gain") ? praccy::utils::parseFloat(kv.at(bpfx + "gain"), 0.0f) : 0.0f;
+                    bp.pan = kv.count(bpfx + "pan") ? praccy::utils::parseFloat(kv.at(bpfx + "pan"), 0.0f) : 0.0f;
                     bp.muted = kv.count(bpfx + "muted") && kv.at(bpfx + "muted") == "1";
                     bp.solo = kv.count(bpfx + "solo") && kv.at(bpfx + "solo") == "1";
                     bp.phaseInvert = kv.count(bpfx + "phase") && kv.at(bpfx + "phase") == "1";
 
-                    size_t numSl = kv.count(bpfx + "numSlots") ? std::stoul(kv.at(bpfx + "numSlots")) : 0;
+                    size_t numSl = kv.count(bpfx + "numSlots") ? praccy::utils::parseInteger<size_t>(kv.at(bpfx + "numSlots"), 0) : 0;
                     for (size_t s = 0; s < numSl; ++s) {
                         std::string spfx = bpfx + "s_" + std::to_string(s) + "_";
                         PluginSlotPreset sl;
@@ -576,9 +580,9 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
                         sl.path = kv.count(spfx + "path") ? kv.at(spfx + "path") : "";
                         sl.type = kv.count(spfx + "type") ? kv.at(spfx + "type") : "BuiltIn";
                         sl.bypassed = kv.count(spfx + "bypassed") && kv.at(spfx + "bypassed") == "1";
-                        sl.dryWet = kv.count(spfx + "dryWet") ? std::stof(kv.at(spfx + "dryWet")) : 1.0f;
-                        sl.inputGainDb = kv.count(spfx + "inGain") ? std::stof(kv.at(spfx + "inGain")) : 0.0f;
-                        sl.outputGainDb = kv.count(spfx + "outGain") ? std::stof(kv.at(spfx + "outGain")) : 0.0f;
+                        sl.dryWet = kv.count(spfx + "dryWet") ? praccy::utils::parseFloat(kv.at(spfx + "dryWet"), 1.0f) : 1.0f;
+                        sl.inputGainDb = kv.count(spfx + "inGain") ? praccy::utils::parseFloat(kv.at(spfx + "inGain"), 0.0f) : 0.0f;
+                        sl.outputGainDb = kv.count(spfx + "outGain") ? praccy::utils::parseFloat(kv.at(spfx + "outGain"), 0.0f) : 0.0f;
                         if (kv.count(spfx + "state")) {
                             sl.state = hexToBytes(kv.at(spfx + "state"));
                         }

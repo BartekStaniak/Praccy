@@ -3,6 +3,7 @@
 #include "../audio/audio_node.h"
 #include <string>
 #include <vector>
+#include <atomic>
 #include <windows.h>
 
 namespace praccy::plugins {
@@ -43,6 +44,29 @@ public:
 
     [[nodiscard]] virtual std::vector<uint8_t> saveState() const = 0;
     virtual bool loadState(const std::vector<uint8_t>& state) = 0;
+
+    // Fault state tracking
+    [[nodiscard]] virtual bool isFaulted() const noexcept {
+        return m_faulted.load(std::memory_order_acquire);
+    }
+    virtual void setFaulted(bool faulted) noexcept {
+        m_faulted.store(faulted, std::memory_order_release);
+    }
+    [[nodiscard]] virtual const char* faultReason() const noexcept {
+        const char* r = m_faultReason.load(std::memory_order_relaxed);
+        return r ? r : "Unknown fault";
+    }
+    virtual void setFaultReason(const char* reason) noexcept {
+        m_faultReason.store(reason, std::memory_order_release);
+    }
+    virtual void resetFault() noexcept {
+        m_faulted.store(false, std::memory_order_release);
+        m_faultReason.store(nullptr, std::memory_order_release);
+    }
+
+protected:
+    std::atomic<bool> m_faulted{false};
+    std::atomic<const char*> m_faultReason{nullptr};
 };
 
 } // namespace praccy::plugins

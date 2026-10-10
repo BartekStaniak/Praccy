@@ -1,4 +1,5 @@
 #include "clap_host.h"
+#include "crash_isolation.h"
 #include <iostream>
 #include <sstream>
 
@@ -19,7 +20,7 @@ std::unique_ptr<ClapPluginInstance> ClapPluginInstance::loadFromFile(const std::
         return nullptr;
     }
 
-    auto* entry = reinterpret_cast<const clap_plugin_entry*>(GetProcAddress(hLib, "clap_entry"));
+    auto* entry = reinterpret_cast<const clap_plugin_entry*>(reinterpret_cast<void*>(GetProcAddress(hLib, "clap_entry")));
     if (!entry) {
         std::cerr << "CLAP entry point 'clap_entry' not found in: " << path << "\n";
         FreeLibrary(hLib);
@@ -129,7 +130,7 @@ void ClapPluginInstance::prepare(double sampleRate, uint32_t maxBlockSize) {
 }
 
 void ClapPluginInstance::process(audio::AudioProcessContext& ctx) {
-    if (!m_plugin || ctx.numSamples == 0) {
+    if (!m_plugin || ctx.numSamples == 0 || m_faulted.load(std::memory_order_relaxed)) {
         ctx.output.copyFrom(ctx.input);
         return;
     }
@@ -161,37 +162,54 @@ void ClapPluginInstance::process(audio::AudioProcessContext& ctx) {
     processData.in_events = nullptr;
     processData.out_events = nullptr;
 
-    m_plugin->process(m_plugin, &processData);
+    DWORD exCode = 0;
+    bool ok = safeCallPluginAudio([&]() {
+        m_plugin->process(m_plugin, &processData);
+    }, &exCode);
+
+    if (!ok) {
+        m_faulted.store(true, std::memory_order_release);
+        setFaultReason(getExceptionDescription(exCode));
+        ctx.output.copyFrom(ctx.input);
+    }
 }
 
 void ClapPluginInstance::reset() {
-    if (m_plugin) {
-        m_plugin->reset(m_plugin);
+    if (m_plugin && !m_faulted.load(std::memory_order_relaxed)) {
+        safeCallPlugin([&]() {
+            m_plugin->reset(m_plugin);
+        });
     }
 }
 
 size_t ClapPluginInstance::numParameters() const noexcept {
-    if (m_paramsExt && m_plugin) {
-        return m_paramsExt->count(m_plugin);
+    if (m_paramsExt && m_plugin && !m_faulted.load(std::memory_order_relaxed)) {
+        size_t count = 0;
+        safeCallPlugin([&]() {
+            count = m_paramsExt->count(m_plugin);
+        });
+        return count;
     }
     return 0;
 }
 
 PluginParameterDesc ClapPluginInstance::getParameterDesc(size_t index) const {
     PluginParameterDesc desc;
-    if (m_paramsExt && m_plugin) {
-        clap_param_info info{};
-        if (m_paramsExt->get_info(m_plugin, static_cast<uint32_t>(index), &info)) {
-            desc.id = info.id;
-            desc.name = info.name;
-            desc.minValue = static_cast<float>(info.min_value);
-            desc.maxValue = static_cast<float>(info.max_value);
-            desc.defaultValue = static_cast<float>(info.default_value);
-            double val = 0.0;
-            if (m_paramsExt->get_value(m_plugin, info.id, &val)) {
-                desc.currentValue = static_cast<float>(val);
+    if (m_paramsExt && m_plugin && !m_faulted.load(std::memory_order_relaxed)) {
+        safeCallPlugin([&]() {
+            clap_param_info info{};
+            if (m_paramsExt->get_info(m_plugin, static_cast<uint32_t>(index), &info)) {
+                desc.id = info.id;
+                desc.name = info.name;
+                desc.minValue = static_cast<float>(info.min_value);
+                desc.maxValue = static_cast<float>(info.max_value);
+                desc.defaultValue = static_cast<float>(info.default_value);
+                double val = 0.0;
+                if (m_paramsExt->get_value(m_plugin, info.id, &val)) {
+                    desc.currentValue = static_cast<float>(val);
+                }
             }
-        }
+        });
     }
     return desc;
 }
@@ -201,11 +219,15 @@ void ClapPluginInstance::setParameterValue(uint32_t paramId, float value) {
 }
 
 float ClapPluginInstance::getParameterValue(uint32_t paramId) const {
-    if (m_paramsExt && m_plugin) {
-        double val = 0.0;
-        if (m_paramsExt->get_value(m_plugin, paramId, &val)) {
-            return static_cast<float>(val);
-        }
+    if (m_paramsExt && m_plugin && !m_faulted.load(std::memory_order_relaxed)) {
+        float result = 0.0f;
+        safeCallPlugin([&]() {
+            double val = 0.0;
+            if (m_paramsExt->get_value(m_plugin, paramId, &val)) {
+                result = static_cast<float>(val);
+            }
+        });
+        return result;
     }
     return 0.0f;
 }
@@ -215,49 +237,66 @@ bool ClapPluginInstance::hasCustomGui() const noexcept {
 }
 
 bool ClapPluginInstance::openGui(HWND parentHwnd) {
+    if (m_faulted.load(std::memory_order_acquire)) return false;
     if (!m_guiExt || !m_plugin || !parentHwnd) return false;
 
     if (!m_guiExt->is_api_supported(m_plugin, CLAP_WINDOW_API_WIN32, false)) {
         return false;
     }
 
-    if (!m_guiCreated) {
-        if (!m_guiExt->create(m_plugin, CLAP_WINDOW_API_WIN32, false)) {
-            return false;
+    bool opened = false;
+    DWORD exCode = 0;
+    bool ok = safeCallPluginGui([&]() {
+        if (!m_guiCreated) {
+            if (!m_guiExt->create(m_plugin, CLAP_WINDOW_API_WIN32, false)) {
+                return;
+            }
+            m_guiCreated = true;
         }
-        m_guiCreated = true;
-    }
 
-    clap_window win{};
-    win.api = CLAP_WINDOW_API_WIN32;
-    win.win32 = parentHwnd;
+        clap_window win{};
+        win.api = CLAP_WINDOW_API_WIN32;
+        win.win32 = parentHwnd;
 
-    if (!m_guiExt->set_parent(m_plugin, &win)) {
+        if (!m_guiExt->set_parent(m_plugin, &win)) {
+            return;
+        }
+
+        m_guiParentHwnd = parentHwnd;
+        opened = m_guiExt->show(m_plugin);
+    }, &exCode);
+
+    if (!ok) {
+        m_faulted.store(true, std::memory_order_release);
+        setFaultReason(getExceptionDescription(exCode));
         return false;
     }
 
-    m_guiParentHwnd = parentHwnd;
-    return m_guiExt->show(m_plugin);
+    return opened;
 }
 
 void ClapPluginInstance::closeGui() {
     if (m_guiExt && m_plugin && m_guiCreated) {
-        m_guiExt->hide(m_plugin);
-        m_guiExt->destroy(m_plugin);
+        safeCallPluginGui([&]() {
+            m_guiExt->hide(m_plugin);
+            m_guiExt->destroy(m_plugin);
+        });
         m_guiCreated = false;
         m_guiParentHwnd = nullptr;
     }
 }
 
 void ClapPluginInstance::getPreferredSize(int& width, int& height) const {
-    if (m_guiExt && m_plugin) {
-        uint32_t w = 850, h = 600;
-        if (m_guiExt->get_size(m_plugin, &w, &h)) {
-            if (w > 100 && h > 100) {
-                width = static_cast<int>(w);
-                height = static_cast<int>(h);
+    if (m_guiExt && m_plugin && !m_faulted.load(std::memory_order_relaxed)) {
+        safeCallPlugin([&]() {
+            uint32_t w = 850, h = 600;
+            if (m_guiExt->get_size(m_plugin, &w, &h)) {
+                if (w > 100 && h > 100) {
+                    width = static_cast<int>(w);
+                    height = static_cast<int>(h);
+                }
             }
-        }
+        });
     }
 }
 

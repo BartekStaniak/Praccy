@@ -1,4 +1,5 @@
 #include "vst3_host.h"
+#include "crash_isolation.h"
 #include <filesystem>
 #include <iostream>
 #include <algorithm>
@@ -173,12 +174,12 @@ std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::
         return nullptr;
     }
 
-    auto* initDll = reinterpret_cast<InitDllProc>(GetProcAddress(hLib, "InitDll"));
+    auto* initDll = reinterpret_cast<InitDllProc>(reinterpret_cast<void*>(GetProcAddress(hLib, "InitDll")));
     if (initDll) {
         initDll();
     }
 
-    auto* getFactory = reinterpret_cast<GetFactoryProc>(GetProcAddress(hLib, "GetPluginFactory"));
+    auto* getFactory = reinterpret_cast<GetFactoryProc>(reinterpret_cast<void*>(GetProcAddress(hLib, "GetPluginFactory")));
     if (!getFactory) {
         std::cerr << "GetPluginFactory not found in: " << dllPath.string() << "\n";
         FreeLibrary(hLib);
@@ -314,7 +315,7 @@ Vst3PluginInstance::~Vst3PluginInstance() {
         m_component = nullptr;
     }
     if (m_module) {
-        auto* exitDll = reinterpret_cast<ExitDllProc>(GetProcAddress(m_module, "ExitDll"));
+        auto* exitDll = reinterpret_cast<ExitDllProc>(reinterpret_cast<void*>(GetProcAddress(m_module, "ExitDll")));
         if (exitDll) exitDll();
         FreeLibrary(m_module);
         m_module = nullptr;
@@ -344,7 +345,7 @@ void Vst3PluginInstance::prepare(double sampleRate, uint32_t maxBlockSize) {
 }
 
 void Vst3PluginInstance::process(audio::AudioProcessContext& ctx) {
-    if (!m_processor || ctx.numSamples == 0) {
+    if (!m_processor || ctx.numSamples == 0 || m_faulted.load(std::memory_order_relaxed)) {
         ctx.output.copyFrom(ctx.input);
         return;
     }
@@ -368,7 +369,16 @@ void Vst3PluginInstance::process(audio::AudioProcessContext& ctx) {
     data.numOutputs = 1;
     data.outputs = &outBus;
 
-    m_processor->process(data);
+    DWORD exCode = 0;
+    bool ok = safeCallPluginAudio([&]() {
+        m_processor->process(data);
+    }, &exCode);
+
+    if (!ok) {
+        m_faulted.store(true, std::memory_order_release);
+        setFaultReason(getExceptionDescription(exCode));
+        ctx.output.copyFrom(ctx.input);
+    }
 }
 
 void Vst3PluginInstance::reset() {
@@ -406,16 +416,20 @@ PluginParameterDesc Vst3PluginInstance::getParameterDesc(size_t index) const {
 }
 
 void Vst3PluginInstance::setParameterValue(uint32_t paramId, float value) {
-    if (m_controller) {
-        m_controller->setParamNormalized(paramId, std::clamp(value, 0.0f, 1.0f));
+    if (m_controller && !m_faulted.load(std::memory_order_relaxed)) {
+        safeCallPlugin([&]() {
+            m_controller->setParamNormalized(paramId, std::clamp(value, 0.0f, 1.0f));
+        });
     }
 }
 
 float Vst3PluginInstance::getParameterValue(uint32_t paramId) const {
-    if (m_controller) {
-        return static_cast<float>(m_controller->getParamNormalized(paramId));
-    }
-    return 0.0f;
+    if (!m_controller || m_faulted.load(std::memory_order_relaxed)) return 0.0f;
+    float val = 0.0f;
+    safeCallPlugin([&]() {
+        val = static_cast<float>(m_controller->getParamNormalized(paramId));
+    });
+    return val;
 }
 
 bool Vst3PluginInstance::hasCustomGui() const noexcept {
@@ -423,32 +437,38 @@ bool Vst3PluginInstance::hasCustomGui() const noexcept {
 }
 
 bool Vst3PluginInstance::openGui(HWND parentHwnd) {
+    if (m_faulted.load(std::memory_order_acquire)) return false;
     if (!m_controller || !parentHwnd) return false;
 
-    if (!m_plugView) {
-        m_plugView = m_controller->createView(Steinberg::Vst::ViewType::kEditor);
-    }
+    DWORD exCode = 0;
+    bool ok = safeCallPluginGui([&]() {
+        if (!m_plugView) {
+            m_plugView = m_controller->createView(Steinberg::Vst::ViewType::kEditor);
+        }
 
-    if (!m_plugView) return false;
+        if (m_plugView && m_plugView->isPlatformTypeSupported(Steinberg::kPlatformTypeHWND) == Steinberg::kResultOk) {
+            m_impl->plugFrame.parentHwnd = parentHwnd;
+            m_plugView->setFrame(&m_impl->plugFrame);
 
-    if (m_plugView->isPlatformTypeSupported(Steinberg::kPlatformTypeHWND) != Steinberg::kResultOk) {
+            if (m_plugView->attached(reinterpret_cast<void*>(parentHwnd), Steinberg::kPlatformTypeHWND) == Steinberg::kResultOk) {
+                m_guiParentHwnd = parentHwnd;
+            } else {
+                m_plugView->setFrame(nullptr);
+            }
+        }
+    }, &exCode);
+
+    if (!ok) {
+        m_faulted.store(true, std::memory_order_release);
+        setFaultReason(getExceptionDescription(exCode));
         return false;
     }
 
-    m_impl->plugFrame.parentHwnd = parentHwnd;
-    m_plugView->setFrame(&m_impl->plugFrame);
-
-    if (m_plugView->attached(reinterpret_cast<void*>(parentHwnd), Steinberg::kPlatformTypeHWND) != Steinberg::kResultOk) {
-        m_plugView->setFrame(nullptr);
-        return false;
-    }
-
-    m_guiParentHwnd = parentHwnd;
-    return true;
+    return m_guiParentHwnd != nullptr;
 }
 
 void Vst3PluginInstance::getPreferredSize(int& width, int& height) const {
-    if (m_controller) {
+    if (m_controller && !m_faulted.load(std::memory_order_relaxed)) {
         Steinberg::IPlugView* view = m_plugView;
         bool createdTemp = false;
         if (!view) {
@@ -474,9 +494,11 @@ void Vst3PluginInstance::getPreferredSize(int& width, int& height) const {
 
 void Vst3PluginInstance::closeGui() {
     if (m_plugView) {
-        m_plugView->setFrame(nullptr);
-        m_plugView->removed();
-        m_plugView->release();
+        safeCallPluginGui([&]() {
+            m_plugView->setFrame(nullptr);
+            m_plugView->removed();
+            m_plugView->release();
+        });
         m_plugView = nullptr;
         m_guiParentHwnd = nullptr;
         m_impl->plugFrame.parentHwnd = nullptr;
@@ -484,25 +506,31 @@ void Vst3PluginInstance::closeGui() {
 }
 
 std::vector<uint8_t> Vst3PluginInstance::saveState() const {
-    if (!m_component) return {};
-    PraccyMemoryStream stream;
-    if (m_component->getState(&stream) == Steinberg::kResultOk) {
-        return std::vector<uint8_t>(stream.buffer.begin(), stream.buffer.end());
-    }
-    return {};
+    if (!m_component || m_faulted.load(std::memory_order_relaxed)) return {};
+    std::vector<uint8_t> result;
+    safeCallPlugin([&]() {
+        PraccyMemoryStream stream;
+        if (m_component->getState(&stream) == Steinberg::kResultOk) {
+            result = std::vector<uint8_t>(stream.buffer.begin(), stream.buffer.end());
+        }
+    });
+    return result;
 }
 
 bool Vst3PluginInstance::loadState(const std::vector<uint8_t>& state) {
-    if (!m_component || state.empty()) return false;
-    PraccyMemoryStream stream(state);
-    if (m_component->setState(&stream) == Steinberg::kResultOk) {
-        if (m_controller) {
-            stream.seek(0, Steinberg::IBStream::kIBSeekSet, nullptr);
-            m_controller->setComponentState(&stream);
+    if (!m_component || state.empty() || m_faulted.load(std::memory_order_relaxed)) return false;
+    bool success = false;
+    safeCallPlugin([&]() {
+        PraccyMemoryStream stream(state);
+        if (m_component->setState(&stream) == Steinberg::kResultOk) {
+            if (m_controller) {
+                stream.seek(0, Steinberg::IBStream::kIBSeekSet, nullptr);
+                m_controller->setComponentState(&stream);
+            }
+            success = true;
         }
-        return true;
-    }
-    return false;
+    });
+    return success;
 }
 
 } // namespace praccy::plugins

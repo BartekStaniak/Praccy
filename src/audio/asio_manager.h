@@ -57,6 +57,16 @@ public:
         m_callback = std::move(callback);
     }
 
+    // Sample format conversion routines (public for real-time engine & unit tests)
+    static void unpackSamples(ASIOSampleType type, const void* src, float* dst, uint32_t numSamples) noexcept;
+    static void packSamples(ASIOSampleType type, const float* src, void* dst, uint32_t numSamples) noexcept;
+
+    static void unpackInt24LSB(const void* src, float* dst, uint32_t numSamples) noexcept;
+    static void packInt24LSB(const float* src, void* dst, uint32_t numSamples) noexcept;
+
+    static void unpackInt32LSB24(const void* src, float* dst, uint32_t numSamples) noexcept;
+    static void packInt32LSB24(const float* src, void* dst, uint32_t numSamples) noexcept;
+
 private:
     static void bufferSwitchCallback(int32_t doubleBufferIndex, ASIOBool directProcess);
     static ASIOTime* bufferSwitchTimeInfoCallback(ASIOTime* params, int32_t doubleBufferIndex, ASIOBool directProcess);

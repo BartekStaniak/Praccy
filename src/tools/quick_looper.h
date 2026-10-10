@@ -2,6 +2,7 @@
 
 #include "../audio/audio_buffer.h"
 #include <vector>
+#include <string>
 #include <atomic>
 #include <algorithm>
 
@@ -19,11 +20,12 @@ class QuickLooper {
 public:
     QuickLooper();
 
-    void prepare(double sampleRate, uint32_t maxSeconds = 60);
+    void prepare(double sampleRate, uint32_t maxSeconds = 60, uint32_t maxBlockSize = 512);
 
     void triggerAction(); // 1-Button smart cycling: Rec -> Play -> Dub -> Play
     void stop();
     void clear();
+    bool loadWavFile(const std::string& filePath);
 
     void setVolume(float vol) noexcept { m_volume.store(std::clamp(vol, 0.0f, 2.0f), std::memory_order_relaxed); }
     [[nodiscard]] float volume() const noexcept { return m_volume.load(std::memory_order_relaxed); }

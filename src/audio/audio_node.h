@@ -44,6 +44,10 @@ public:
         return m_latencySamples;
     }
 
+    [[nodiscard]] virtual bool isFaulted() const noexcept {
+        return false;
+    }
+
 protected:
     std::atomic<bool> m_bypassed{false};
     uint32_t m_latencySamples{0};

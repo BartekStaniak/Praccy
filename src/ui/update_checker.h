@@ -5,8 +5,15 @@
 #include <thread>
 #include <atomic>
 #include <cstdint>
+#include <filesystem>
 
 namespace praccy::ui {
+
+// Security utilities exposed for in-process extraction and unit testing
+bool sanitizeZipEntryPath(const std::string& entryName, std::filesystem::path& outSafeRelativePath);
+bool extractZipArchive(const std::filesystem::path& zipPath,
+                       const std::filesystem::path& destDir,
+                       std::string& outError);
 
 enum class UpdateStatus {
     Idle,

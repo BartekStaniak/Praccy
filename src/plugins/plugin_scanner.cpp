@@ -262,7 +262,7 @@ std::string PluginScanner::detectVendor(const std::filesystem::path& path, const
         hLib = LoadLibraryW(dllPath.wstring().c_str());
     }
     if (hLib) {
-        auto* getFactory = reinterpret_cast<GetFactoryProc>(GetProcAddress(hLib, "GetPluginFactory"));
+        auto* getFactory = reinterpret_cast<GetFactoryProc>(reinterpret_cast<void*>(GetProcAddress(hLib, "GetPluginFactory")));
         if (getFactory) {
             auto* factory = getFactory();
             if (factory) {
