@@ -69,6 +69,9 @@ endif()
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/text.png")
     file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/resources/text.png" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/resources")
 endif()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/icon_512.png")
+    file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/resources/icon_512.png" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/resources")
+endif()
 
 target_include_directories(Praccy PRIVATE
     src

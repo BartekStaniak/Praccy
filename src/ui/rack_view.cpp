@@ -245,8 +245,8 @@ void RackView::renderPraccyLogo() {
         std::filesystem::path exeDir = std::filesystem::path(exePathW).parent_path();
 
         std::vector<std::filesystem::path> searchPaths = {
-            exeDir / "resources" / "text.png",
-            std::filesystem::path("resources") / "text.png",
+            exeDir / "resources" / "icon_512.png",
+            std::filesystem::path("resources") / "icon_512.png",
         };
 
         for (const auto& p : searchPaths) {
@@ -262,7 +262,8 @@ void RackView::renderPraccyLogo() {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const auto& tokens = themeTokens();
 
-    const float boxW = 145.0f;
+    // Square card to match the square icon aspect ratio
+    const float boxW = 74.0f;
     const float boxH = 74.0f;
 
     // Stylized logo card
@@ -270,7 +271,7 @@ void RackView::renderPraccyLogo() {
     dl->AddRect(pos, ImVec2(pos.x + boxW, pos.y + boxH), tokens.borders.subtle, 6.0f);
 
     if (logoThumb && logoThumb->srv) {
-        // Fill the full card area so the image background matches the card edges
+        // Fill the full card area with the icon
         dl->AddImage((ImTextureID)logoThumb->srv, pos, ImVec2(pos.x + boxW, pos.y + boxH),
                      ImVec2(0, 0), ImVec2(1, 1));
     } else {
