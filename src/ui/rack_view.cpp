@@ -270,20 +270,9 @@ void RackView::renderPraccyLogo() {
     dl->AddRect(pos, ImVec2(pos.x + boxW, pos.y + boxH), tokens.borders.subtle, 6.0f);
 
     if (logoThumb && logoThumb->srv) {
-        // Draw the actual guitar pick logo
-        const float pickH = 54.0f;
-        const float aspect = (logoThumb->height > 0) ? (static_cast<float>(logoThumb->width) / static_cast<float>(logoThumb->height)) : 0.868f;
-        const float pickW = pickH * aspect;
-        const float pickX = pos.x + 10.0f;
-        const float pickY = pos.y + (boxH - pickH) * 0.5f;
-
-        dl->AddImage((ImTextureID)logoThumb->srv, ImVec2(pickX, pickY), ImVec2(pickX + pickW, pickY + pickH));
-
-        float textX = pickX + pickW + 10.0f;
-        // Text: PRACCY (vertically centered alongside the pick logo)
-        // PRACCY text removed
-        // Version tag: v1.1.3
-        dl->AddText(ImVec2(textX, pos.y + (boxH * 0.5f) + 3.0f), tokens.text.muted, "v2.0.0");
+        // Fill the full card area so the image background matches the card edges
+        dl->AddImage((ImTextureID)logoThumb->srv, pos, ImVec2(pos.x + boxW, pos.y + boxH),
+                     ImVec2(0, 0), ImVec2(1, 1));
     } else {
         // Fallback procedural medallion
         const float cx = pos.x + 24.0f;
