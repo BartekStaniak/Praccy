@@ -398,24 +398,19 @@ void RackView::renderPracticeRibbon() {
     ImGui::PushStyleColor(ImGuiCol_ChildBg, tokens.surfaces.panelBg.vec4);
     ImGui::BeginChild("PracticeRibbon", ImVec2(0, 88.0f), false, ImGuiWindowFlags_NoScrollbar);
 
-    // Responsive 5-column layout: Praccy Logo on far-left, followed by Tuner, Metro, Gate, Master
-    if (ImGui::BeginTable("PracticeRibbonTable", 5, ImGuiTableFlags_SizingStretchProp)) {
-        ImGui::TableSetupColumn("LogoCol",   ImGuiTableColumnFlags_WidthFixed, 150.0f);
-        ImGui::TableSetupColumn("TunerCol",  ImGuiTableColumnFlags_WidthStretch, 0.28f);
-        ImGui::TableSetupColumn("MetroCol",  ImGuiTableColumnFlags_WidthStretch, 0.28f);
-        ImGui::TableSetupColumn("GateCol",   ImGuiTableColumnFlags_WidthStretch, 0.22f);
-        ImGui::TableSetupColumn("MasterCol", ImGuiTableColumnFlags_WidthStretch, 0.22f);
+    // Responsive 4-column layout: Tuner, Metro, Gate, Master — all stretch
+    if (ImGui::BeginTable("PracticeRibbonTable", 4, ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("TunerCol",  ImGuiTableColumnFlags_WidthStretch, 0.30f);
+        ImGui::TableSetupColumn("MetroCol",  ImGuiTableColumnFlags_WidthStretch, 0.30f);
+        ImGui::TableSetupColumn("GateCol",   ImGuiTableColumnFlags_WidthStretch, 0.20f);
+        ImGui::TableSetupColumn("MasterCol", ImGuiTableColumnFlags_WidthStretch, 0.20f);
 
         const float modH = 74.0f;
         ImGui::PushStyleColor(ImGuiCol_ChildBg, tokens.surfaces.panelBg.vec4);
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 6.0f));
 
-        // ----------------------------------------------------
-        // Column 0: Praccy Logo
-        // ----------------------------------------------------
-        ImGui::TableNextColumn();
-        renderPraccyLogo();
+
 
         // ----------------------------------------------------
         // Column 1: Strobe Tuner Module
