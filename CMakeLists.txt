@@ -13,6 +13,10 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+if(NOT MSVC)
+    add_compile_options(-Wno-missing-field-initializers)
+endif()
+
 # Third-party source files isolated from strict first-party compiler warnings
 set(THIRD_PARTY_SOURCES
     third_party/miniz/miniz.c
@@ -57,7 +61,14 @@ set(PRACCY_SOURCES
     src/ui/thumbnail_manager.cpp
     src/ui/update_checker.cpp
     src/ui/drag_drop_router.cpp
+    src/ui/modals/export_daw_chain_modal.cpp
     src/utils/archive_utils.cpp
+    src/utils/xml_parser.cpp
+    src/state/daw_interop/reaper_adapter.cpp
+    src/state/daw_interop/ableton_adapter.cpp
+    src/state/daw_interop/dawproject_adapter.cpp
+    src/state/daw_interop/vstpreset_adapter.cpp
+    src/state/daw_interop/universal_daw_interop_manager.cpp
     resources/praccy.rc
 
     ${THIRD_PARTY_SOURCES}
@@ -111,7 +122,7 @@ target_link_libraries(Praccy PRIVATE
 if(MSVC)
     target_compile_options(Praccy PRIVATE /O2 /W4 /WX /permissive-)
 else()
-    target_compile_options(Praccy PRIVATE -O3 -Wall -Wextra -Werror -Wno-unused-parameter)
+    target_compile_options(Praccy PRIVATE -O3 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-missing-field-initializers)
 endif()
 
 # Core Unit Tests
@@ -132,7 +143,14 @@ add_executable(test_praccy
     src/state/undo_manager.cpp
     src/ui/update_checker.cpp
     src/ui/drag_drop_router.cpp
+    src/plugins/plugin_scanner.cpp
     src/utils/archive_utils.cpp
+    src/utils/xml_parser.cpp
+    src/state/daw_interop/reaper_adapter.cpp
+    src/state/daw_interop/ableton_adapter.cpp
+    src/state/daw_interop/dawproject_adapter.cpp
+    src/state/daw_interop/vstpreset_adapter.cpp
+    src/state/daw_interop/universal_daw_interop_manager.cpp
     third_party/miniz/miniz.c
     third_party/imgui/imgui.cpp
     third_party/imgui/imgui_draw.cpp
@@ -157,7 +175,7 @@ target_link_libraries(test_praccy PRIVATE ole32 uuid user32 gdi32 winmm avrt win
 if(MSVC)
     target_compile_options(test_praccy PRIVATE /O2 /W4 /WX /permissive-)
 else()
-    target_compile_options(test_praccy PRIVATE -O3 -Wall -Wextra -Werror -Wno-unused-parameter)
+    target_compile_options(test_praccy PRIVATE -O3 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-missing-field-initializers)
 endif()
 
 add_executable(test_asio_driver
@@ -418,7 +436,14 @@ add_executable(test_praccy_v2_1
     src/tools/metronome.cpp
     src/tools/audio_player.cpp
     src/tools/quick_looper.cpp
+    src/plugins/plugin_scanner.cpp
     src/utils/archive_utils.cpp
+    src/utils/xml_parser.cpp
+    src/state/daw_interop/reaper_adapter.cpp
+    src/state/daw_interop/ableton_adapter.cpp
+    src/state/daw_interop/dawproject_adapter.cpp
+    src/state/daw_interop/vstpreset_adapter.cpp
+    src/state/daw_interop/universal_daw_interop_manager.cpp
     third_party/miniz/miniz.c
     src/ui/drag_drop_router.cpp
     src/state/undo_manager.cpp
@@ -447,9 +472,81 @@ target_link_libraries(test_praccy_v2_1 PRIVATE ole32 uuid user32 gdi32 winmm avr
 if(MSVC)
     target_compile_options(test_praccy_v2_1 PRIVATE /O2 /W4 /WX /permissive-)
 else()
-    target_compile_options(test_praccy_v2_1 PRIVATE -O3 -Wall -Wextra -Werror -Wno-unused-parameter $<$<COMPILE_LANGUAGE:CXX>:-Wno-mismatched-new-delete>)
+    target_compile_options(test_praccy_v2_1 PRIVATE -O3 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-missing-field-initializers $<$<COMPILE_LANGUAGE:CXX>:-Wno-mismatched-new-delete>)
 endif()
 add_test(NAME test_praccy_v2_1 COMMAND test_praccy_v2_1)
+
+add_executable(test_interop_fuzz
+    tests/test_interop_fuzz.cpp
+    src/utils/xml_parser.cpp
+    src/utils/archive_utils.cpp
+    third_party/miniz/miniz.c
+    src/state/daw_interop/reaper_adapter.cpp
+    src/state/daw_interop/ableton_adapter.cpp
+    src/state/daw_interop/dawproject_adapter.cpp
+    src/state/daw_interop/vstpreset_adapter.cpp
+)
+target_include_directories(test_interop_fuzz PRIVATE
+    src
+    tests
+)
+target_include_directories(test_interop_fuzz SYSTEM PRIVATE
+    third_party
+    third_party/miniz
+)
+target_link_libraries(test_interop_fuzz PRIVATE ole32 uuid user32 gdi32 winmm avrt shell32)
+if(MSVC)
+    target_compile_options(test_interop_fuzz PRIVATE /O2 /W4 /WX /permissive-)
+else()
+    target_compile_options(test_interop_fuzz PRIVATE -O3 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-missing-field-initializers)
+endif()
+add_test(NAME test_interop_fuzz COMMAND test_interop_fuzz)
+
+add_executable(test_interop_roundtrip
+    tests/test_interop_roundtrip.cpp
+    src/utils/xml_parser.cpp
+    src/utils/archive_utils.cpp
+    third_party/miniz/miniz.c
+    src/state/daw_interop/reaper_adapter.cpp
+    src/state/daw_interop/ableton_adapter.cpp
+    src/state/daw_interop/dawproject_adapter.cpp
+    src/state/daw_interop/vstpreset_adapter.cpp
+    src/state/daw_interop/universal_daw_interop_manager.cpp
+    src/plugins/plugin_scanner.cpp
+    src/audio/asio_manager.cpp
+    src/audio/graph_engine.cpp
+    src/plugins/builtin_dsp.cpp
+    src/plugins/vst3_host.cpp
+    src/plugins/clap_host.cpp
+    src/plugins/plugin_window.cpp
+    src/tools/tuner.cpp
+    src/tools/metronome.cpp
+    src/tools/audio_player.cpp
+    src/tools/quick_looper.cpp
+    src/state/scene_manager.cpp
+    src/state/app_config.cpp
+    src/state/undo_manager.cpp
+    src/midi/midi_manager.cpp
+    third_party/vst3_pluginterfaces/base/funknown.cpp
+    third_party/vst3_pluginterfaces/base/coreiids.cpp
+)
+target_include_directories(test_interop_roundtrip PRIVATE
+    src
+    tests
+)
+target_include_directories(test_interop_roundtrip SYSTEM PRIVATE
+    third_party
+    third_party/miniz
+    third_party/clap/include
+    third_party/readerwriterqueue
+)
+target_link_libraries(test_interop_roundtrip PRIVATE ole32 uuid user32 gdi32 winmm avrt wininet shell32)
+if(MSVC)
+    target_compile_options(test_interop_roundtrip PRIVATE /O2 /W4 /WX /permissive-)
+else()
+    target_compile_options(test_interop_roundtrip PRIVATE -O3 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-missing-field-initializers $<$<COMPILE_LANGUAGE:CXX>:-Wno-mismatched-new-delete>)
+endif()
+add_test(NAME test_interop_roundtrip COMMAND test_interop_roundtrip --all)
 
 
 

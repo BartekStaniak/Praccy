@@ -305,4 +305,163 @@ bool extractZipMemory(const void* data,
     return success;
 }
 
+bool ArchiveUtils::gzipDecompress(const std::vector<uint8_t>& gzData, std::string& outXml) {
+    outXml.clear();
+    if (gzData.size() < 18) return false;
+    if (gzData[0] != 0x1F || gzData[1] != 0x8B || gzData[2] != 0x08) return false;
+
+    uint8_t flg = gzData[3];
+    size_t offset = 10;
+
+    // FEXTRA
+    if (flg & 0x04) {
+        if (offset + 2 > gzData.size()) return false;
+        uint16_t xlen = static_cast<uint16_t>(gzData[offset]) | (static_cast<uint16_t>(gzData[offset + 1]) << 8);
+        offset += 2 + xlen;
+    }
+    // FNAME
+    if (flg & 0x08) {
+        while (offset < gzData.size() && gzData[offset] != 0) ++offset;
+        ++offset;
+    }
+    // FCOMMENT
+    if (flg & 0x10) {
+        while (offset < gzData.size() && gzData[offset] != 0) ++offset;
+        ++offset;
+    }
+    // FHCRC
+    if (flg & 0x02) {
+        offset += 2;
+    }
+
+    if (offset >= gzData.size() - 8) return false;
+
+    size_t deflateLen = gzData.size() - 8 - offset;
+    const uint8_t* deflateData = gzData.data() + offset;
+
+    size_t uncompLen = 0;
+    void* uncompBuf = tinfl_decompress_mem_to_heap(deflateData, deflateLen, &uncompLen, 0);
+    if (!uncompBuf) return false;
+
+    if (uncompLen > kMaxDecompressedXmlBytes) {
+        mz_free(uncompBuf);
+        return false;
+    }
+
+    if (deflateLen > 0 && (uncompLen / deflateLen) > kMaxCompressionRatio) {
+        mz_free(uncompBuf);
+        return false;
+    }
+
+    outXml.assign(reinterpret_cast<const char*>(uncompBuf), uncompLen);
+    mz_free(uncompBuf);
+    return true;
+}
+
+bool ArchiveUtils::gzipCompress(std::string_view xmlData, std::vector<uint8_t>& outGzData) {
+    outGzData.clear();
+    const mz_uint compFlags = tdefl_create_comp_flags_from_zip_params(MZ_DEFAULT_LEVEL, -15, MZ_DEFAULT_STRATEGY);
+    size_t compLen = 0;
+    void* compBuf = tdefl_compress_mem_to_heap(xmlData.data(), xmlData.size(), &compLen, compFlags);
+    if (!compBuf && !xmlData.empty()) return false;
+
+    const uint8_t gzHeader[10] = {
+        0x1F, 0x8B,
+        0x08,
+        0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00,
+        0x0A
+    };
+
+    outGzData.insert(outGzData.end(), gzHeader, gzHeader + 10);
+    if (compBuf && compLen > 0) {
+        const uint8_t* compBytes = reinterpret_cast<const uint8_t*>(compBuf);
+        outGzData.insert(outGzData.end(), compBytes, compBytes + compLen);
+        mz_free(compBuf);
+    }
+
+    mz_ulong crc = mz_crc32(MZ_CRC32_INIT, reinterpret_cast<const unsigned char*>(xmlData.data()), xmlData.size());
+    uint32_t isize = static_cast<uint32_t>(xmlData.size());
+
+    uint8_t trailer[8];
+    trailer[0] = static_cast<uint8_t>(crc & 0xFF);
+    trailer[1] = static_cast<uint8_t>((crc >> 8) & 0xFF);
+    trailer[2] = static_cast<uint8_t>((crc >> 16) & 0xFF);
+    trailer[3] = static_cast<uint8_t>((crc >> 24) & 0xFF);
+    trailer[4] = static_cast<uint8_t>(isize & 0xFF);
+    trailer[5] = static_cast<uint8_t>((isize >> 8) & 0xFF);
+    trailer[6] = static_cast<uint8_t>((isize >> 16) & 0xFF);
+    trailer[7] = static_cast<uint8_t>((isize >> 24) & 0xFF);
+
+    outGzData.insert(outGzData.end(), trailer, trailer + 8);
+    return true;
+}
+
+bool ArchiveUtils::unzipFile(const std::filesystem::path& zipPath, const std::filesystem::path& destDir) {
+    std::string err;
+    ArchiveBombGuards guards;
+    guards.maxSingleFileSize = kMaxDecompressedXmlBytes;
+    guards.maxArchiveTotalSize = kMaxDecompressedTotalBytes;
+    guards.maxFileCount = kMaxArchiveEntryCount;
+    guards.maxCompressionRatio = kMaxCompressionRatio;
+    return extractZipArchive(zipPath, destDir, err, guards);
+}
+
+bool ArchiveUtils::zipDirectory(const std::filesystem::path& sourceDir, const std::filesystem::path& zipPath) {
+    std::error_code ec;
+    if (!std::filesystem::exists(sourceDir, ec) || !std::filesystem::is_directory(sourceDir, ec)) {
+        return false;
+    }
+
+    std::filesystem::remove(zipPath, ec);
+
+    mz_zip_archive zip;
+    std::memset(&zip, 0, sizeof(zip));
+
+#if defined(_WIN32)
+    FILE* fp = _wfopen(zipPath.wstring().c_str(), L"wb");
+#else
+    FILE* fp = std::fopen(zipPath.string().c_str(), "wb");
+#endif
+    if (!fp) return false;
+
+    if (!mz_zip_writer_init_cfile(&zip, fp, 0)) {
+        std::fclose(fp);
+        return false;
+    }
+
+    bool ok = true;
+    for (auto it = std::filesystem::recursive_directory_iterator(sourceDir, ec);
+         it != std::filesystem::recursive_directory_iterator(); ++it) {
+        if (ec) { ok = false; break; }
+        if (!it->is_regular_file()) continue;
+
+        auto relPath = std::filesystem::relative(it->path(), sourceDir, ec);
+        if (ec) { ok = false; break; }
+
+        std::string relStr = relPath.generic_string();
+        std::string filePathStr = it->path().string();
+
+        if (!mz_zip_writer_add_file(&zip, relStr.c_str(), filePathStr.c_str(), nullptr, 0, MZ_DEFAULT_COMPRESSION)) {
+            ok = false;
+            break;
+        }
+    }
+
+    if (ok) {
+        if (!mz_zip_writer_finalize_archive(&zip)) {
+            ok = false;
+        }
+    }
+
+    mz_zip_writer_end(&zip);
+    std::fclose(fp);
+    return ok;
+}
+
+bool ArchiveUtils::sanitizeZipEntryPath(const std::string& entryName, std::filesystem::path& outSafePath) {
+    return sanitizeZipPath(entryName, outSafePath);
+}
+
 } // namespace praccy::utils

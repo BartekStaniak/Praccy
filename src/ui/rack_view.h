@@ -12,6 +12,7 @@
 #include "modals/plugin_browser_modal.h"
 #include "modals/settings_modal.h"
 #include "modals/practice_tools_modal.h"
+#include "modals/export_daw_chain_modal.h"
 #include "../state/undo_manager.h"
 #include "../audio/retroactive_buffer.h"
 #include <vector>
@@ -103,6 +104,7 @@ private:
     std::unique_ptr<PluginBrowserModal> m_pluginBrowserModal;
     std::unique_ptr<SettingsModal> m_settingsModal;
     std::unique_ptr<PracticeToolsModal> m_practiceToolsModal;
+    ExportDawChainModal m_exportDawModal;
 
     std::atomic<float>* m_dspLoadPercent{nullptr};
     std::atomic<uint32_t>* m_dspDropouts{nullptr};

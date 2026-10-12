@@ -22,6 +22,9 @@ struct PluginDescriptor {
     PluginType type{PluginType::BuiltIn};
     std::string vendor{"Unknown"};
     std::string category{"Effects"};
+    std::string bundleFileName;
+    std::string classGuid;
+    std::string clapId;
 
     [[nodiscard]] std::string typeString() const {
         switch (type) {
@@ -58,6 +61,13 @@ public:
     [[nodiscard]] bool isFavorite(const std::string& nameOrPath) const;
     void toggleFavorite(const std::string& nameOrPath);
     [[nodiscard]] size_t numFavorites() const;
+
+    [[nodiscard]] const PluginDescriptor* resolvePlugin(
+        const std::string& name,
+        const std::string& bundleFileName = "",
+        const std::string& guidOrClapId = "",
+        PluginType preferredType = PluginType::VST3
+    ) const;
 
     [[nodiscard]] std::vector<std::string> getDevelopers() const;
     [[nodiscard]] std::vector<PluginDescriptor> getFilteredPlugins(

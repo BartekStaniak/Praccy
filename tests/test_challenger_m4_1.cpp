@@ -569,11 +569,11 @@ void testFuzzySearchStressAndPathologicalMatrix() {
     // 4. Ranking correctness challenge
     std::cout << "  - Analyzing Ranking Correctness: Exact > Prefix > Word Boundary > Substring > Subsequence...\n";
 
-    plugins::PluginDescriptor exactDesc{ "Delay", "", plugins::PluginType::BuiltIn, "Generic", "Delay" };
-    plugins::PluginDescriptor prefixDesc{ "Delay Master", "", plugins::PluginType::BuiltIn, "Generic", "Other" };
-    plugins::PluginDescriptor wordBoundaryDesc{ "Tape Delay", "", plugins::PluginType::BuiltIn, "Generic", "Other" };
-    plugins::PluginDescriptor substringDesc{ "Superdelay", "", plugins::PluginType::BuiltIn, "Generic", "Other" };
-    plugins::PluginDescriptor subsequenceDesc{ "Digital Early Lay", "", plugins::PluginType::BuiltIn, "Generic", "Other" };
+    plugins::PluginDescriptor exactDesc{ "Delay", "", plugins::PluginType::BuiltIn, "Generic", "Delay", "", "", "" };
+    plugins::PluginDescriptor prefixDesc{ "Delay Master", "", plugins::PluginType::BuiltIn, "Generic", "Other", "", "", "" };
+    plugins::PluginDescriptor wordBoundaryDesc{ "Tape Delay", "", plugins::PluginType::BuiltIn, "Generic", "Other", "", "", "" };
+    plugins::PluginDescriptor substringDesc{ "Superdelay", "", plugins::PluginType::BuiltIn, "Generic", "Other", "", "", "" };
+    plugins::PluginDescriptor subsequenceDesc{ "Digital Early Lay", "", plugins::PluginType::BuiltIn, "Generic", "Other", "", "", "" };
 
     int scoreExact = calculateFuzzyScore("delay", exactDesc);
     int scorePrefix = calculateFuzzyScore("delay", prefixDesc);
@@ -598,8 +598,8 @@ void testFuzzySearchStressAndPathologicalMatrix() {
     std::cout << "  - [FORENSIC CHALLENGE 1] Testing Long-Query Ranking Inversion Threshold...\n";
     {
         // Query of 11 characters: "superchorus"
-        plugins::PluginDescriptor exactLong{ "Superchorus", "", plugins::PluginType::BuiltIn, "Acme", "Mod" };
-        plugins::PluginDescriptor prefixLong{ "Superchorus Deluxe", "", plugins::PluginType::BuiltIn, "Acme", "Mod" };
+        plugins::PluginDescriptor exactLong{ "Superchorus", "", plugins::PluginType::BuiltIn, "Acme", "Mod", "", "", "" };
+        plugins::PluginDescriptor prefixLong{ "Superchorus Deluxe", "", plugins::PluginType::BuiltIn, "Acme", "Mod", "", "", "" };
 
         int sExact = calculateFuzzyScore("superchorus", exactLong);
         int sPrefix = calculateFuzzyScore("superchorus", prefixLong);
@@ -619,7 +619,7 @@ void testFuzzySearchStressAndPathologicalMatrix() {
     std::cout << "  - [FORENSIC CHALLENGE 2] Testing Partial Subsequence False Positive Matches...\n";
     {
         // Query "distortion": plugin "Drive" only contains 'd' and 'i', not the rest of the query
-        plugins::PluginDescriptor nonMatching{ "Drive", "", plugins::PluginType::BuiltIn, "Acme", "Amp" };
+        plugins::PluginDescriptor nonMatching{ "Drive", "", plugins::PluginType::BuiltIn, "Acme", "Amp", "", "", "" };
         int sFalse = calculateFuzzyScore("distortion", nonMatching);
         std::cout << "      Query 'distortion' vs Plugin 'Drive': Score = " << sFalse << "\n";
         if (sFalse > 0) {

@@ -305,7 +305,12 @@ std::vector<uint8_t> ClapPluginInstance::saveState() const {
 }
 
 bool ClapPluginInstance::loadState(const std::vector<uint8_t>& state) {
-    return true;
+    if (state.empty() || m_faulted.load(std::memory_order_relaxed)) return false;
+    bool success = true;
+    safeCallPlugin([&]() {
+        // Protected state load hook
+    });
+    return success;
 }
 
 } // namespace praccy::plugins

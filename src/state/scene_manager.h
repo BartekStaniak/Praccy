@@ -12,11 +12,23 @@ struct PluginSlotPreset {
     std::string name;
     std::string path;          // "builtin://drive", "builtin://amp", "builtin://delay", or VST3/CLAP file path
     std::string type;          // "BuiltIn", "VST3", "CLAP"
+    std::string bundleFileName;// e.g. "Archetype Gojira X.vst3"
+    std::string classGuid;     // Normalized 32-character hex UID (VST3)
+    std::string clapId;        // e.g. "com.neuraldsp.gojira"
+    uint32_t latencySamples{0};// Plugin Delay Compensation (PDC) report
     bool bypassed{false};
     float dryWet{1.0f};
     float inputGainDb{0.0f};
     float outputGainDb{0.0f};
-    std::vector<uint8_t> state;
+    std::vector<uint8_t> state;// Bit-exact binary chunk (IBStream or CLAP stream)
+
+    struct MacroBinding {
+        uint32_t paramId{0};
+        std::string label;
+        float value{0.0f};
+        float defaultValue{0.0f};
+    };
+    std::vector<MacroBinding> macros;
 };
 
 struct BranchPreset {
@@ -26,6 +38,7 @@ struct BranchPreset {
     bool muted{false};
     bool solo{false};
     bool phaseInvert{false};
+    uint32_t totalLatencySamples{0}; // Accumulated latency along this branch
     std::vector<PluginSlotPreset> slots;
 };
 
@@ -33,11 +46,19 @@ struct NodePreset {
     enum class Kind { Plugin, ParallelBlock };
     Kind kind{Kind::Plugin};
     PluginSlotPreset slot;
-    std::vector<BranchPreset> branches;
+    std::vector<BranchPreset> branches; // If ParallelBlock: index 0 = Branch A, 1 = Branch B
+    float branchBlend{0.5f};            // Cross-branch balance
 };
 
 struct ScenePreset {
     std::string name;
+    std::string sourceDawName{"Praccy"}; // "Praccy", "Reaper", "Ableton", "Bitwig", "StudioOne"
+
+    // Host Transport Context (for tempo-synced delays, tremolos, and modulations)
+    float tempoBpm{120.0f};
+    uint8_t timeSigNumerator{4};
+    uint8_t timeSigDenominator{4};
+
     std::vector<NodePreset> nodes;
 };
 

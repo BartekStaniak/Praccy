@@ -1,6 +1,8 @@
 #include "plugin_scanner.h"
 #include "../state/app_config.h"
+#include "../utils/guid_utils.h"
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <algorithm>
 #include <set>
@@ -28,21 +30,30 @@ PluginScanner::PluginScanner() {
         .path = "builtin://drive",
         .type = PluginType::BuiltIn,
         .vendor = "Praccy Audio",
-        .category = "Distortion"
+        .category = "Distortion",
+        .bundleFileName = "",
+        .classGuid = "",
+        .clapId = ""
     });
     m_plugins.push_back(PluginDescriptor{
         .name = "Praccy Amp Sim",
         .path = "builtin://amp",
         .type = PluginType::BuiltIn,
         .vendor = "Praccy Audio",
-        .category = "Amp Emulation"
+        .category = "Amp Emulation",
+        .bundleFileName = "",
+        .classGuid = "",
+        .clapId = ""
     });
     m_plugins.push_back(PluginDescriptor{
         .name = "Praccy Stereo Delay",
         .path = "builtin://delay",
         .type = PluginType::BuiltIn,
         .vendor = "Praccy Audio",
-        .category = "Delay/Echo"
+        .category = "Delay/Echo",
+        .bundleFileName = "",
+        .classGuid = "",
+        .clapId = ""
     });
 }
 
@@ -313,21 +324,30 @@ void PluginScanner::runScan() {
         .path = "builtin://drive",
         .type = PluginType::BuiltIn,
         .vendor = "Praccy Audio",
-        .category = "Distortion"
+        .category = "Distortion",
+        .bundleFileName = "",
+        .classGuid = "",
+        .clapId = ""
     });
     found.push_back(PluginDescriptor{
         .name = "Praccy Amp Sim",
         .path = "builtin://amp",
         .type = PluginType::BuiltIn,
         .vendor = "Praccy Audio",
-        .category = "Amp Emulation"
+        .category = "Amp Emulation",
+        .bundleFileName = "",
+        .classGuid = "",
+        .clapId = ""
     });
     found.push_back(PluginDescriptor{
         .name = "Praccy Stereo Delay",
         .path = "builtin://delay",
         .type = PluginType::BuiltIn,
         .vendor = "Praccy Audio",
-        .category = "Delay/Echo"
+        .category = "Delay/Echo",
+        .bundleFileName = "",
+        .classGuid = "",
+        .clapId = ""
     });
 
     std::vector<std::string> pathsCopy;
@@ -371,6 +391,7 @@ void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vec
                 PluginDescriptor desc;
                 desc.name = name;
                 desc.path = path.string();
+                desc.bundleFileName = path.filename().string();
                 desc.type = PluginType::CLAP;
                 desc.vendor = detectVendor(path, name);
                 desc.category = "CLAP";
@@ -385,6 +406,7 @@ void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vec
                 PluginDescriptor desc;
                 desc.name = name;
                 desc.path = path.string();
+                desc.bundleFileName = path.filename().string();
                 desc.type = PluginType::VST3;
                 desc.vendor = detectVendor(path, name);
                 desc.category = "VST3";
@@ -505,6 +527,81 @@ std::vector<PluginDescriptor> PluginScanner::getFilteredPlugins(
     }
 
     return result;
+}
+
+const PluginDescriptor* PluginScanner::resolvePlugin(
+    const std::string& name,
+    const std::string& bundleFileName,
+    const std::string& guidOrClapId,
+    PluginType /*preferredType*/
+) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    // Normalize input GUID
+    std::string normGuid = utils::GuidUtils::normalizeToCanonicalGuid(guidOrClapId);
+
+    // Tier 1 (Normalized Unique ID): Canonical 32-char hex GUID comparison or CLAP plugin ID
+    if (!normGuid.empty() || !guidOrClapId.empty()) {
+        for (const auto& p : m_plugins) {
+            if (!normGuid.empty() && !p.classGuid.empty()) {
+                if (p.classGuid == normGuid) return &p;
+            }
+            if (!guidOrClapId.empty() && !p.clapId.empty()) {
+                if (p.clapId == guidOrClapId) return &p;
+            }
+        }
+    }
+
+    // Tier 2 (Bundle Filename Match): Match against bundleFileName
+    if (!bundleFileName.empty()) {
+        std::string bundleLower = bundleFileName;
+        std::transform(bundleLower.begin(), bundleLower.end(), bundleLower.begin(), [](unsigned char c){ return std::tolower(c); });
+        std::string bundleStem = std::filesystem::path(bundleFileName).stem().string();
+        std::transform(bundleStem.begin(), bundleStem.end(), bundleStem.begin(), [](unsigned char c){ return std::tolower(c); });
+
+        for (const auto& p : m_plugins) {
+            std::string pBundleLower = p.bundleFileName;
+            std::transform(pBundleLower.begin(), pBundleLower.end(), pBundleLower.begin(), [](unsigned char c){ return std::tolower(c); });
+            if (!pBundleLower.empty() && pBundleLower == bundleLower) {
+                return &p;
+            }
+            std::string pStem = std::filesystem::path(p.path).stem().string();
+            std::transform(pStem.begin(), pStem.end(), pStem.begin(), [](unsigned char c){ return std::tolower(c); });
+            if (!pStem.empty() && pStem == bundleStem) {
+                return &p;
+            }
+        }
+    }
+
+    // Tier 3 (Normalized Name Match): Strip common prefixes/suffixes and match against scanned library
+    if (!name.empty()) {
+        auto normalizeName = [](std::string s) -> std::string {
+            std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return std::tolower(c); });
+            for (const char* pre : {"vst3: ", "vst: ", "clap: ", "builtin: "}) {
+                if (s.starts_with(pre)) s = s.substr(std::strlen(pre));
+            }
+            for (const char* suf : {".vst3", ".clap", " (vst3)", " (clap)", " (x64)", "_x64", " 64bit"}) {
+                if (s.ends_with(suf)) s = s.substr(0, s.size() - std::strlen(suf));
+            }
+            std::string clean;
+            for (char c : s) {
+                if (std::isalnum(static_cast<unsigned char>(c))) clean.push_back(c);
+            }
+            return clean;
+        };
+
+        std::string cleanInput = normalizeName(name);
+        if (!cleanInput.empty()) {
+            for (const auto& p : m_plugins) {
+                if (normalizeName(p.name) == cleanInput) {
+                    return &p;
+                }
+            }
+        }
+    }
+
+    // Tier 4 (Fallback): Return nullptr
+    return nullptr;
 }
 
 } // namespace praccy::plugins

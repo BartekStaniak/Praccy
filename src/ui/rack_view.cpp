@@ -339,6 +339,7 @@ void RackView::render() {
         renderUpdateModal();
         m_settingsModal->render();
         m_practiceToolsModal->render();
+        m_exportDawModal.render(m_scenes, m_graph);
         renderFloatingHudToast();
     }
     ImGui::End();
@@ -953,6 +954,14 @@ void RackView::renderSceneBar() {
         m_presetNameBuffer[0] = '\0';
     }
 
+    ImGui::SameLine(0, 8);
+    if (CenteredButton("Export DAW...")) {
+        m_exportDawModal.open();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Export chain to Reaper (.RfxChain), Ableton (.adg), DAWproject (.dawproject), or VST3 (.vstpreset)");
+    }
+
     auto userPresets = m_scenes.savedPresetNames();
     if (!userPresets.empty()) {
         ImGui::SameLine(0, 8);
@@ -1264,9 +1273,10 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
     const auto& tokens = themeTokens();
     auto* pluginInst = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
     const bool isFaulted = pluginInst && pluginInst->isFaulted();
+    const bool isMissing = slot->innerNode() && slot->innerNode()->isMissing();
     const bool bypassed = slot->isBypassed();
 
-    ImVec4 cardBg = isFaulted ? static_cast<ImVec4>(tokens.surfaces.cardBgFaulted) :
+    ImVec4 cardBg = (isFaulted || isMissing) ? static_cast<ImVec4>(tokens.surfaces.cardBgFaulted) :
                     (bypassed ? static_cast<ImVec4>(tokens.surfaces.cardBgBypassed) : static_cast<ImVec4>(tokens.surfaces.cardBg));
 
     ImGui::PushStyleColor(ImGuiCol_ChildBg, cardBg);
@@ -1297,7 +1307,10 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         // Format pill badge
         const char* badgeStr = "DSP";
         ImU32 badgeTextCol = tokens.text.badgeInternal;
-        if (pluginInst) {
+        if (isMissing) {
+            badgeStr = "MISSING";
+            badgeTextCol = tokens.signal.faulted.u32;
+        } else if (pluginInst) {
             if (dynamic_cast<plugins::Vst3PluginInstance*>(pluginInst)) {
                 badgeStr = "VST3";
                 badgeTextCol = tokens.text.badgeVst3;
@@ -1306,7 +1319,8 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                 badgeTextCol = tokens.text.badgeClap;
             }
         }
-        renderBadgePill(badgeStr, tokens.surfaces.frameBg, tokens.borders.focus, badgeTextCol, 18.0f);
+        renderBadgePill(badgeStr, isMissing ? tokens.surfaces.cardBgFaulted : tokens.surfaces.frameBg,
+                        isMissing ? tokens.borders.cardFaulted : tokens.borders.focus, badgeTextCol, 18.0f);
         ImGui::SameLine(0, 6.0f);
 
         // Truncated title with ellipsis
@@ -1321,8 +1335,9 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         }
 
         ImGui::AlignTextToFramePadding();
-        const ImVec4 titleColor = isFaulted ? tokens.signal.faulted.vec4 :
-                                  (bypassed ? tokens.signal.bypassed.vec4 : tokens.text.primary.vec4);
+        const ImVec4 titleColor = isMissing ? tokens.signal.faulted.vec4 :
+                                  (isFaulted ? tokens.signal.faulted.vec4 :
+                                  (bypassed ? tokens.signal.bypassed.vec4 : tokens.text.primary.vec4));
         ImGui::TextColored(titleColor, "%s", displayTitle.c_str());
 
         // Header drag-and-drop source
@@ -1433,12 +1448,29 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         bool previewClicked = ImGui::InvisibleButton(previewBtnId, ImVec2(previewW, previewH));
         bool isPreviewHovered = ImGui::IsItemHovered();
 
-        if (isPreviewHovered && !isFaulted) {
+        if (isPreviewHovered && !isFaulted && !isMissing) {
             ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
         }
 
         // Preview rendering:
-        if (isFaulted) {
+        if (isMissing) {
+            const char* missTitle = "MISSING PLUGIN";
+            ImVec2 tSz = ImGui::CalcTextSize(missTitle);
+            dl->AddText(ImVec2(previewPos.x + (previewW - tSz.x) * 0.5f, previewPos.y + 8.0f),
+                        tokens.signal.faulted, missTitle);
+
+            const char* missSub = "Dry signal pass-through active";
+            ImVec2 sSz = ImGui::CalcTextSize(missSub);
+            dl->AddText(ImVec2(previewPos.x + (previewW - sSz.x) * 0.5f, previewPos.y + 24.0f),
+                        tokens.text.secondary, missSub);
+
+            ImGui::SetCursorScreenPos(ImVec2(previewPos.x + (previewW - 140.0f) * 0.5f, previewPos.y + 34.0f));
+            char replaceBtnId[48];
+            std::snprintf(replaceBtnId, sizeof(replaceBtnId), "FIND REPLACEMENT##%d_%d_%d", slotIndex, blockIndex, branchIndex);
+            if (ImGui::Button(replaceBtnId, ImVec2(140.0f, 20.0f))) {
+                m_pluginBrowserModal->open(blockIndex, branchIndex);
+            }
+        } else if (isFaulted) {
             const char* crashTitle = "PLUGIN CRASH ISOLATED";
             ImVec2 tSz = ImGui::CalcTextSize(crashTitle);
             dl->AddText(ImVec2(previewPos.x + (previewW - tSz.x) * 0.5f, previewPos.y + 8.0f),
@@ -1514,12 +1546,12 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         }
 
         // Crisp inner border stroke
-        ImU32 frameBorder = isFaulted ? static_cast<ImU32>(tokens.borders.cardFaulted) :
+        ImU32 frameBorder = (isFaulted || isMissing) ? static_cast<ImU32>(tokens.borders.cardFaulted) :
                             (isWindowOpen ? static_cast<ImU32>(tokens.borders.cardGlowOpen) :
                             (bypassed ? static_cast<ImU32>(tokens.borders.subtle) : static_cast<ImU32>(tokens.signal.active)));
         dl->AddRect(previewPos, ImVec2(previewPos.x + previewW, previewPos.y + previewH), frameBorder, 5.0f, 0, 1.5f);
 
-        if (previewClicked && !isFaulted) {
+        if (previewClicked && !isFaulted && !isMissing) {
             m_focusedSlot = slot;
             m_focusedSlotIndex = slotIndex;
             if (hasGui) {

@@ -41,13 +41,15 @@ void SceneManager::initializeDefaultScenes() {
     s1.name = "1: Clean";
     s1.nodes.push_back(NodePreset{
         .kind = NodePreset::Kind::Plugin,
-        .slot = PluginSlotPreset{.name = "Praccy Amp Sim", .path = "builtin://amp", .type = "BuiltIn", .bypassed = false, .dryWet = 1.0f, .inputGainDb = 0.0f, .outputGainDb = 0.0f, .state = {}},
-        .branches = {}
+        .slot = PluginSlotPreset{.name = "Praccy Amp Sim", .path = "builtin://amp", .type = "BuiltIn", .bundleFileName = "", .classGuid = "", .clapId = "", .latencySamples = 0, .bypassed = false, .dryWet = 1.0f, .inputGainDb = 0.0f, .outputGainDb = 0.0f, .state = {}, .macros = {}},
+        .branches = {},
+        .branchBlend = 0.5f
     });
     s1.nodes.push_back(NodePreset{
         .kind = NodePreset::Kind::Plugin,
-        .slot = PluginSlotPreset{.name = "Praccy Stereo Delay", .path = "builtin://delay", .type = "BuiltIn", .bypassed = false, .dryWet = 0.25f, .inputGainDb = 0.0f, .outputGainDb = 0.0f, .state = {}},
-        .branches = {}
+        .slot = PluginSlotPreset{.name = "Praccy Stereo Delay", .path = "builtin://delay", .type = "BuiltIn", .bundleFileName = "", .classGuid = "", .clapId = "", .latencySamples = 0, .bypassed = false, .dryWet = 0.25f, .inputGainDb = 0.0f, .outputGainDb = 0.0f, .state = {}, .macros = {}},
+        .branches = {},
+        .branchBlend = 0.5f
     });
     m_scenes.push_back(std::move(s1));
 
@@ -56,13 +58,15 @@ void SceneManager::initializeDefaultScenes() {
     s2.name = "2: Crunch";
     s2.nodes.push_back(NodePreset{
         .kind = NodePreset::Kind::Plugin,
-        .slot = PluginSlotPreset{.name = "Praccy Drive", .path = "builtin://drive", .type = "BuiltIn", .bypassed = false, .dryWet = 0.8f, .inputGainDb = 0.0f, .outputGainDb = 0.0f, .state = {}},
-        .branches = {}
+        .slot = PluginSlotPreset{.name = "Praccy Drive", .path = "builtin://drive", .type = "BuiltIn", .bundleFileName = "", .classGuid = "", .clapId = "", .latencySamples = 0, .bypassed = false, .dryWet = 0.8f, .inputGainDb = 0.0f, .outputGainDb = 0.0f, .state = {}, .macros = {}},
+        .branches = {},
+        .branchBlend = 0.5f
     });
     s2.nodes.push_back(NodePreset{
         .kind = NodePreset::Kind::Plugin,
-        .slot = PluginSlotPreset{.name = "Praccy Amp Sim", .path = "builtin://amp", .type = "BuiltIn", .bypassed = false, .dryWet = 1.0f, .inputGainDb = 0.0f, .outputGainDb = 0.0f, .state = {}},
-        .branches = {}
+        .slot = PluginSlotPreset{.name = "Praccy Amp Sim", .path = "builtin://amp", .type = "BuiltIn", .bundleFileName = "", .classGuid = "", .clapId = "", .latencySamples = 0, .bypassed = false, .dryWet = 1.0f, .inputGainDb = 0.0f, .outputGainDb = 0.0f, .state = {}, .macros = {}},
+        .branches = {},
+        .branchBlend = 0.5f
     });
     m_scenes.push_back(std::move(s2));
 
@@ -71,18 +75,21 @@ void SceneManager::initializeDefaultScenes() {
     s3.name = "3: Lead";
     s3.nodes.push_back(NodePreset{
         .kind = NodePreset::Kind::Plugin,
-        .slot = PluginSlotPreset{.name = "Praccy Drive", .path = "builtin://drive", .type = "BuiltIn", .bypassed = false, .dryWet = 1.0f, .inputGainDb = 0.0f, .outputGainDb = 0.0f, .state = {}},
-        .branches = {}
+        .slot = PluginSlotPreset{.name = "Praccy Drive", .path = "builtin://drive", .type = "BuiltIn", .bundleFileName = "", .classGuid = "", .clapId = "", .latencySamples = 0, .bypassed = false, .dryWet = 1.0f, .inputGainDb = 0.0f, .outputGainDb = 0.0f, .state = {}, .macros = {}},
+        .branches = {},
+        .branchBlend = 0.5f
     });
     s3.nodes.push_back(NodePreset{
         .kind = NodePreset::Kind::Plugin,
-        .slot = PluginSlotPreset{.name = "Praccy Amp Sim", .path = "builtin://amp", .type = "BuiltIn", .bypassed = false, .dryWet = 1.0f, .inputGainDb = 0.0f, .outputGainDb = 0.0f, .state = {}},
-        .branches = {}
+        .slot = PluginSlotPreset{.name = "Praccy Amp Sim", .path = "builtin://amp", .type = "BuiltIn", .bundleFileName = "", .classGuid = "", .clapId = "", .latencySamples = 0, .bypassed = false, .dryWet = 1.0f, .inputGainDb = 0.0f, .outputGainDb = 0.0f, .state = {}, .macros = {}},
+        .branches = {},
+        .branchBlend = 0.5f
     });
     s3.nodes.push_back(NodePreset{
         .kind = NodePreset::Kind::Plugin,
-        .slot = PluginSlotPreset{.name = "Praccy Stereo Delay", .path = "builtin://delay", .type = "BuiltIn", .bypassed = false, .dryWet = 0.45f, .inputGainDb = 0.0f, .outputGainDb = 0.0f, .state = {}},
-        .branches = {}
+        .slot = PluginSlotPreset{.name = "Praccy Stereo Delay", .path = "builtin://delay", .type = "BuiltIn", .bundleFileName = "", .classGuid = "", .clapId = "", .latencySamples = 0, .bypassed = false, .dryWet = 0.45f, .inputGainDb = 0.0f, .outputGainDb = 0.0f, .state = {}, .macros = {}},
+        .branches = {},
+        .branchBlend = 0.5f
     });
     m_scenes.push_back(std::move(s3));
 
@@ -96,13 +103,13 @@ void SceneManager::initializeDefaultScenes() {
     bA.name = "Branch A (Dry Amp)";
     bA.gainDb = 0.0f;
     bA.pan = -0.3f;
-    bA.slots.push_back(PluginSlotPreset{.name = "Praccy Amp Sim", .path = "builtin://amp", .type = "BuiltIn", .bypassed = false, .dryWet = 1.0f, .inputGainDb = 0.0f, .outputGainDb = 0.0f, .state = {}});
+    bA.slots.push_back(PluginSlotPreset{.name = "Praccy Amp Sim", .path = "builtin://amp", .type = "BuiltIn", .bundleFileName = "", .classGuid = "", .clapId = "", .latencySamples = 0, .bypassed = false, .dryWet = 1.0f, .inputGainDb = 0.0f, .outputGainDb = 0.0f, .state = {}, .macros = {}});
 
     BranchPreset bB;
     bB.name = "Branch B (Ambient Delay)";
     bB.gainDb = -2.0f;
     bB.pan = 0.3f;
-    bB.slots.push_back(PluginSlotPreset{.name = "Praccy Stereo Delay", .path = "builtin://delay", .type = "BuiltIn", .bypassed = false, .dryWet = 0.9f, .inputGainDb = 0.0f, .outputGainDb = 0.0f, .state = {}});
+    bB.slots.push_back(PluginSlotPreset{.name = "Praccy Stereo Delay", .path = "builtin://delay", .type = "BuiltIn", .bundleFileName = "", .classGuid = "", .clapId = "", .latencySamples = 0, .bypassed = false, .dryWet = 0.9f, .inputGainDb = 0.0f, .outputGainDb = 0.0f, .state = {}, .macros = {}});
 
     splitNode.branches.push_back(std::move(bA));
     splitNode.branches.push_back(std::move(bB));
@@ -141,7 +148,19 @@ std::unique_ptr<audio::PluginSlot> SceneManager::createSlotFromPreset(const Plug
 
     if (!inst) {
         std::cerr << "SceneManager: Could not instantiate plugin for preset: " << p.name << " (" << p.path << ")\n";
-        return nullptr;
+        // Invariant 4: Graceful Degradation for Missing Plugins
+        auto placeholder = std::make_unique<audio::MissingPluginPlaceholder>(
+            p.name.empty() ? "Missing Plugin" : p.name,
+            p.type.empty() ? "VST3" : p.type,
+            p.classGuid,
+            p.clapId
+        );
+        auto slot = std::make_unique<audio::PluginSlot>(std::move(placeholder));
+        slot->setBypassed(p.bypassed);
+        slot->setDryWet(p.dryWet);
+        slot->setInputGainDb(p.inputGainDb);
+        slot->setOutputGainDb(p.outputGainDb);
+        return slot;
     }
 
     if (!p.state.empty()) {

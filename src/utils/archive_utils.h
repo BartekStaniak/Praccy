@@ -3,6 +3,7 @@
 #include <string>
 #include <string_view>
 #include <filesystem>
+#include <vector>
 #include <cstdint>
 
 namespace praccy::utils {
@@ -40,5 +41,25 @@ bool extractZipMemory(const void* data,
                       const std::filesystem::path& destDir,
                       std::string& outError,
                       const ArchiveBombGuards& guards = ArchiveBombGuards{});
+
+class ArchiveUtils {
+public:
+    // In-process Gzip (Ableton Live .adg)
+    static bool gzipDecompress(const std::vector<uint8_t>& gzData, std::string& outXml);
+    static bool gzipCompress(std::string_view xmlData, std::vector<uint8_t>& outGzData);
+
+    // In-process ZIP (DAWproject .dawproject & Updates)
+    static bool unzipFile(const std::filesystem::path& zipPath, const std::filesystem::path& destDir);
+    static bool zipDirectory(const std::filesystem::path& sourceDir, const std::filesystem::path& zipPath);
+
+    // SecOps path traversal & decompression sanitization
+    static bool sanitizeZipEntryPath(const std::string& entryName, std::filesystem::path& outSafePath);
+
+    // Bounds limits (differentiated for XML vs multi-file audio archives)
+    static constexpr size_t kMaxDecompressedXmlBytes   = 30 * 1024 * 1024;  // 30 MB (XML DOM limit)
+    static constexpr size_t kMaxDecompressedTotalBytes = 128 * 1024 * 1024; // 128 MB (Audio IRs/Assets)
+    static constexpr size_t kMaxArchiveEntryCount      = 100;               // 100 files
+    static constexpr size_t kMaxCompressionRatio       = 100;               // 100:1 bomb limit
+};
 
 } // namespace praccy::utils

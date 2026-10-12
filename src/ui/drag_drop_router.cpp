@@ -2,6 +2,8 @@
 #include "../tools/audio_player.h"
 #include "../tools/quick_looper.h"
 #include "../state/scene_manager.h"
+#include "../state/daw_interop/universal_daw_interop_manager.h"
+#include "../plugins/plugin_scanner.h"
 #include "../audio/graph_engine.h"
 
 #include <algorithm>
@@ -32,7 +34,8 @@ DroppedFileType DragDropRouter::classifyFile(const std::filesystem::path& path) 
     }
 
     // Signal chains
-    if (ext == ".pracchaim" || ext == ".chain" || ext == ".rack") {
+    if (ext == ".pracchaim" || ext == ".chain" || ext == ".rack" ||
+        ext == ".rfxchain" || ext == ".adg" || ext == ".dawproject") {
         return DroppedFileType::SignalChain;
     }
 
@@ -130,8 +133,15 @@ bool DragDropRouter::handleDrop(const std::string& path, DropContext& ctx) const
         case DroppedFileType::SignalChain:
             if (ctx.scenes && ctx.graph) {
                 std::filesystem::path p(path);
-                ctx.scenes->loadPresetChain(p.stem().string(), *ctx.graph);
-                return true;
+                auto* dawAdapter = state::UniversalDawInteropManager::instance().findAdapter(p);
+                if (dawAdapter) {
+                    plugins::PluginScanner scanner;
+                    scanner.scanSync();
+                    return state::UniversalDawInteropManager::instance().importAndApply(p, *ctx.graph, *ctx.scenes, scanner);
+                } else {
+                    ctx.scenes->loadPresetChain(p.stem().string(), *ctx.graph);
+                    return true;
+                }
             }
             return false;
         case DroppedFileType::Unknown:
