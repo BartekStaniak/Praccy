@@ -44,6 +44,10 @@ public:
         return m_latencySamples;
     }
 
+    virtual void setLatencySamples(uint32_t samples) noexcept {
+        m_latencySamples = samples;
+    }
+
     [[nodiscard]] virtual bool isFaulted() const noexcept {
         return false;
     }

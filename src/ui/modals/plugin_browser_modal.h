@@ -6,13 +6,21 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <cstdint>
 
 namespace praccy::ui {
+
+enum class PaletteScope : uint8_t {
+    All = 0,
+    Favorites = 1,
+    Recents = 2
+};
 
 struct PaletteItem {
     const plugins::PluginDescriptor* descriptor{nullptr};
     int score{0};
     bool isRecent{false};
+    bool isFavorite{false};
 };
 
 class PluginBrowserModal {
@@ -38,6 +46,17 @@ public:
     /// Navigate selection by delta (+1 down, -1 up)
     void navigateSelection(int delta);
 
+    /// Scope navigation
+    void setScope(PaletteScope scope);
+    [[nodiscard]] PaletteScope scope() const noexcept { return m_currentScope; }
+    void cycleScope();
+
+    /// Favorites management
+    void toggleFavorite(const std::string& pluginName);
+    void toggleFavoriteForSelected();
+    [[nodiscard]] bool isFavorite(const std::string& pluginName) const;
+    [[nodiscard]] const std::vector<std::string>& favoritePlugins() const noexcept { return m_favoritePlugins; }
+
     /// Callback invoked when a plugin is instantiated and inserted
     void setOnPluginInserted(std::function<void(const std::string&)> callback) {
         m_onPluginInserted = std::move(callback);
@@ -47,6 +66,7 @@ private:
     void updateFilteredList();
     void instantiateSelectedPlugin();
     void recordPluginUsage(const plugins::PluginDescriptor& desc);
+    void renderPluginRow(int index, float rowH);
 
     static int SearchInputCallback(ImGuiInputTextCallbackData* data);
 
@@ -57,7 +77,9 @@ private:
     bool m_isOpen{false};
     bool m_needsFocus{false};
     bool m_scrollSelectionIntoView{false};
+    bool m_tabHandledThisFrame{false};
 
+    PaletteScope m_currentScope{PaletteScope::All};
     char m_searchQuery[128]{0};
     char m_lastSearchQuery[128]{0};
     int m_selectedIndex{0};
@@ -67,6 +89,7 @@ private:
     int m_targetBlockIndex{-1};
     int m_targetBranchIndex{-1};
 
+    std::vector<std::string> m_favoritePlugins;
     std::vector<std::string> m_recentPlugins;
 };
 

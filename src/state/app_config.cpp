@@ -66,6 +66,13 @@ bool AppConfig::load(const std::string& customPath) {
             favoritePlugins.push_back(val);
         } else if (key == "recent_plugin") {
             recentPlugins.push_back(val);
+        } else if (key == "retroactive_buffer_minutes") {
+            uint32_t valM = utils::parseInteger<uint32_t>(val, 2);
+            if (valM == 1 || valM == 2 || valM == 5 || valM == 10) {
+                retroactiveBufferMinutes = valM;
+            } else {
+                retroactiveBufferMinutes = 2;
+            }
         } else if (key == "window_x") {
             windowX = utils::parseInteger<int>(val, 100);
         } else if (key == "window_y") {
@@ -93,6 +100,7 @@ bool AppConfig::save(const std::string& customPath) const {
     file << "master_volume_db=" << masterVolumeDb << "\n";
     file << "metronome_bpm=" << metronomeBpm << "\n";
     file << "check_beta_updates=" << (checkBetaUpdates ? "1" : "0") << "\n";
+    file << "retroactive_buffer_minutes=" << retroactiveBufferMinutes << "\n";
     file << "window_x=" << windowX << "\n";
     file << "window_y=" << windowY << "\n";
     file << "window_w=" << windowW << "\n";

@@ -27,6 +27,8 @@ struct AppConfig {
     std::vector<std::string> favoritePlugins;
     std::vector<std::string> recentPlugins;
 
+    uint32_t retroactiveBufferMinutes{2};
+
     // Window geometry persistence
     int windowX{100};
     int windowY{100};

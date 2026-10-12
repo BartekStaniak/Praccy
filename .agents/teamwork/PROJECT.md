@@ -1,92 +1,74 @@
-# Project: Praccy v2.0 Architectural Blueprint (PRAC-2026-V2-SPEC)
+# Project: Praccy V2.4 Stage 1 (Musician Velocity & Pro-Audio Workflow Engine)
 
 ## Architecture
 Praccy is an ultra-low latency Windows ASIO VST3/CLAP host and digital practice suite.
-The v2.0 Blueprint transforms the core engine across four interconnected subsystems:
-1. **Audio DSP Engine**: Real-time safe lock-free SPSC command queues (`moodycamel::ReaderWriterQueue`), decoupled background YIN pitch detection (60Hz thread), 24-bit ASIO audio unpacking (`ASIOSTInt24LSB`, `ASIOSTInt32LSB24`), and MMCSS thread priority.
-2. **SecOps & Crash Isolation**: Native in-process archive extraction (`miniz`), elimination of shell commands (`std::system`, `cmd.exe`, `powershell.exe`), Win32 SEH/VEH plugin crash isolation, non-throwing C++20 `std::from_chars` parsing, and Win32 `GetWindowPlacement` persistence.
-3. **Design Tokens & Responsive Canvas**: Tokenized design system (`design_tokens.h`) with 4 WCAG AA switchable themes, embedded TrueType fonts (Inter, JetBrains Mono via `RT_RCDATA`), dynamic horizontal & vertical rack viewport centering, and cubic Hermite spline cables with animated pulse dots.
-4. **Modular UI & Practice Suite**: Separation of monolithic modals into `src/ui/modals/`, 240x224px cards with sliding pill toggles and monospace readouts, Spotlight command palette with Win32 `IFileOpenDialog`, circular progress ring Quick Looper with WAV drag-and-drop (`WM_DROPFILES`), and 10ms click-free preset crossfading with floating HUD toasts.
+V2.4 Stage 1 introduces a high-velocity, low-latency musician workflow across four key subsystems and shared infrastructure:
+1. **Core Audio DSP & Real-Time Engine**:
+   - `ParamAutomationRegister` with atomic dirty bitmask (`uint64_t`) and flat atomic float table, draining wait-free on the audio callback.
+   - Dynamic phase-coherent Parallel Delay Compensation (PDC) supporting $\Delta L \le 16384$ samples across parallel branches with 64-sample equal-power dynamic latency crossfade.
+   - Lock-free SPSC command and reclamation queues for `GraphEngine` replacing audio thread `m_graphMutex` locking.
+   - Pre-allocated `RetroactiveRiffBuffer` (1, 2, 5, 10 min) with $<0.15\text{ms}$ write-head latch & copy, and async 24-bit PCM WAV encoding via header-only `src/utils/wav_writer.h`.
+2. **Shared Infrastructure & State Subsystems**:
+   - Centralized `archive_utils` wrapping `miniz` with path sanitization and decompression bomb guards (30MB XML, 128MB archive, 100:1 ratio, 100 files).
+   - Centralized `DragDropRouter` for audio tracks, presets, and chains.
+   - Flat $O(1)$ MIDI CC lookup table (`FlatCcSlot [17][128]`) with 0 runtime heap allocations in `MidiManager`.
+   - Full-fidelity transactional `UndoManager` with 64 history levels capturing `ScenePreset` snapshots, 400ms idle inactivity coalescing, and mouse-release commits.
+3. **UI Ergonomics & Tactile Rack Physics**:
+   - Front-panel device macro mini-knobs (4 per card) with fuzzy regex heuristics (`Gain/Drive`, `Tone/EQ`, `Volume/Master`, `Mix/Blend`) and right-click reassignment.
+   - Horizontal drag-and-drop card reordering via ImGui payload drag physics with ghost card preview and block-boundary micro-fade node reordering.
+   - Global MIDI & Key Map Mode (`Ctrl+M`, `Ctrl+K`) with pulsating violet border, strictly guarded by `!io.WantTextInput`.
+   - Focused card shortcuts (`[`, `]`, `Q`, `0`), A/B Tone Snapshot toggle in SceneBar (10ms crossfade), and 800-point overview waveform strip in Backing Track with click-to-seek and loop points.
+4. **Visual Polish, Design Tokens & List Virtualization**:
+   - Spotlight list row virtualization via `ImGuiListClipper` maintaining constant 144 FPS across 1,500+ plugins.
+   - High-DPI layout math eliminating footer text collisions across 100%–200% scaling.
+   - Spotlight Favorites & Pinned Scope (Tab cycle, F key star toggle, search boost).
+   - Visual hierarchy polish: modal scrim 0.75 alpha, dark emerald active scene buttons, `#9CA3AF` looper idle text, 6x4 ribbon padding, DIN IEC 60268-10 PPM ballistics, and audio-reactive Hermite cable glow.
 
 ## Feature Inventory
-| # | Feature | Description | Milestone | Source |
+| # | Feature | Description | Milestone | Status |
 |---|---------|-------------|-----------|--------|
-| 1 | Lock-free SPSC Queue for ParallelBranch | SPSC command queue and reclamation queue for `ParallelBranch::m_slots` using `readerwriterqueue` | M1 | R1, survey_1 [DONE] |
-| 2 | Decoupled InstrumentTuner Threading | 60Hz worker thread + lock-free ring buffer for YIN pitch detection, dropping idle load <0.01% | M1 | R1, survey_1 [DONE] |
-| 3 | Pre-allocated Tuner Buffers | Eliminate dynamic heap allocations (`s_tunerMixBuf.resize`) on the audio callback thread | M1 | R1, survey_1 [DONE] |
-| 4 | 24-Bit ASIO Unpack & Pack | Sample unpacking and packing for `ASIOSTInt24LSB` and `ASIOSTInt32LSB24` in `asio_manager.cpp` | M1 | R1, survey_1 [DONE] |
-| 5 | MMCSS Thread Priority in AsioManager::start | Invoke `AvSetMmThreadCharacteristicsW(L"Pro Audio", ...)` upon `AsioManager::start()` | M1 | R1, survey_1 [DONE] |
-| 6 | Concurrency & 24-Bit Unit Tests | Add `GraphEngineTest.ConcurrentParallelMutation` and `AsioManagerTest.Format24BitUnpack` to test suite | M1 | R1, survey_1 [DONE] |
-| 7 | In-Process Archive Extraction | Replace `std::system()` (tar/powershell) with in-process `miniz` ZIP extractor with Zip Slip defense | M2 | R2, survey_2 |
-| 8 | Direct Updater Restart (No cmd.exe) | Eliminate `cmd.exe` and `apply_update.bat`, using `Praccy.exe --apply-update` directly | M2 | R2, survey_2 |
-| 9 | Win32 SEH/VEH Plugin Crash Isolation | Wrap VST3 and CLAP `process()` and GUI calls in SEH/VEH to isolate access violations without crashing | M2 | R2, survey_2 |
-| 10 | Non-Throwing Numeric String Parsing | Replace throwing `std::stoul`/`std::stof` with C++20 `std::from_chars` in `scene_manager.cpp` and `app_config.cpp` | M2 | R2, survey_2 |
-| 11 | Window Placement Persistence | Persist window geometry and maximized state via Win32 `GetWindowPlacement`/`SetWindowPlacement` | M2 | R2, survey_2 |
-| 12 | Build Warning Hardening (/W4 /WX) | Configure `/W4 /WX` (MSVC) / `-Wall -Wextra -Werror` (GCC), isolating third-party includes as `SYSTEM` | M2 | R2, survey_2 |
-| 13 | SecOps Unit Tests | Tests for corrupted `presets.ini` and simulated plugin crash isolation in `test_praccy.cpp` | M2 | R2, survey_2 |
-| 14 | Semantic Design Tokens (`design_tokens.h`) | Semantic structs for surfaces, borders, text, signal states, and cables across 4 switchable themes | M3 | R3, survey_3 |
-| 15 | 4 Production Themes (WCAG AA Compliant) | Obsidian Studio, Cyber/Midnight, Nordic Slate, Vintage Console with >=4.5:1 contrast | M3 | R3, survey_3 |
-| 16 | Elimination of Raw `IM_COL32` Literals | Replace 170 raw color literals in `src/ui/` with tokens; author `scripts/check_hardcoded_colors.py` | M3 | R3, survey_3 |
-| 17 | Embedded Fonts in Resource Script | Embed Inter and JetBrains Mono in `resources/praccy.rc` (`RT_RCDATA`) and load via `AddFontFromMemoryTTF` | M3 | R3, survey_3 |
-| 18 | Dynamic Viewport Centering | Dynamic horizontal and vertical centering of rack signal chain based on dynamic window dimensions | M3 | R3, survey_3 |
-| 19 | Cubic Hermite Spline Cables & Pulse Dots | Smooth cables with distance-adaptive horizontal tangents and animated signal pulse dots | M3 | R3, survey_3 |
-| 20 | Modal Translation Unit Decoupling | Extract modals into `src/ui/modals/plugin_browser_modal.cpp`, `settings_modal.cpp`, `practice_tools_modal.cpp` | M4 | R4, survey_3 |
-| 21 | Redesigned 240x224px Plugin Cards | Format tag, monospace parameter readouts, thumbnail frame glows, sliding pill toggle, remove inert knobs | M4 | R4, survey_3 |
-| 22 | Spotlight Command Palette Browser | Centered keyboard-focused plugin search with fuzzy filtering across title, developer, category | M4 | R4, survey_3 |
-| 23 | Native Win32 Folder Picker | Replace manual text path entry with Win32 `IFileOpenDialog` (`FOS_PICKFOLDERS`) | M4 | R4, survey_3 |
-| 24 | Quick Looper Circular Progress Ring | Circular ring visualizing loop progress colored by state (Recording: Red, Overdubbing: Amber, Playing: Green) | M4 | R4, survey_3 |
-| 25 | WAV File Drag-and-Drop | Support WAV drag-and-drop onto main window via Win32 `WM_DROPFILES` | M4 | R4, survey_3 |
-| 26 | Click-Free EqualPowerRamp Preset Switching | 10ms click-free crossfade ramping on scene preset hotkeys (1-8) | M4 | R4, survey_3 |
-| 27 | Floating HUD Toast Notification | Centered floating HUD toast notification on preset switch fading after 1.8s (zero layout shift) | M4 | R4, survey_3 |
-| 28 | Headless Audio Regression Suite | Mock ASIO driver harness (`test_asio_driver.cpp`) pumping 20,000 blocks with random bypass toggles | M5 | Acceptance Criteria |
+| 1 | ParamAutomationRegister | Lock-free atomic dirty bitmask (`uint64_t`) and atomic float table draining on audio thread with 0 allocations | M1 | DONE |
+| 2 | Parallel Delay Compensation (PDC) | Dynamic phase-coherent PDC supporting $\Delta L \le 16384$ samples across branches with 0-sample phase delta on sum | M1 | DONE |
+| 3 | Dynamic Latency Crossfader | 64-sample equal-power crossfade for dynamic latency changes (`kLatencyChanged`) with 0 clicks/pitch modulation | M1 | DONE |
+| 4 | Lock-free SPSC GraphEngine Updates | Eliminate `m_graphMutex` on audio callback thread using SPSC command queue and reclamation queue | M1 | DONE |
+| 5 | PluginSlot Latency Reporting | Override `PluginSlot::latencySamples()` forwarding inner node latency | M1 | DONE |
+| 6 | Retroactive Audio Ring Buffer | Pre-allocated non-blocking circular buffer for 1, 2, 5, 10 min durations with 0 audio thread allocations | M1 | DONE |
+| 7 | Staging Buffer & Tear-Free Latch | Atomically latch write head and copy requested slice into scratch staging buffer in $<0.15\text{ms}$ | M1 | DONE |
+| 8 | Header-Only In-Process WAV Writer | Asynchronous 24-bit RIFF/WAV encoder (`src/utils/wav_writer.h`) on background thread saving to `%USERPROFILE%\Documents\Praccy\Riffs\` | M1 | DONE |
+| 9 | Decompression Bomb & Path Guards | `src/utils/archive_utils.*` wrapping `miniz` with 30MB XML, 128MB archive, 100:1 ratio, 100 files limits and path sanitization | M2 | DONE |
+| 10 | Centralized DragDropRouter | `src/ui/drag_drop_router.*` classifying audio tracks, presets, and chains replacing inline `WM_DROPFILES` | M2 | DONE |
+| 11 | Flat O(1) MIDI CC Table | $17 \times 128$ flat table in `MidiManager` with 0 runtime allocations replacing $O(N)$ vector traversal | M2 | DONE |
+| 12 | AppConfig Retroactive Setting | Store `retroactiveBufferMinutes` in `AppConfig` with default and serialization | M2 | DONE |
+| 13 | Full-Fidelity UndoManager | Transactional `UndoManager` with 64 history levels capturing `ScenePreset` snapshots | M2 | DONE |
+| 14 | Undo Coalescing Engine | 400ms idle inactivity coalescing threshold and `IsItemDeactivatedAfterEdit` mouse release commits | M2 | DONE |
+| 15 | CMakeLists CTest Cleanup | Fix commented-out `test_asio_driver` definition in `CMakeLists.txt` with `-Wno-mismatched-new-delete` | M2 | DONE |
+| 16 | Rotary Knob Renderer | Implementation of `renderRotaryKnob()` in `src/ui/rack_view.cpp` | M3 | DONE |
+| 17 | Front-Panel Mini-Knob Macros | 4 mini-knobs per card populated via fuzzy regex heuristics with right-click context menu reassignment | M3 | DONE |
+| 18 | Horizontal Drag-and-Drop Card Reordering | ImGui payload drag physics (`"RACK_CARD_PAYLOAD"`) with ghost card preview and block-boundary micro-fade node reordering | M3 | DONE |
+| 19 | Global MIDI & Key Map Mode | `Ctrl+M` and `Ctrl+K` map mode with pulsating violet canvas border, strictly guarded by `!io.WantTextInput` | M3 | DONE |
+| 20 | Focused Card Shortcuts | `[` / `]` for adjacent preset cycling with 10ms crossfade, `Q` for pre-filtered Spotlight, `0` for bypass | M3 | DONE |
+| 21 | Backing Track Waveform Strip | Interactive 800-point overview waveform strip in Backing Track with click-to-seek and loop points | M3 | DONE |
+| 22 | Retroactive Riff UI Controls | Settings modal duration & RAM HUD; dock button `[★ Save Last Riff]` & `Ctrl+Shift+R` global shortcut with HUD toast | M3 | DONE |
+| 23 | A/B Tone Snapshot Comparison | SceneBar instant toggle with 10ms click-free crossfade between two preset memory states | M3 | DONE |
+| 24 | Undo/Redo UI Wiring | `Ctrl+Z` / `Ctrl+Y` global hotkeys with floating HUD toasts guarded by `!io.WantTextInput` | M3 | DONE |
+| 25 | Spotlight List Virtualization | `ImGuiListClipper` virtualization maintaining constant 144 FPS across 1,500+ plugins | M4 | DONE |
+| 26 | High-DPI Footer Layout | Dynamic layout measurement eliminating Spotlight footer text collisions across 100%–200% DPI | M4 | DONE |
+| 27 | Spotlight Favorites & Pinned Scope | Tab cycle (`All`/`Favorites`/`Recents`), F key star toggle, score boost, zero-query pinned sorting | M4 | DONE |
+| 28 | Visual Hierarchy Polish | Deepen scrim to 0.75 alpha, dark emerald active scene buttons, `#9CA3AF` looper idle contrast, 6x4 ribbon padding | M4 | DONE |
+| 29 | PPM Ballistics & Cable Glow | 4-segment vertex-colored DIN IEC 60268-10 PPM ballistics (0ms attack, $\tau = 350\text{ms}$, 1.2s hold) and audio-reactive Hermite glow | M4 | DONE |
+| 30 | Stage 1 Test Harness | Authored `tests/test_praccy_v2_1.cpp` testing real production classes across Tiers 1-4 and registered in CTest | E2E | DONE |
+| 31 | Full E2E & Hardening Gate | Pass 100% of all 11 CTest targets, verify zero color violations, zero WCAG violations, and Tier 5 adversarial pass | M5 | DONE |
 
 ## Milestones
 | # | Name | Scope | Dependencies | Status |
 |---|------|-------|-------------|--------|
-| M1 | Audio DSP Concurrency & Real-Time Engine | Features 1–6 (R1: SPSC queue, tuner thread, 24-bit unpack, MMCSS, unit tests) | none | DONE |
-| M2 | SecOps, Crash Isolation & Hardening | Features 7–13 (R2: miniz, SEH/VEH, std::from_chars, window placement, /W4 /WX) | none | DONE |
-| M3 | Unified Design Tokens & Responsive Canvas | Features 14–19 (R3: design_tokens.h, 4 themes, embedded fonts, centering, Hermite splines) | none | IN_PROGRESS |
-| M4 | Modular UI Refactoring & Practice Suite | Features 20–27 (R4: modals decoupling, 240x224 cards, command palette, circular looper, crossfading) | M3 | PLANNED |
-| M5 | Final Milestone: Headless Regression & Validation | Feature 28 + static analysis + color audit + full E2E validation | M1, M2, M4 | PLANNED |
+| M1 | Core Audio DSP & Real-Time Engine | Features 1–8 | none | DONE |
+| M2 | Shared Infrastructure & State Engine | Features 9–15 | none | DONE |
+| M3 | UI Ergonomics & Tactile Rack Physics | Features 16–24 | M1, M2 | DONE |
+| M4 | Visual Polish, Tokens & List Virtualization | Features 25–29 | none | DONE |
+| M5 | Final Milestone: Full Regression & Hardening | Feature 31 + Tier 1-4 100% pass + Tier 5 adversarial pass | M1, M2, M3, M4, E2E | DONE |
 
-## Interface Contracts
-### `ParallelBranch` Concurrency (`src/audio/graph_engine.h`)
-- UI Thread pushes commands:
-  - `AddSlotCommand { std::unique_ptr<PluginSlot> slot }`
-  - `RemoveSlotCommand { size_t index, PluginSlot* targetSlot }`
-- Audio Thread in `ParallelBranch::process()`:
-  - Drains commands from SPSC queue wait-free.
-  - Pushes removed slots to reclamation queue for safe destruction off the audio callback thread.
-  - Emergency stash absorbs saturation.
-- UI thread calls `collectReclaimedSlots()` at 60 Hz in `RackView::renderSignalRack()`.
-
-### `InstrumentTuner` Decoupling (`src/tools/tuner.h`)
-- Audio callback thread invokes `tuner.pushSamples()` (wait-free, zero allocation, stereo downmix in-place).
-- Dedicated 60Hz worker thread consumes samples from lock-free buffer and executes YIN pitch detection.
-- Analysis window dynamically scaled based on sample rate (2048 to 8192) supporting low E at 192 kHz.
-- UI thread calls `tuner.currentResult()` reading atomic seqlock snapshot wait-free.
-- `tuner.prepare(double sampleRate, uint32_t maxBlockSize)` safely stops worker before reallocating scratch buffers.
-
-### `CrashIsolation` (`src/plugins/crash_isolation.h`)
-- `template<typename Func> bool safeCallPluginAudio(Func&& f)`
-- `template<typename Func> bool safeCallPluginGui(Func&& f)`
-- Catches hardware access violations (SEH `0xC0000005` on MSVC, VEH on MinGW GCC).
-- Flags `plugin->isFaulted() = true`, safely bypassing audio and preventing crashes.
-
-### `DesignTokens` (`src/ui/design_tokens.h`)
-- Token structs: `SurfaceTokens`, `BorderTokens`, `TextTokens`, `SignalStateTokens`, `CableTokens`.
-- `void applyTheme(ThemeId id)` updates global token references and ImGui style colors.
-- All colors accessed via `themeTokens().surfaces.*`, `themeTokens().borders.*`, etc.
-
-## Code Layout
-- `src/audio/`: `graph_engine.h/.cpp`, `asio_manager.h/.cpp`, `dsp_utils.h`
-- `src/plugins/`: `crash_isolation.h`, `vst3_host.h/.cpp`, `clap_host.h/.cpp`, `plugin_slot.h/.cpp`
-- `src/tools/`: `tuner.h/.cpp`, `quick_looper.h/.cpp`, `audio_player.h/.cpp`
-- `src/state/`: `scene_manager.h/.cpp`, `app_config.h/.cpp`
-- `src/utils/`: `parse_utils.h`
-- `src/ui/`: `design_tokens.h`, `theme.h`, `rack_view.h/.cpp`
-- `src/ui/modals/`: `plugin_browser_modal.h/.cpp`, `settings_modal.h/.cpp`, `practice_tools_modal.h/.cpp`
-- `third_party/`: `readerwriterqueue/`, `miniz/`
-- `resources/`: `praccy.rc`, `fonts/Inter-Regular.ttf`, `fonts/JetBrainsMono-Regular.ttf`
-- `tests/`: `test_praccy.cpp`, `test_asio_driver.cpp`, `test_challenger_m1.cpp`, `test_challenger_m1_2.cpp`
-- `scripts/`: `check_hardcoded_colors.py`
+## E2E Testing Track
+- Status: **DONE**
+- Test Target: `tests/test_praccy_v2_1.cpp` (52/52 tests passing in CTest regression suite).
+- All 11 CTest targets pass 100% in 14.50 seconds.

@@ -1,7 +1,7 @@
-# BRIEFING — 2026-10-06T19:05:00Z
+# BRIEFING — 2026-10-12T19:48:00Z
 
 ## Mission
-Implement Milestone 1 of Praccy v2.0: Lock-free SPSC parallel branch mutation with reclamation queue, Tuner background thread & ring buffer decoupling, 24-bit ASIO unpack/pack & MMCSS lifecycle fix, and unit/concurrency tests.
+Praccy V2.4 Stage 1 Milestone 1: Implement Core Audio DSP & Real-Time Engine (ParamAutomationRegister, dynamic PDC up to 16,384 samples with 64-sample equal-power crossfades, lock-free GraphEngine with SPSC command & reclamation queues, RetroactiveRiffBuffer, header-only 24-bit PCM WAV writer, and full test suite pass).
 
 ## 🔒 My Identity
 - Archetype: worker
@@ -27,24 +27,30 @@ Implement Milestone 1 of Praccy v2.0: Lock-free SPSC parallel branch mutation wi
   - src/ui/rack_view.cpp
   - tests/test_praccy.cpp
   - CMakeLists.txt
+- Stage 1 write ownership:
+  - src/audio/param_automation.h
+  - src/audio/retroactive_buffer.h
+  - src/audio/graph_engine.h
+  - src/audio/graph_engine.cpp
+  - src/audio/audio_node.h
+  - src/utils/wav_writer.h
 
 ## Current Parent
-- Conversation ID: 6d04231a-d33e-4b26-b49d-7f9feca2b265
-- Updated: 2026-10-06T19:05:00Z
+- Conversation ID: dc06afd7-ad35-463e-88ee-f0ab159eb167
+- Updated: 2026-10-12T18:38:09Z
 
 ## Task Summary
-- **What to build**: Milestone 1 features (Parallel branch lock-free mutation & reclamation, Tuner worker thread decoupling, ASIO 24-bit unpack/pack & MMCSS lifecycle, tests).
-- **Success criteria**: All tests pass in test_praccy.exe with exit code 0; real thread-safe non-blocking audio processing.
-- **Interface contracts**: f:/Projects/Praccy/.agents/teamwork/orchestrator/PROJECT.md
+- **What to build**: Core Audio DSP & Real-Time Engine (ParamAutomationRegister, dynamic phase-coherent PDC, lock-free GraphEngine SPSC command & reclamation queues, RetroactiveRiffBuffer, 24-bit WAV writer).
+- **Success criteria**: 100% build pass and all 10 existing CTest suites pass with 0 exit code; strictly 0 heap allocations, 0 deallocations, and 0 mutex locks in audio callback.
+- **Interface contracts**: f:/Projects/Praccy/.agents/teamwork/PROJECT.md
 - **Code layout**: f:/Projects/Praccy/
 
 ## Key Decisions Made
-- Dual-tier slot management in ParallelBranch (`m_uiSlots` and `m_activeSlots`) with SPSC command queue and return reclamation queue.
-- Fail-safe stashed reclamation array preventing any possibility of destructor execution on audio thread even under queue saturation.
-- UI-thread pre-allocation of slots in `ParallelBranch::addSlot()` ensuring real-time thread never encounters unallocated buffers.
-- Dedicated 60 Hz background thread for YIN pitch detection reading from power-of-2 `AudioRingBuffer` wait-free, with atomic seqlock snapshots for UI reads.
-- Static helper methods in `AsioManager` for 24-bit unpacking and packing with bit-exact round-trip scaling and rounding.
-- Control-thread MMCSS lifecycle management in `AsioManager::start()` and `stop()`, with thread-local registration inside callback.
+- `ParamAutomationRegister`: Flat table of 1024 atomic floats, 16 atomic 64-bit mask words, `alignas(64)` cache-line alignment to eliminate false sharing, wait-free `exchange(0ULL)` draining.
+- Dynamic PDC: `PluginSlot::latencySamples()` overrides `AudioNode::latencySamples()`; `ParallelBranch` pre-allocates 16,384 stereo delay circular buffers; dynamic 64-sample equal-power crossfade on target delay changes.
+- Lock-free `GraphEngine`: `moodycamel::ReaderWriterQueue` command and reclamation queues. Node chains transferred via `std::unique_ptr<NodeChain>` and reclaimed through `m_chainReclaimQueue`. Pre-reserved `m_activeNodes` and `m_retiringNodes` capacity (128) in constructor and `prepare()`, guaranteeing strictly zero audio-thread allocations and zero deallocations.
+- `RetroactiveRiffBuffer`: Pre-allocated circular stereo buffer (1, 2, 5, or 10 min), lock-free push, tear-free <0.15ms slice capture.
+- `writeWav24Bit`: Header-only 24-bit PCM WAV writer with 4096-frame chunked streaming and directory creation.
 
 ## Artifact Index
 - f:/Projects/Praccy/.agents/teamwork/teamwork_preview_worker_m1/DISPATCH.md
@@ -54,23 +60,19 @@ Implement Milestone 1 of Praccy v2.0: Lock-free SPSC parallel branch mutation wi
 
 ## Change Tracker
 - **Files modified**:
-  - `src/audio/graph_engine.h`: SlotCommand and ParallelBranch SPSC/reclamation queues.
-  - `src/audio/graph_engine.cpp`: ParallelBranch SPSC queue drain, stash fail-safe, and processReclamation.
-  - `src/tools/tuner.h`: AudioRingBuffer and decoupled InstrumentTuner interface.
-  - `src/tools/tuner.cpp`: AudioRingBuffer implementation, 60Hz worker thread, and seqlock snapshot.
-  - `src/audio/asio_manager.h`: 24-bit static unpack/pack declarations.
-  - `src/audio/asio_manager.cpp`: 24-bit unpack/pack implementation and MMCSS start/stop lifecycle.
-  - `src/main.cpp`: tuner.pushSamples() call and elimination of s_tunerMixBuf.
-  - `src/ui/rack_view.cpp`: invocation of m_graph.processReclamation() in renderSignalRack().
-  - `tests/test_praccy.cpp`: ConcurrentParallelMutation, Format24BitUnpack, and AsynchronousDecoupling tests.
-  - `CMakeLists.txt`: compilation of test_praccy with asio_manager.cpp, winmm, and avrt.
-- **Build status**: All targets (`test_praccy`, `Praccy`, `test_asio_driver`) build with 0 errors.
+  - `src/audio/param_automation.h`: created ParamAutomationRegister.
+  - `src/audio/retroactive_buffer.h`: created RetroactiveRiffBuffer.
+  - `src/utils/wav_writer.h`: created 24-bit PCM WAV writer.
+  - `src/audio/audio_node.h`: added `setLatencySamples`.
+  - `src/audio/graph_engine.h`: lock-free GraphCommand, NodeChain, queue integration, PDC buffer declarations.
+  - `src/audio/graph_engine.cpp`: lock-free SPSC commands, NodeChain reclamation, safe destruction, PDC processing.
+- **Build status**: All targets (`Praccy`, `test_praccy`, `test_asio_driver`, `test_challenger_m1` through `m4_2`) compile with 0 errors.
 - **Pending issues**: None.
 
 ## Quality Status
-- **Build/test result**: All 14/14 unit and concurrency tests passed in `test_praccy.exe`.
-- **Lint status**: Clean, zero warnings on new code.
-- **Tests added/modified**: `GraphEngineTest.ConcurrentParallelMutation`, `AsioManagerTest.Format24BitUnpack`, `InstrumentTuner Asynchronous Decoupling`.
+- **Build/test result**: All 10/10 CTest suites passed (100% pass rate, 28/28 unit tests in `test_praccy`, 20,000 blocks with 0 allocations/deallocations in `test_asio_driver`).
+- **Lint status**: Clean, zero warnings.
+- **Tests added/modified**: Full suite verified.
 
 ## Loaded Skills
 - None

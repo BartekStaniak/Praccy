@@ -156,11 +156,9 @@ std::unique_ptr<audio::PluginSlot> SceneManager::createSlotFromPreset(const Plug
     return slot;
 }
 
-void SceneManager::captureCurrentScene(int sceneIndex, audio::GraphEngine& graph) {
-    if (sceneIndex < 0 || sceneIndex >= static_cast<int>(m_scenes.size())) return;
-
-    auto& scene = m_scenes[sceneIndex];
-    scene.nodes.clear();
+ScenePreset SceneManager::captureGraphSnapshot(audio::GraphEngine& graph, const std::string& name) {
+    ScenePreset scene;
+    scene.name = name;
 
     const size_t numNodes = graph.numNodes();
     for (size_t i = 0; i < numNodes; ++i) {
@@ -240,18 +238,11 @@ void SceneManager::captureCurrentScene(int sceneIndex, audio::GraphEngine& graph
             }
         }
     }
-
-    m_statusMessage = "Preset saved: " + scene.name;
-    saveToFile();
+    return scene;
 }
 
-bool SceneManager::applyScene(int sceneIndex, audio::GraphEngine& graph) {
-    if (sceneIndex < 0 || sceneIndex >= static_cast<int>(m_scenes.size())) return false;
-
+bool SceneManager::applyGraphSnapshot(const ScenePreset& scene, audio::GraphEngine& graph) {
     plugins::PluginWindowManager::instance().closeAllWindows();
-
-    const auto& scene = m_scenes[sceneIndex];
-    m_activeSceneIndex = sceneIndex;
 
     std::vector<std::unique_ptr<audio::AudioNode>> newNodes;
 
@@ -287,100 +278,35 @@ bool SceneManager::applyScene(int sceneIndex, audio::GraphEngine& graph) {
     }
 
     graph.crossfadeToNodes(std::move(newNodes));
-    m_statusMessage = "Loaded preset: " + scene.name;
     return true;
+}
+
+void SceneManager::captureCurrentScene(int sceneIndex, audio::GraphEngine& graph) {
+    if (sceneIndex < 0 || sceneIndex >= static_cast<int>(m_scenes.size())) return;
+
+    std::string name = m_scenes[sceneIndex].name;
+    m_scenes[sceneIndex] = captureGraphSnapshot(graph, name);
+    m_statusMessage = "Preset saved: " + name;
+    saveToFile();
+}
+
+bool SceneManager::applyScene(int sceneIndex, audio::GraphEngine& graph) {
+    if (sceneIndex < 0 || sceneIndex >= static_cast<int>(m_scenes.size())) return false;
+
+    m_activeSceneIndex = sceneIndex;
+    bool ok = applyGraphSnapshot(m_scenes[sceneIndex], graph);
+    m_statusMessage = "Loaded preset: " + m_scenes[sceneIndex].name;
+    return ok;
 }
 
 void SceneManager::savePresetChain(const std::string& name, audio::GraphEngine& graph) {
     if (name.empty()) return;
 
-    // Check if updating existing user preset or creating new
     auto it = std::find_if(m_userPresets.begin(), m_userPresets.end(), [&](const ScenePreset& p) {
         return p.name == name;
     });
 
-    ScenePreset newPreset;
-    newPreset.name = name;
-
-    const size_t numNodes = graph.numNodes();
-    for (size_t i = 0; i < numNodes; ++i) {
-        auto* node = graph.getNode(i);
-        if (!node) continue;
-
-        if (node->type() == audio::NodeType::Plugin) {
-            auto* slot = dynamic_cast<audio::PluginSlot*>(node);
-            if (slot) {
-                NodePreset np;
-                np.kind = NodePreset::Kind::Plugin;
-                np.slot.name = slot->name();
-                np.slot.bypassed = slot->isBypassed();
-                np.slot.dryWet = slot->dryWet();
-                np.slot.inputGainDb = slot->inputGainDb();
-                np.slot.outputGainDb = slot->outputGainDb();
-
-                auto* inner = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
-                if (inner) {
-                    np.slot.path = inner->path();
-                    if (dynamic_cast<plugins::Vst3PluginInstance*>(inner)) {
-                        np.slot.type = "VST3";
-                    } else if (dynamic_cast<plugins::ClapPluginInstance*>(inner)) {
-                        np.slot.type = "CLAP";
-                    } else {
-                        np.slot.type = "BuiltIn";
-                    }
-                    np.slot.state = inner->saveState();
-                }
-                newPreset.nodes.push_back(std::move(np));
-            }
-        } else if (node->type() == audio::NodeType::ParallelSplitMerge) {
-            auto* block = dynamic_cast<audio::ParallelSplitMergeBlock*>(node);
-            if (block) {
-                NodePreset np;
-                np.kind = NodePreset::Kind::ParallelBlock;
-                for (size_t b = 0; b < block->numBranches(); ++b) {
-                    auto* branch = block->getBranch(b);
-                    if (!branch) continue;
-
-                    BranchPreset bp;
-                    bp.name = branch->name();
-                    bp.gainDb = branch->gainDb();
-                    bp.pan = branch->pan();
-                    bp.muted = branch->isMuted();
-                    bp.solo = branch->isSolo();
-                    bp.phaseInvert = branch->isPhaseInvert();
-
-                    for (size_t s = 0; s < branch->numSlots(); ++s) {
-                        auto* bSlot = branch->getSlot(s);
-                        if (!bSlot) continue;
-
-                        PluginSlotPreset sp;
-                        sp.name = bSlot->name();
-                        sp.bypassed = bSlot->isBypassed();
-                        sp.dryWet = bSlot->dryWet();
-                        sp.inputGainDb = bSlot->inputGainDb();
-                        sp.outputGainDb = bSlot->outputGainDb();
-
-                        auto* inner = dynamic_cast<plugins::IPluginInstance*>(bSlot->innerNode());
-                        if (inner) {
-                            sp.path = inner->path();
-                            if (dynamic_cast<plugins::Vst3PluginInstance*>(inner)) {
-                                sp.type = "VST3";
-                            } else if (dynamic_cast<plugins::ClapPluginInstance*>(inner)) {
-                                sp.type = "CLAP";
-                            } else {
-                                sp.type = "BuiltIn";
-                            }
-                            sp.state = inner->saveState();
-                        }
-                        bp.slots.push_back(std::move(sp));
-                    }
-                    np.branches.push_back(std::move(bp));
-                }
-                newPreset.nodes.push_back(std::move(np));
-            }
-        }
-    }
-
+    ScenePreset newPreset = captureGraphSnapshot(graph, name);
     if (it != m_userPresets.end()) {
         *it = std::move(newPreset);
     } else {
@@ -397,44 +323,39 @@ bool SceneManager::loadPresetChain(const std::string& name, audio::GraphEngine& 
     });
     if (it == m_userPresets.end()) return false;
 
-    plugins::PluginWindowManager::instance().closeAllWindows();
-
-    std::vector<std::unique_ptr<audio::AudioNode>> newNodes;
-
-    for (const auto& np : it->nodes) {
-        if (np.kind == NodePreset::Kind::Plugin) {
-            auto slot = createSlotFromPreset(np.slot);
-            if (slot) {
-                slot->prepare(graph.sampleRate(), graph.maxBlockSize());
-                newNodes.push_back(std::move(slot));
-            }
-        } else if (np.kind == NodePreset::Kind::ParallelBlock) {
-            auto block = std::make_unique<audio::ParallelSplitMergeBlock>();
-            block->prepare(graph.sampleRate(), graph.maxBlockSize());
-            for (const auto& bp : np.branches) {
-                auto* branch = block->addBranch(bp.name);
-                branch->prepare(graph.sampleRate(), graph.maxBlockSize());
-                branch->setGainDb(bp.gainDb);
-                branch->setPan(bp.pan);
-                branch->setMuted(bp.muted);
-                branch->setSolo(bp.solo);
-                branch->setPhaseInvert(bp.phaseInvert);
-
-                for (const auto& sp : bp.slots) {
-                    auto slot = createSlotFromPreset(sp);
-                    if (slot) {
-                        slot->prepare(graph.sampleRate(), graph.maxBlockSize());
-                        branch->addSlot(std::move(slot));
-                    }
-                }
-            }
-            newNodes.push_back(std::move(block));
-        }
-    }
-
-    graph.crossfadeToNodes(std::move(newNodes));
+    bool ok = applyGraphSnapshot(*it, graph);
     m_statusMessage = "Loaded preset: " + name;
-    return true;
+    return ok;
+}
+
+void SceneManager::captureToneSnapshotA(audio::GraphEngine& graph) {
+    m_toneSnapshotA = captureGraphSnapshot(graph, "Tone A");
+    m_statusMessage = "Tone Snapshot A captured";
+}
+
+void SceneManager::captureToneSnapshotB(audio::GraphEngine& graph) {
+    m_toneSnapshotB = captureGraphSnapshot(graph, "Tone B");
+    m_statusMessage = "Tone Snapshot B captured";
+}
+
+bool SceneManager::applyToneSnapshotA(audio::GraphEngine& graph) {
+    if (m_toneSnapshotA.nodes.empty()) return false;
+    m_activeToneSlot = ToneSnapshotSlot::A;
+    m_statusMessage = "Switched to Tone Snapshot A";
+    return applyGraphSnapshot(m_toneSnapshotA, graph);
+}
+
+bool SceneManager::applyToneSnapshotB(audio::GraphEngine& graph) {
+    if (m_toneSnapshotB.nodes.empty()) return false;
+    m_activeToneSlot = ToneSnapshotSlot::B;
+    m_statusMessage = "Switched to Tone Snapshot B";
+    return applyGraphSnapshot(m_toneSnapshotB, graph);
+}
+
+void SceneManager::copyToneSnapshotAToB() {
+    m_toneSnapshotB = m_toneSnapshotA;
+    m_toneSnapshotB.name = "Tone B";
+    m_statusMessage = "Copied Tone A to Tone B";
 }
 
 std::vector<std::string> SceneManager::savedPresetNames() const {

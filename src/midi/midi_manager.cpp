@@ -1,10 +1,13 @@
 #include "midi_manager.h"
 #include <iostream>
 #include <sstream>
+#include <cstring>
 
 namespace praccy::midi {
 
-MidiManager::MidiManager() = default;
+MidiManager::MidiManager() {
+    std::memset(m_ccTable, 0, sizeof(m_ccTable));
+}
 
 MidiManager::~MidiManager() {
     closeDevice();
@@ -52,16 +55,81 @@ void MidiManager::closeDevice() {
 void MidiManager::addBinding(const MidiBinding& binding) {
     std::lock_guard<std::mutex> lock(m_bindingsMutex);
     m_bindings.push_back(binding);
+
+    if (binding.triggerType == MidiMessageType::ControlChange) {
+        const uint8_t ch = (binding.midiChannel <= 16) ? binding.midiChannel : 0;
+        const uint8_t cc = binding.triggerNumber;
+        if (cc < NUM_CC_NUMBERS) {
+            auto& slot = m_ccTable[ch][cc];
+            slot.active = true;
+            slot.paramId = static_cast<uint32_t>(binding.targetSlotIndex >= 0 ? binding.targetSlotIndex : 0);
+            slot.minVal = 0.0f;
+            slot.maxVal = 1.0f;
+            slot.binding = binding;
+            if (slot.count < MAX_BINDINGS_PER_CC) {
+                slot.bindings[slot.count++] = binding;
+            }
+        }
+    }
+}
+
+void MidiManager::addCcBinding(uint8_t channel, uint8_t cc, uint32_t paramId, float minVal, float maxVal) {
+    if (channel >= NUM_MIDI_CHANNELS || cc >= NUM_CC_NUMBERS) return;
+    std::lock_guard<std::mutex> lock(m_bindingsMutex);
+
+    auto& slot = m_ccTable[channel][cc];
+    slot.active = true;
+    slot.paramId = paramId;
+    slot.minVal = minVal;
+    slot.maxVal = maxVal;
+    slot.binding.id = "cc_" + std::to_string(channel) + "_" + std::to_string(cc);
+    slot.binding.targetType = BindingTargetType::SlotOutputGain;
+    slot.binding.midiChannel = channel;
+    slot.binding.triggerType = MidiMessageType::ControlChange;
+    slot.binding.triggerNumber = cc;
+    if (slot.count == 0) {
+        slot.bindings[0] = slot.binding;
+        slot.count = 1;
+    }
+}
+
+void MidiManager::rebuildCcTable() {
+    std::memset(m_ccTable, 0, sizeof(m_ccTable));
+    for (const auto& binding : m_bindings) {
+        if (binding.triggerType == MidiMessageType::ControlChange) {
+            const uint8_t ch = (binding.midiChannel <= 16) ? binding.midiChannel : 0;
+            const uint8_t cc = binding.triggerNumber;
+            if (cc < NUM_CC_NUMBERS) {
+                auto& slot = m_ccTable[ch][cc];
+                slot.active = true;
+                slot.paramId = static_cast<uint32_t>(binding.targetSlotIndex >= 0 ? binding.targetSlotIndex : 0);
+                slot.minVal = 0.0f;
+                slot.maxVal = 1.0f;
+                slot.binding = binding;
+                if (slot.count < MAX_BINDINGS_PER_CC) {
+                    slot.bindings[slot.count++] = binding;
+                }
+            }
+        }
+    }
 }
 
 void MidiManager::removeBinding(const std::string& id) {
     std::lock_guard<std::mutex> lock(m_bindingsMutex);
     std::erase_if(m_bindings, [&](const MidiBinding& b) { return b.id == id; });
+    rebuildCcTable();
 }
 
 void MidiManager::clearBindings() {
     std::lock_guard<std::mutex> lock(m_bindingsMutex);
     m_bindings.clear();
+    std::memset(m_ccTable, 0, sizeof(m_ccTable));
+}
+
+const FlatCcBinding& MidiManager::getCcBinding(uint8_t channel, uint8_t cc) const noexcept {
+    static const FlatCcBinding s_empty{};
+    if (channel >= NUM_MIDI_CHANNELS || cc >= NUM_CC_NUMBERS) return s_empty;
+    return m_ccTable[channel][cc];
 }
 
 void MidiManager::startLearning(BindingTargetType target, int slot, int branch, int scene) {
@@ -95,6 +163,37 @@ void CALLBACK MidiManager::midiInProc(HMIDIIN hMidiIn, UINT wMsg, DWORD_PTR dwIn
     manager->handleMidiMessage(status, d1, d2);
 }
 
+void MidiManager::handleControlChange(uint8_t channel, uint8_t cc, uint8_t val) {
+    if (cc >= NUM_CC_NUMBERS) return;
+    const float norm = static_cast<float>(val) / 127.0f;
+
+    // 1. Channel-specific lookup O(1)
+    if (channel >= 1 && channel <= 16) {
+        const auto& slot = m_ccTable[channel][cc];
+        if (slot.active && m_bindingCallback) {
+            if (slot.count > 0) {
+                for (uint8_t i = 0; i < slot.count; ++i) {
+                    m_bindingCallback(slot.bindings[i], norm);
+                }
+            } else {
+                m_bindingCallback(slot.binding, norm);
+            }
+        }
+    }
+
+    // 2. Omni channel lookup O(1) (Channel 0)
+    const auto& omniSlot = m_ccTable[0][cc];
+    if (omniSlot.active && m_bindingCallback) {
+        if (omniSlot.count > 0) {
+            for (uint8_t i = 0; i < omniSlot.count; ++i) {
+                m_bindingCallback(omniSlot.bindings[i], norm);
+            }
+        } else {
+            m_bindingCallback(omniSlot.binding, norm);
+        }
+    }
+}
+
 void MidiManager::handleMidiMessage(uint8_t status, uint8_t d1, uint8_t d2) {
     const uint32_t raw = (static_cast<uint32_t>(status) << 16) | (static_cast<uint32_t>(d1) << 8) | d2;
     m_lastRawMessage.store(raw, std::memory_order_relaxed);
@@ -116,25 +215,25 @@ void MidiManager::handleMidiMessage(uint8_t status, uint8_t d1, uint8_t d2) {
             m_pendingLearnBinding.triggerType = type;
             m_pendingLearnBinding.triggerNumber = (type == MidiMessageType::ProgramChange) ? msg.programNumber() : d1;
 
-            {
-                std::lock_guard<std::mutex> lock(m_bindingsMutex);
-                m_bindings.push_back(m_pendingLearnBinding);
-            }
+            addBinding(m_pendingLearnBinding);
             m_learning.store(false, std::memory_order_relaxed);
             return;
         }
     }
 
-    // Dispatch to registered bindings
+    // High-performance O(1) dispatch for Control Change messages (zero mutex locks, zero allocations)
+    if (type == MidiMessageType::ControlChange) {
+        handleControlChange(channel, d1, d2);
+        return;
+    }
+
+    // Fallback linear dispatch for non-CC messages (ProgramChange, NoteOn)
     std::lock_guard<std::mutex> lock(m_bindingsMutex);
     for (const auto& binding : m_bindings) {
         if (binding.midiChannel != 0 && binding.midiChannel != channel) continue;
         if (binding.triggerType != type) continue;
 
-        if (type == MidiMessageType::ControlChange && binding.triggerNumber == msg.ccNumber()) {
-            const float norm = static_cast<float>(msg.ccValue()) / 127.0f;
-            if (m_bindingCallback) m_bindingCallback(binding, norm);
-        } else if (type == MidiMessageType::ProgramChange && binding.triggerNumber == msg.programNumber()) {
+        if (type == MidiMessageType::ProgramChange && binding.triggerNumber == msg.programNumber()) {
             if (m_bindingCallback) m_bindingCallback(binding, 1.0f);
         } else if (type == MidiMessageType::NoteOn && binding.triggerNumber == d1) {
             const float norm = static_cast<float>(d2) / 127.0f;

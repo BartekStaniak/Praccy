@@ -12,13 +12,34 @@
 #include "modals/plugin_browser_modal.h"
 #include "modals/settings_modal.h"
 #include "modals/practice_tools_modal.h"
+#include "../state/undo_manager.h"
+#include "../audio/retroactive_buffer.h"
 #include <vector>
 #include <string>
 #include <chrono>
 #include <memory>
 #include <unordered_map>
+#include <array>
 
 namespace praccy::ui {
+
+struct CardDragPayload {
+    int sourceIndex{-1};
+    int sourceBlockIndex{-1};
+    int sourceBranchIndex{-1};
+};
+
+struct DeviceMacro {
+    std::string label;
+    uint32_t paramId{0};
+    bool bound{false};
+    bool isSlotMix{false};
+    bool isSlotTrim{false};
+    float currentValue{0.0f};
+    float defaultValue{0.0f};
+    float minValue{0.0f};
+    float maxValue{1.0f};
+};
 
 class RackView {
 public:
@@ -45,6 +66,10 @@ public:
 
     void triggerHudToast(std::string message);
 
+    audio::RetroactiveRiffBuffer& getRiffBuffer() noexcept { return m_riffBuffer; }
+    const audio::RetroactiveRiffBuffer& getRiffBuffer() const noexcept { return m_riffBuffer; }
+    void saveLastRiff();
+
 private:
     void renderPraccyLogo();
     bool renderStatusPill(bool isRunning, const char* statusText);
@@ -61,6 +86,9 @@ private:
     bool renderRotaryKnob(const char* label, float* value, float minVal, float maxVal, float radius, const char* format = "%.1f", float defaultVal = 0.0f);
     void renderUpdateModal();
     void renderFloatingHudToast();
+
+    void cycleAdjacentScenePreset(int delta);
+    void initMacrosForSlot(audio::PluginSlot* slot);
 
     audio::GraphEngine& m_graph;
     audio::AsioManager& m_asio;
@@ -98,6 +126,15 @@ private:
     float m_expandPulseTimer{0.0f};
 
     bool m_showUpdateModal{false};
+
+    state::UndoManager m_undoManager;
+    audio::RetroactiveRiffBuffer m_riffBuffer;
+    std::unordered_map<audio::PluginSlot*, std::array<DeviceMacro, 4>> m_slotMacros;
+
+    bool m_midiMapMode{false};
+    bool m_keyMapMode{false};
+    audio::PluginSlot* m_focusedSlot{nullptr};
+    int m_focusedSlotIndex{-1};
 };
 
 } // namespace praccy::ui

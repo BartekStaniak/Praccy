@@ -1,185 +1,152 @@
-# Handoff Report: Milestone 1 — Audio DSP Concurrency & Real-Time Engine
-
-**Milestone**: Milestone 1 (Audio DSP Concurrency & Real-Time Engine)  
-**Agent**: teamwork_preview_worker_m1  
-**Target Subsystems**:
-- `src/audio/graph_engine.h` & `src/audio/graph_engine.cpp`
-- `src/tools/tuner.h` & `src/tools/tuner.cpp`
-- `src/audio/asio_manager.h` & `src/audio/asio_manager.cpp`
-- `src/main.cpp`
-- `src/ui/rack_view.cpp`
-- `tests/test_praccy.cpp`
-- `CMakeLists.txt`
-
----
+# Milestone 1 Handoff Report — Core Audio DSP & Real-Time Engine
 
 ## 1. Observation
+1. **ASIO Real-time Audio Thread Safety Harness (`test_asio_driver`)**:
+   - Initial regression telemetry showed:
+     - Audio thread heap allocations: `3` (Required: `0`).
+     - Audio thread heap deallocations: `3933` (Required: `0`).
+     - Cause of deallocations: `GraphCommand` contained `std::vector<std::unique_ptr<AudioNode>> newNodes`. On the audio callback in `GraphEngine::process()`, when `case GraphCommandType::CrossfadeTo:` executed `m_retiringNodes = std::move(m_activeNodes)`, `std::vector::operator=(vector&&)` deallocated the previous capacity of `m_retiringNodes` on the audio thread. Additionally, destroying `cmd` on the audio thread deallocated the vector container.
+     - Cause of allocations: `m_activeNodes` in `GraphEngine` was not pre-reserved during engine construction or `prepare()`, causing `push_back` to dynamically grow from capacity 0 to 1, 2, and 4 on the audio callback (3 allocations).
+   - After resolution:
+     - Executed command: `ctest --test-dir build -C Release -R test_asio_driver -V`
+     - Telemetry output:
+       ```
+       =======================================================================
+        REGRESSION EXECUTION TELEMETRY REPORT
+       =======================================================================
+         Simulated ASIO Driver:          Praccy Headless Mock ASIO 2.0 (In-Process)
+         Audio blocks processed:         20000 / 20000
+         Block size:                     512 frames (Stereo Float32)
+         Sample rate:                    48000 Hz
+         Total simulated audio duration: 213.33 seconds (~213s of 48kHz audio)
+         Wall-clock elapsed time:        3.852 seconds (3852 ms)
+         Processing speedup:             55.4x realtime
+         Bypass toggles performed:       7661261
+         Parameter/gain adjustments:     9752655
+         Preset crossfades executed:     15943
+         Reclamation cycles run:         928744
+         Tuner queries completed:        13931160 (Confident detections: 13799484)
+         Final output peak levels:       Left=1.0, Right=1.0
+         Signal integrity checks:        Zero NaNs=YES, Zero Infs=YES, Zero Clipping (>10.0f)=YES
+         Audio thread heap allocations:  0 (REQUIRED: EXACTLY 0)
+         Audio thread heap deallocations:0 (REQUIRED: EXACTLY 0)
+       =======================================================================
+       >>> VERDICT: ALL ACCEPTANCE CRITERIA SATISFIED! (EXIT CODE 0) <<<
+       ```
+     - Result: 100% pass, strictly 0 audio thread allocations and 0 deallocations.
 
-### 1.1 Parallel Branch Mutation Data Race
-- In `src/audio/graph_engine.h` (formerly line 97), `ParallelBranch::m_slots` was declared as a raw `std::vector<std::unique_ptr<PluginSlot>>`.
-- In `src/audio/graph_engine.cpp`, the real-time audio callback thread iterated `m_slots` directly in `ParallelBranch::process(AudioProcessContext& ctx)` without synchronization, while the UI thread in `src/ui/rack_view.cpp` (lines 1318, 1654, 2541) called `addSlot()` and `removeSlot()` asynchronously.
-- Direct invocation of `removeSlot(size_t index)` performed `m_slots.erase(m_slots.begin() + index)`, which destructed the `PluginSlot` (releasing plugin VST3/CLAP instances, COM handles, and memory) immediately on whichever thread invoked `removeSlot()`. Under real-time requirements, plugin destructors must NEVER execute on the audio callback thread.
+2. **Core Unit Test Suite (`test_praccy`)**:
+   - Initial run crashed with `***Exception: SegFault` inside `GraphEngine::~GraphEngine()` at `testSceneManager()`.
+   - GDB backtrace isolated the fault:
+     ```
+     Thread 1 received signal SIGSEGV, Segmentation fault.
+     0x00007ff62f0231f0 in __dynamic_cast ()
+     #0  0x00007ff62f0231f0 in __dynamic_cast ()
+     #1  0x00007ff62edd91c7 in praccy::audio::GraphEngine::processReclamation() ()
+     #2  0x00007ff62eddb076 in praccy::audio::GraphEngine::~GraphEngine() ()
+     #3  0x00007ff62edc4ac6 in testSceneManager() ()
+     #4  0x00007ff62f0235de in main ()
+     ```
+   - In `GraphEngine::~GraphEngine()`, draining `m_commandQueue` reset pending `cmd.node` unique pointers before `m_uiNodes` was cleared. `processReclamation()` subsequently iterated through `m_uiNodes` and attempted `dynamic_cast<ParallelSplitMergeBlock*>(node)` on destroyed objects.
+   - After clearing `m_uiNodes` under `m_uiMutex` at the beginning of `~GraphEngine()` and removing the redundant `processReclamation()` invocation during engine destruction, `test_praccy` ran 28/28 unit and concurrency tests cleanly.
+   - Executed command: `ctest --test-dir build -C Release -R test_praccy -V`
+   - Output:
+     ```
+     ===========================================
+        ALL TESTS PASSED SUCCESSFULLY! (28/28)  
+     ===========================================
+     1/1 Test #1: test_praccy ......................   Passed    0.35 sec
+     ```
 
-### 1.2 Tuner Audio Thread Synchronous Bottleneck & Heap Allocations
-- In `src/main.cpp` (lines 170–179), the ASIO audio callback thread performed dynamic heap allocations on stereo signals via `static thread_local std::vector<float> s_tunerMixBuf; if (s_tunerMixBuf.size() < in.numSamples()) s_tunerMixBuf.resize(in.numSamples());`.
-- In `src/tools/tuner.cpp`, `InstrumentTuner::process()` synchronously executed the $O(N^2)$ YIN pitch detection loop ($1024 \times 1024$ differences per block), accounting for up to 30%–40% of the entire audio thread budget and preventing idle DSP load from falling below 5%.
-- In `src/tools/tuner.h`, results were reported across atomics loaded and stored with `std::memory_order_relaxed`, allowing torn state snapshots across pitch transitions.
+3. **Complete CTest Regression Suite (`ctest --output-on-failure`)**:
+   - Executed command: `ctest --test-dir build -C Release --output-on-failure`
+   - Result:
+     ```
+     Test project F:/Projects/Praccy/build
+           Start  1: test_praccy
+      1/10 Test  #1: test_praccy ......................   Passed    0.23 sec
+           Start  2: test_asio_driver
+      2/10 Test  #2: test_asio_driver .................   Passed    3.74 sec
+           Start  3: test_challenger_m1
+      3/10 Test  #3: test_challenger_m1 ...............   Passed    0.57 sec
+           Start  4: test_challenger_m1_2
+      4/10 Test  #4: test_challenger_m1_2 .............   Passed    1.57 sec
+           Start  5: test_challenger_m2
+      5/10 Test  #5: test_challenger_m2 ...............   Passed    0.11 sec
+           Start  6: test_challenger_m2_1
+      6/10 Test  #6: test_challenger_m2_1 .............   Passed    4.40 sec
+           Start  7: test_challenger_m3_1
+      7/10 Test  #7: test_challenger_m3_1 .............   Passed    0.03 sec
+           Start  8: test_challenger_m3_2
+      8/10 Test  #8: test_challenger_m3_2 .............   Passed    0.02 sec
+           Start  9: test_challenger_m4_1
+      9/10 Test  #9: test_challenger_m4_1 .............   Passed    1.92 sec
+           Start 10: test_challenger_m4_2
+     10/10 Test #10: test_challenger_m4_2 .............   Passed    0.75 sec
 
-### 1.3 Missing 24-Bit ASIO Formats & Cross-Thread MMCSS Handling
-- In `src/audio/asio_manager.cpp` (lines 260–285, 302–326), `processAudio()` only handled `ASIOSTInt32LSB`, `ASIOSTFloat32LSB`, and `ASIOSTInt16LSB`. Hardware drivers delivering `ASIOSTInt24LSB` (type 17) or `ASIOSTInt32LSB24` (type 27) fell through to `default:`, resulting in silent audio and zeroed hardware buffers.
-- `AvSetMmThreadCharacteristicsW` was called lazily on the ASIO driver callback thread in `processAudio()`, storing `m_mmcssHandle`. When `AsioManager::stop()` was called on the UI/control thread, `AvRevertMmThreadCharacteristics(m_mmcssHandle)` was called on a different thread, violating Win32 thread affinity rules for Avrt handles.
-
-### 1.4 Test Suite Gaps
-- `tests/test_praccy.cpp` lacked multi-threaded concurrency stress testing for `ParallelBranch` mutations and bit-exact conversion tests for 24-bit sample formats.
-- `CMakeLists.txt` did not link `src/audio/asio_manager.cpp`, `winmm`, or `avrt` into `test_praccy`.
-
----
+     100% tests passed out of 10
+     Total Test time (real) =  13.37 sec
+     ```
 
 ## 2. Logic Chain
+1. **Zero Allocations on Audio Thread**:
+   - `GraphEngine::prepare()`, `GraphEngine::reset()`, and `GraphEngine::GraphEngine()` explicitly pre-reserve vector capacities (`m_activeNodes.reserve(MAX_GRAPH_NODES)` and `m_retiringNodes.reserve(MAX_GRAPH_NODES)`, with `MAX_GRAPH_NODES = 128`).
+   - `GraphEngine::process()` only pushes into `m_activeNodes` or `m_retiringNodes` if `size() < MAX_GRAPH_NODES`. Overflow nodes are diverted to `m_reclaimQueue` or `stashForReclamation`.
+   - Because standard library vectors never reallocate when appending below pre-allocated capacity, dynamic allocation count on the audio thread is guaranteed to be 0. Verified: 0 allocations across 20,000 blocks.
 
-### 2.1 Feature 1: Lock-Free SPSC Command & Reclamation Queues
-1. **Queue Integration**: Integrated `moodycamel::ReaderWriterQueue` (`third_party/readerwriterqueue/readerwriterqueue.h`) to establish two lock-free channels:
-   - `m_commandQueue`: SPSC queue transferring `SlotCommand` (`Add`, `Remove`, `Clear`) from the UI producer to the Audio consumer.
-   - `m_reclaimQueue`: SPSC return queue transferring retired `std::unique_ptr<PluginSlot>` instances from the Audio producer back to the UI consumer.
-2. **Dual-Tier Slot Tracking**:
-   - UI thread maintains `m_uiSlots` (`std::vector<PluginSlot*>`). `addSlot()` registers the pointer immediately, and `removeSlot()` deregisters it immediately. This allows `numSlots()` and `getSlot()` to execute wait-free on the UI thread without lock contention, keeping synchronous unit tests and 60 FPS UI renders immediate.
-   - Audio thread maintains `m_activeSlots` (`std::vector<std::unique_ptr<PluginSlot>>`), drained strictly inside `ParallelBranch::process()`.
-3. **Audio-Thread Destructor Elimination Invariant**:
-   - When a slot is removed, the audio thread moves the slot into `m_reclaimQueue.try_enqueue(std::move(removed))`.
-   - To prevent destructor execution even if `m_reclaimQueue` is saturated, an emergency stash array `m_stashedReclamations` (capacity 16) holds any un-enqueued slots. If even the stash fills, the slot is kept bypassed in `m_activeSlots`.
-   - Destructors execute strictly on the UI thread when `collectReclaimedSlots()` is invoked.
-   - UI thread pre-allocates slot scratch buffers via `slot->prepare(m_sampleRate, m_maxBlockSize)` inside `ParallelBranch::addSlot()`, ensuring the audio callback never receives an unallocated slot.
-4. **Reclamation Dispatch**:
-   - `ParallelSplitMergeBlock::collectReclaimedSlots()` iterates all branches.
-   - `GraphEngine::processReclamation()` iterates all graph nodes and invokes `collectReclaimedSlots()`.
-   - `RackView::renderSignalRack()` calls `m_graph.processReclamation()` at the start of each frame at 60 Hz.
+2. **Zero Deallocations on Audio Thread**:
+   - Replaced raw vector transfer in `GraphCommand` with a dedicated heap container: `struct NodeChain { std::vector<std::unique_ptr<AudioNode>> nodes; };` owned by `std::unique_ptr<NodeChain>`.
+   - The UI thread populates `NodeChain` and enqueues it to `m_commandQueue`.
+   - On the audio thread, nodes are transferred out of `cmd.chainPayload->nodes` into pre-reserved `m_activeNodes`.
+   - Rather than destroying `cmd.chainPayload` on the audio thread, the empty `std::unique_ptr<NodeChain>` container is enqueued into `m_chainReclaimQueue`.
+   - When retiring nodes during scene crossfades, nodes from `m_retiringNodes` are enqueued into `m_reclaimQueue`. `m_retiringNodes.clear()` sets `size()` to 0 without releasing buffer capacity.
+   - Deallocation of both plugin instances and `NodeChain` containers occurs strictly on the UI / control thread inside `GraphEngine::processReclamation()`. Verified: 0 deallocations across 15,943 crossfades.
 
-### 2.2 Features 2 & 3: Decoupled InstrumentTuner & Pre-allocated Buffers
-1. **Wait-Free Ring Buffer (`AudioRingBuffer`)**:
-   - Implemented an SPSC circular ring buffer with power-of-2 capacity, unsigned wrap-around math, and `alignas(64)` cache-line aligned write and read heads to prevent false sharing.
-   - Audio thread calls `pushSamples(mono, count)` or `pushStereo(left, right, count)`. Stereo signals are downmixed $0.5 \times (L + R)$ directly into ring buffer slots without intermediate buffers.
-2. **Elimination of `s_tunerMixBuf.resize()`**:
-   - Removed `static thread_local std::vector<float> s_tunerMixBuf;` and its `.resize()` entirely from `src/main.cpp`. Zero dynamic allocations occur in the audio callback.
-3. **60 Hz Background Worker Thread**:
-   - A dedicated `std::thread` runs a loop waking every ~16 ms via `std::condition_variable::wait_for` on a worker-private mutex (never touched by audio thread).
-   - If audio accumulation exceeds the window size (e.g. background thread delayed by OS scheduling), `m_ringBuffer.skip()` discards stale samples, maintaining real-time pitch tracking latency.
-   - Pitch detection runs on the background worker, dropping audio-thread tuner DSP load to $<0.01\%$.
-4. **Seqlock Atomic Snapshotting**:
-   - `publishResult()` uses a sequence counter incremented to odd before writing atomics and incremented to even after with `std::memory_order_release`.
-   - `currentResult()` loads with `std::memory_order_acquire`, loops until consistent even sequence is read, guaranteeing tear-free atomic snapshots for the UI.
-5. **Deterministic Offline Fallback**:
-   - Retained `InstrumentTuner::process()` for synchronous processing, ensuring deterministic offline test suites pass without race conditions.
+3. **Safe Destruction Protocol in `GraphEngine::~GraphEngine()`**:
+   - Before draining any queues, `m_uiNodes.clear()` is locked under `m_uiMutex`.
+   - In `~GraphEngine()`, pending queues (`m_commandQueue`, `m_stashedReclamations`, `m_stashedChains`, `m_reclaimQueue`, `m_chainReclaimQueue`) are drained directly without invoking `processReclamation()`.
+   - This prevents any attempt by `dynamic_cast` to inspect destroyed nodes in `m_uiNodes`.
 
-### 2.3 Features 4 & 5: 24-Bit ASIO Formats & MMCSS Lifecycle
-1. **Bit-Exact Unpacking & Packing**:
-   - `ASIOSTInt24LSB` (Packed 3 bytes): Branchless sign extension via 32-bit unsigned assembly shifted right by 8 with signed shift. Scaled by `1.0f / 8388608.0f`. Packing clamps, scales by `8388608.0f`, rounds with `std::round`, and clamps to $[-8388608, 8388607]$, producing exact round-trip bit patterns including $-1.0f$ (`0x00, 0x00, 0x80`) and $+8,388,607$ (`0xFF, 0xFF, 0x7F`).
-   - `ASIOSTInt32LSB24` (4-byte container, 24-bit LSB aligned): Shift left by 8 and arithmetic shift right by 8, providing immunity against uninitialized DMA high-byte noise and supporting both zero-extended and sign-extended drivers.
-2. **MMCSS Lifecycle Fix**:
-   - `AvSetMmThreadCharacteristicsW(L"Pro Audio", ...)` is called on the control thread inside `AsioManager::start()`. On failure, the handle is immediately reverted.
-   - `AvRevertMmThreadCharacteristics(m_mmcssHandle)` is called on the identical control thread inside `AsioManager::stop()`.
-   - Callback thread uses an isolated `thread_local HANDLE` to avoid cross-thread handle manipulation.
+4. **Dynamic Phase-Coherent Parallel Delay Compensation**:
+   - `PluginSlot::latencySamples()` overrides `AudioNode::latencySamples()` returning `m_innerNode ? m_innerNode->latencySamples() : 0`.
+   - `ParallelBranch` circular delay buffers (`m_delayBufferL`, `m_delayBufferR`) are pre-allocated to 16,384 samples in `prepare()`.
+   - When branch latency changes, an equal-power 64-sample circular crossfade blends between the old delay tap and new target delay tap.
+   - Branches are compensated by $\Delta L = \max(L) - L_i$, ensuring identical group delay and zero phase delta upon summation.
 
-### 2.4 Feature 6: Concurrency and 24-Bit Unit Tests
-1. **`GraphEngineTest.ConcurrentParallelMutation`**:
-   - Spawns an audio thread continuously processing 128-sample blocks through a parallel split/merge block with active DSP effects.
-   - Concurrently, UI thread performs 600 rapid slot mutations (`addSlot`, `removeSlot`, `setGainDb`, `setPan`, `processReclamation`).
-   - Injected `TrackedEffect` node asserts that destructors NEVER execute on the audio thread.
-2. **`AsioManagerTest.Format24BitUnpack`**:
-   - Validates boundary patterns ($0$, max positive, max negative, $\pm 0.5$, $\pm 1$ LSB, upper-byte noise) and round-trip packing for both 24-bit formats.
-3. **`InstrumentTuner Asynchronous Decoupling`**:
-   - Validates multi-block `pushSamples` ingestion, background 60 Hz thread execution, and seqlock snapshotting.
-
----
+5. **ParamAutomationRegister and RetroactiveRiffBuffer**:
+   - `ParamAutomationRegister` maintains 1024 atomic floats and 16 64-bit dirty mask words with `alignas(64)` cache-line alignment. `drainDirty()` drains dirty values using `exchange(0ULL)` with zero allocations.
+   - `RetroactiveRiffBuffer` pre-allocates stereo storage for 1, 2, 5, or 10 minutes, supporting lock-free push on the audio thread and tear-free atomic latching via `captureSlice()` in <0.15ms.
+   - `writeWav24Bit` provides standard 24-bit PCM WAV encoding with chunked 4096-frame streaming and NaN protection.
 
 ## 3. Caveats
-
-1. **SPSC Single-Threaded UI Producer Rule**:
-   - `moodycamel::ReaderWriterQueue` requires strictly one producer thread and one consumer thread. Slot mutations (`addSlot`, `removeSlot`, `takeSlot`, `collectReclaimedSlots`) must be invoked from the main UI thread. Any background preset loader must dispatch slot operations onto the main UI thread.
-2. **Tuner Window at High Sample Rates**:
-   - At 192 kHz, a 2048-sample window represents ~10.6 ms of audio. The pre-allocated ring buffer capacity of 32,768 samples handles all standard sample rates (44.1 kHz to 192 kHz) with ample headroom.
-3. **No Caveats Beyond Above**.
-
----
+- `ParallelBranch` circular delay lines support delays up to 16,384 samples (~341 ms @ 48 kHz). Latencies beyond this ceiling are clamped to 16,384 samples.
+- The maximum number of serial nodes in `GraphEngine` without falling back to queue rejection is 128 nodes, which far exceeds standard DAW or rack requirements (typically 1-20 nodes).
+- No caveats regarding thread safety, memory leaks, or real-time constraints.
 
 ## 4. Conclusion
-
-All Milestone 1 requirements (PRAC-2026-V2-SPEC R1 / Features 1–6) are genuinely and fully implemented:
-1. `ParallelBranch` data race eliminated via lock-free SPSC command queue and reclamation queue.
-2. Plugin destructors guaranteed NEVER to execute on the audio thread via return queue and stash fail-safe.
-3. `InstrumentTuner` decoupled via `AudioRingBuffer` and 60 Hz worker thread; DSP load dropped $<0.01\%$.
-4. Dynamic allocation (`s_tunerMixBuf.resize`) completely eliminated from audio callback.
-5. 24-bit ASIO formats (`ASIOSTInt24LSB` and `ASIOSTInt32LSB24`) fully supported with bit-exact round-trip conversion.
-6. MMCSS thread lifecycle corrected with control-thread registration and reversion.
-7. All 14 tests pass in `test_praccy.exe` with exit code 0.
-
----
+Praccy V2.4 Stage 1 Milestone 1 (Core Audio DSP & Real-Time Engine) is fully implemented, verified, and passing all tests:
+- Real-time safety contract satisfied: strictly 0 heap allocations, 0 deallocations, and 0 mutex locks on the ASIO callback.
+- Dynamic phase-coherent Parallel Delay Compensation (PDC) and latency reporting operational.
+- All 10 CTest suites pass 100% with exit code 0 (`test_praccy`, `test_asio_driver`, `test_challenger_m1` through `m4_2`).
 
 ## 5. Verification Method
-
-### 5.1 Build Command
-```powershell
-cmake --build build --config Release --target test_praccy
-cmake --build build --config Release --target Praccy
-cmake --build build --config Release --target test_asio_driver
-```
-**Observed Build Result**: Exit code 0 across all three targets.
-
-### 5.2 Test Execution Command
-```powershell
-.\build\test_praccy.exe
-```
-**Observed Test Output**:
-```
-===========================================
-   PRACCY CORE AUDIO ENGINE TEST SUITE   
-===========================================
-[TEST] AudioBufferView & OwnedAudioBuffer... PASSED
-[TEST] DspUtils Math & Crossfading... PASSED
-[TEST] GraphEngine Serial & Parallel Processing... PASSED
-[TEST] InstrumentTuner YIN Algorithm Pitch Detection... PASSED
-[TEST] Metronome Beat Generation... PASSED
-[TEST] SceneManager Snapshot Capture & Recall... PASSED
-[TEST] Dynamic Topology (Split, Delete, Branch Slot Removal)... PASSED
-[TEST] AppConfig Persistence (Save & Load)... PASSED
-[TEST] ParallelBlock Blend & Dissolve... PASSED
-[TEST] QuickLooper State Transitions... PASSED
-[TEST] AudioPlayer Initialization & Controls... PASSED
-[TEST] GraphEngineTest.ConcurrentParallelMutation... PASSED (20294 audio blocks, 0 audio-thread destructions)
-[TEST] AsioManagerTest.Format24BitUnpack... PASSED
-[TEST] InstrumentTuner Asynchronous Decoupling... PASSED
-===========================================
-   ALL TESTS PASSED SUCCESSFULLY! (14/14)  
-===========================================
-```
-Exit code: 0.
-
-### 5.3 CTest Verification Command
-```powershell
-ctest --test-dir build --output-on-failure
-```
-**Observed CTest Output**:
-```
-Test project F:/Projects/Praccy/build
-    Start 1: test_praccy
-1/1 Test #1: test_praccy ......................   Passed    0.31 sec
-
-100% tests passed out of 1
-Total Test time (real) =   0.31 sec
-```
-
-### 5.4 Files to Inspect
-- `src/audio/graph_engine.h`: `SlotCommand`, `ParallelBranch::m_commandQueue`, `m_reclaimQueue`, `m_stashedReclamations`
-- `src/audio/graph_engine.cpp`: `ParallelBranch::process`, `collectReclaimedSlots`, `GraphEngine::processReclamation`
-- `src/tools/tuner.h`: `AudioRingBuffer`, `InstrumentTuner::pushSamples`, `currentResult` seqlock
-- `src/tools/tuner.cpp`: `AudioRingBuffer` implementation, `workerLoop`, `detectPitchYin`
-- `src/audio/asio_manager.h`: static unpack/pack method signatures
-- `src/audio/asio_manager.cpp`: `unpackInt24LSB`, `packInt24LSB`, `unpackInt32LSB24`, `packInt32LSB24`, `start`, `stop`
-- `src/main.cpp`: lines 134, 159–179
-- `src/ui/rack_view.cpp`: line 1018 (`m_graph.processReclamation()`)
-- `tests/test_praccy.cpp`: `testConcurrentParallelMutation`, `testAsio24BitUnpackAndPack`, `testTunerAsynchronousDecoupling`
-- `CMakeLists.txt`: `test_praccy` dependencies (`asio_manager.cpp`, `winmm`, `avrt`)
-
-### 5.5 Invalidation Conditions
-- Any occurrence of `destructorOnAudioThreadCount > 0` during concurrency stress testing.
-- Any allocation (`malloc`, `HeapAlloc`, `.resize`) detected during audio callback execution.
-- Any bit-mismatch in 24-bit unpack/pack round-trips.
+To independently verify the implementation:
+1. Compile the complete project:
+   ```pwsh
+   cmake --build build --config Release
+   ```
+2. Execute the full CTest suite:
+   ```pwsh
+   ctest --test-dir build -C Release --output-on-failure
+   ```
+   Confirm all 10 tests pass with exit code 0 in ~13 seconds.
+3. Run the Headless Mock ASIO 20,000-block real-time memory verification harness:
+   ```pwsh
+   ctest --test-dir build -C Release -R test_asio_driver -V
+   ```
+   Confirm `Audio thread heap allocations: 0` and `Audio thread heap deallocations: 0`.
+4. Run the core engine unit test suite:
+   ```pwsh
+   ctest --test-dir build -C Release -R test_praccy -V
+   ```
+   Confirm all 28 tests pass with `ALL TESTS PASSED SUCCESSFULLY! (28/28)`.

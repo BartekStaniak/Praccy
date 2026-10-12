@@ -1,84 +1,66 @@
-## 2026-10-06T20:34:24Z
-You are the Implementation Worker for Milestone 2 (SecOps, Hardening & Crash Isolation) of the Praccy v2.0 Architectural Blueprint project.
-Your working directory is f:/Projects/Praccy/.agents/teamwork/teamwork_preview_worker_m2/.
-Project root is f:/Projects/Praccy.
+## 2026-10-12T18:11:50Z
+You are the Shared Infrastructure & State Engine Worker (Milestone 2) for Praccy V2.4 Stage 1.
+Your working directory is F:\Projects\Praccy\.agents\teamwork\teamwork_preview_worker_m2.
+
+MANDATORY: Read the authoritative user request at:
+F:\Projects\Praccy\.agents\teamwork\ORIGINAL_REQUEST.md
+Also read the project architecture and interface contracts at:
+F:\Projects\Praccy\.agents\teamwork\PROJECT.md
+And the infrastructure and UI survey reports at:
+F:\Projects\Praccy\.agents\teamwork\spec_miner_survey_infra\survey_report.md
+F:\Projects\Praccy\.agents\teamwork\explorer_survey_ui\survey_report.md
 
 MANDATORY INTEGRITY WARNING:
 DO NOT CHEAT. All implementations must be genuine. DO NOT hardcode test results, create dummy/facade implementations, or circumvent the intended task. A teamwork_preview_auditor will independently verify your work. Integrity violations WILL be detected and your work WILL be rejected.
 
-You MUST read these foundational and architectural blueprint files before starting work:
-1. f:/Projects/Praccy/.agents/teamwork/ORIGINAL_REQUEST.md
-2. f:/Projects/Praccy/.agents/teamwork/orchestrator/PROJECT.md
-3. f:/Projects/Praccy/.agents/teamwork/teamwork_preview_explorer_m2_1/handoff.md (Features 7 & 8: miniz in-process extraction & direct restart blueprint)
-4. f:/Projects/Praccy/.agents/teamwork/teamwork_preview_explorer_m2_2/handoff.md (Feature 9: Win32 SEH/VEH plugin crash isolation blueprint)
-5. f:/Projects/Praccy/.agents/teamwork/teamwork_preview_explorer_m2_3/handoff.md (Features 10, 11, 12, 13: std::from_chars parsing, window placement, compiler hardening blueprint)
-
-Exclusive Write Ownership:
-- third_party/miniz/miniz.h
-- third_party/miniz/miniz.c
-- src/ui/update_checker.h
+Your write ownership (exclusive):
+- src/utils/archive_utils.h
+- src/utils/archive_utils.cpp
 - src/ui/update_checker.cpp
-- src/plugins/crash_isolation.h
-- src/plugins/plugin_base.h
-- src/plugins/vst3_host.cpp
-- src/plugins/clap_host.cpp
-- src/utils/parse_utils.h
-- src/state/scene_manager.cpp
+- src/ui/drag_drop_router.h
+- src/ui/drag_drop_router.cpp
+- src/main.cpp
+- src/midi/midi_manager.h
+- src/midi/midi_manager.cpp
 - src/state/app_config.h
 - src/state/app_config.cpp
-- src/audio/asio_manager.cpp
-- src/plugins/plugin_scanner.cpp
-- src/ui/rack_view.cpp
-- src/main.cpp
+- src/state/undo_manager.h
+- src/state/undo_manager.cpp
 - CMakeLists.txt
-- tests/test_praccy.cpp
 
-Implementation Tasks:
+Objectives for Milestone 2:
+1. Implement `src/utils/archive_utils.h` and `archive_utils.cpp`:
+   - Centralized archive utility wrapping vendored `miniz`.
+   - Native Win32 path sanitization (defense against Zip Slip: disallow `..`, absolute paths, leading slashes/drive letters, colons, null bytes).
+   - Enforce decompression bomb guards:
+     - `MAX_SINGLE_FILE = 30 * 1024 * 1024` (30MB, specifically disallowing XML/uncompressed files over 30MB)
+     - `MAX_TOTAL_UNCOMPRESSED = 128 * 1024 * 1024` (128MB archive total)
+     - `MAX_COMPRESSION_RATIO = 100` (100:1 ratio guard)
+     - `MAX_FILE_COUNT = 100` files max
+   - Refactor `src/ui/update_checker.cpp` to use `archive_utils::extractZipArchive`.
+2. Implement `src/ui/drag_drop_router.h` and `drag_drop_router.cpp`:
+   - Centralized drag-drop router replacing inline `WM_DROPFILES` in `src/main.cpp`.
+   - Classification logic:
+     - Audio tracks (`.wav`, `.wave`, `.flac`, `.mp3`) -> dispatch to AudioPlayer / QuickLooper.
+     - Presets (`.pracpreset`, `.ini`) -> dispatch to SceneManager.
+     - Signal chains (`.pracchaim`, `.chain`) -> dispatch to RackView / GraphEngine.
+   - Wire into `src/main.cpp` `WM_DROPFILES` handler.
+3. Optimize `src/midi/midi_manager.h` and `midi_manager.cpp`:
+   - Replace $O(N)$ vector traversal with a flat $O(1)$ MIDI CC lookup table `FlatCcBinding m_ccTable[17][128];` (channels 0-16, CC 0-127).
+   - Zero runtime heap allocations during MIDI CC dispatch.
+4. Update `src/state/app_config.h` and `app_config.cpp`:
+   - Add `uint32_t retroactiveBufferMinutes{2};` (supported values: 1, 2, 5, 10).
+   - Persist to/from configuration INI file.
+5. Implement `src/state/undo_manager.h` and `undo_manager.cpp`:
+   - Full-fidelity transactional `UndoManager` with up to 64 history levels capturing `ScenePreset` snapshots.
+   - Coalescing rules: snapshot on mouse release (`IsItemDeactivatedAfterEdit`), structural rack mutations, scene switches, and rapid continuous parameter/MIDI CC streams using a 400ms idle inactivity threshold.
+   - `undo()`, `redo()`, `canUndo()`, `canRedo()`.
+6. Update `CMakeLists.txt`:
+   - Add new source files (`archive_utils.cpp`, `drag_drop_router.cpp`, `undo_manager.cpp`).
+   - Fix commented-out `test_asio_driver` definition with `-Wno-mismatched-new-delete`.
+7. Verify:
+   - Build project with `cmake --build build --config Release`.
+   - Run CTest `ctest --output-on-failure` in `build/`. Ensure all 10 existing test targets pass 100%.
 
-1. Features 7 & 8 (In-Process ZIP Extraction & Direct Updater Execution):
-   - Vendor standard amalgamated `miniz` in `third_party/miniz/miniz.h` and `third_party/miniz/miniz.c`.
-   - In `src/ui/update_checker.h` and `src/ui/update_checker.cpp`:
-     - Implement `sanitizeZipEntryPath()` with rigorous Zip Slip defense: normalize backslashes to forward slashes; reject leading slashes, drive letters, and UNC prefixes; reject `.` and `..` path tokens; reject invalid Windows filename chars (`<`, `>`, `:`, `"`, `|`, `?`, `*`) and control characters; reject DOS device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`); verify destination prefix containment via `std::filesystem::weakly_canonical`.
-     - Implement `extractZipArchive()` using `miniz` APIs and `_wfopen(..., L"rb")`. Enforce Zip Bomb guardrails (reject single file > 250 MB, total size > 500 MB, file count > 10,000).
-     - Refactor `applyUpdateAndRestart()`: completely eliminate `std::system()`, `tar`, `powershell.exe`, `apply_update.bat`, and `cmd.exe`. Launch the extracted binary directly with Win32 `CreateProcessW`: `"Praccy.exe" --apply-update <currentPid> "<currentExePath>"`.
-   - In `src/main.cpp`:
-     - In `WinMain`, parse command-line arguments using `CommandLineToArgvW` (link `shell32`).
-     - If `--apply-update <oldPid> "<destExe>"` is received:
-       - Wait for old process exit using `OpenProcess(SYNCHRONIZE, FALSE, oldPid)` and `WaitForSingleObject(hProcess, 15000)`.
-       - Overwrite destination binary using `CopyFileW` with a 20-attempt retry loop (100ms sleep between attempts).
-       - Recursively sync `resources/` to destination using `std::filesystem::copy(..., copy_options::recursive | copy_options::overwrite_existing)`.
-       - Relaunch the updated application at `destExe` with Win32 `CreateProcessW` and exit immediately via `ExitProcess(0)`.
-   - Confirm ZERO occurrences of `std::system`, `cmd.exe`, or `powershell.exe` remain in the code.
-
-2. Feature 9 (Win32 SEH/VEH Plugin Crash Isolation):
-   - Create `src/plugins/crash_isolation.h`:
-     - On MSVC (`_MSC_VER`): Isolate `__try` / `__except` into non-template leaf function `sehExecuteLeaf(void (*fn)(void*), void* arg, DWORD* outCode)` with zero C++ local objects/destructors, strictly complying with MSVC rule C2712.
-     - On MinGW GCC (`!_MSC_VER`): Use Win32 Vectored Exception Handling (`AddVectoredExceptionHandler`) registered once with an intrusive thread-local context stack (`t_currentCrashContext`) and `setjmp`/`longjmp`. Real-time safe, <15ns overhead, zero heap allocation.
-   - In `src/plugins/plugin_base.h`, add `std::atomic<bool> m_faulted{false}`, `std::string m_faultReason`, `bool isFaulted() const`, and `void resetFault()`.
-   - Wrap untrusted plugin boundaries in `src/plugins/vst3_host.cpp` and `src/plugins/clap_host.cpp`:
-     - Wrap `process()`. If crash occurs: latch `m_faulted = true`, immediately copy input to output (`ctx.output.copyFrom(ctx.input)`). On all subsequent blocks, bypass DSP immediately and pass dry audio.
-     - Wrap `openGui()`, `closeGui()`, parameter setting, and state serialization.
-   - In `src/ui/rack_view.cpp`:
-     - Visually flag faulted plugin slot: render crimson accent / alert badge and `[RELOAD PLUGIN]` button.
-   - In `tests/test_praccy.cpp`:
-     - Add `CrashingMockPlugin` and unit test verifying that a hardware access violation (`0xC0000005`) is trapped cleanly, host does not crash, and dry audio pass-through is active.
-
-3. Features 10, 11, 12 & 13 (Non-Throwing Parsing, Window Placement, Compiler Hardening & Tests):
-   - Create `src/utils/parse_utils.h` providing non-throwing string-to-number functions (`parseInt`, `parseFloat`, `parseHexByte`, etc.) using C++20 `std::from_chars` with whitespace trimming, optional leading `+` handling, and fallback defaults.
-   - Replace all throwing `std::stoul`, `std::stof`, `std::stoi`, `std::atoi`, `std::atof` in `src/state/scene_manager.cpp` and `src/state/app_config.cpp`.
-   - Window placement persistence:
-     - Persist `WINDOWPLACEMENT` in `src/state/app_config.h` and `src/state/app_config.cpp`.
-     - Validate geometry using `MonitorFromRect(..., MONITOR_DEFAULTTONULL)`, falling back to primary monitor work area.
-     - In `src/main.cpp`, restore window placement via `SetWindowPlacement` after swapchain pre-rendering to eliminate white window flash.
-   - Compiler warning hardening:
-     - In `CMakeLists.txt`, enable `/W4 /WX` on MSVC, `-Wall -Wextra -Werror` on GCC.
-     - Isolate third-party libraries (`third_party`) as `SYSTEM PRIVATE` and compile third-party files (`miniz.c`, `funknown.cpp`, `imgui.cpp`) with warning suppression (`/W0`, `-w`).
-     - Link `shell32` in `CMakeLists.txt`.
-     - Fix first-party latent warnings: `snprintf` in `asio_manager.cpp:48`, double-cast `FARPROC` through `void*` in `vst3_host.cpp` and `plugin_scanner.cpp`.
-   - In `tests/test_praccy.cpp`:
-     - Add `testCorruptedPresetsIni()` verifying safe non-throwing degradation across corrupted numeric values, broken syntax, invalid hex strings, and missing fields.
-
-4. Build and Test Verification:
-   - Build all targets (`test_praccy`, `Praccy`).
-   - Run `test_praccy.exe` and assert all tests pass with exit code 0.
-   - Ensure the build compiles with zero warnings under the strict compiler flags.
+Document all changes and test outputs in `handoff.md` in your working directory.
+When finished, send a completion message with handoff details to your orchestrator.

@@ -25,6 +25,7 @@
 #include "ui/theme.h"
 #include "ui/rack_view.h"
 #include "ui/thumbnail_manager.h"
+#include "ui/drag_drop_router.h"
 #include "resource.h"
 
 // Global typography handles
@@ -33,18 +34,7 @@ ImFont* g_fontMono = nullptr;
 
 namespace {
 
-struct DropTargetContext {
-    praccy::tools::AudioPlayer* player{nullptr};
-    praccy::tools::QuickLooper* looper{nullptr};
-};
-static DropTargetContext s_dropContext;
-
-inline bool isValidWavFile(const std::filesystem::path& path) noexcept {
-    if (!path.has_extension()) return false;
-    auto ext = path.extension().wstring();
-    for (auto& c : ext) c = static_cast<wchar_t>(::towlower(c));
-    return ext == L".wav";
-}
+static praccy::ui::DragDropRouter g_dragDropRouter;
 
 struct EmbeddedResource {
     const void* data = nullptr;
@@ -340,17 +330,38 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     praccy::tools::QuickLooper looper;
     looper.prepare(48000.0);
 
-    s_dropContext.player = &player;
-    s_dropContext.looper = &looper;
-
     std::atomic<float> dspLoadPercent{0.0f};
     std::atomic<uint32_t> dspDropouts{0};
 
     praccy::midi::MidiManager midi;
     praccy::state::SceneManager scenes;
 
+    g_dragDropRouter.setAudioTrackHandler([&](const std::filesystem::path& p) {
+        player.loadWavFile(p.string());
+        looper.loadWavFile(p.string());
+    });
+    g_dragDropRouter.setPresetHandler([&](const std::filesystem::path& p) {
+        scenes.loadFromFile(p.string());
+    });
+    g_dragDropRouter.setChainHandler([&](const std::filesystem::path& p) {
+        scenes.loadPresetChain(p.stem().string(), graph);
+    });
+
+    praccy::plugins::PluginScanner scanner;
+    if (configLoaded) {
+        for (const auto& cp : appConfig.customPluginPaths) {
+            scanner.addCustomSearchPath(cp);
+        }
+    }
+    // Launch asynchronous non-blocking plugin scanner in the background
+    scanner.scanAll();
+
     // Initialize ASIO
     praccy::audio::AsioManager asio;
+
+    praccy::ui::RackView rackView(graph, asio, tuner, metronome, player, looper, midi, scenes, scanner);
+    rackView.setDspStats(&dspLoadPercent, &dspDropouts);
+
     asio.setAudioCallback([&](const praccy::audio::AudioBufferView& in, praccy::audio::AudioBufferView& out) {
         auto t0 = std::chrono::high_resolution_clock::now();
 
@@ -381,7 +392,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         player.process(out);
         metronome.process(out);
 
-        // 4. Measure real-time DSP cycle duration vs available buffer time slice
+        // 4. Retroactive Riff Buffer: capture live processed audio frames
+        const uint32_t outCh = out.numChannels();
+        const size_t numSamples = out.numSamples();
+        if (numSamples > 0 && outCh > 0) {
+            const float* outL = out.channel(0);
+            const float* outR = (outCh > 1) ? out.channel(1) : outL;
+            rackView.getRiffBuffer().push(outL, outR, numSamples);
+        }
+
+        // 5. Measure real-time DSP cycle duration vs available buffer time slice
         auto t1 = std::chrono::high_resolution_clock::now();
         double elapsedUs = std::chrono::duration<double, std::micro>(t1 - t0).count();
         double sampleRate = asio.currentSampleRate();
@@ -453,18 +473,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             graph.setMasterVolumeDb(-36.0f + (normVal * 42.0f));
         }
     });
-
-    praccy::plugins::PluginScanner scanner;
-    if (configLoaded) {
-        for (const auto& cp : appConfig.customPluginPaths) {
-            scanner.addCustomSearchPath(cp);
-        }
-    }
-    // Launch asynchronous non-blocking plugin scanner in the background
-    scanner.scanAll();
-
-    praccy::ui::RackView rackView(graph, asio, tuner, metronome, player, looper, midi, scenes, scanner);
-    rackView.setDspStats(&dspLoadPercent, &dspDropouts);
 
     // Pre-render and present the first frame to the swapchain backbuffer
     // BEFORE showing the window. This completely eliminates any white window flash or hang,
@@ -636,29 +644,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         case WM_DROPFILES: {
             HDROP hDrop = reinterpret_cast<HDROP>(wParam);
-            UINT fileCount = DragQueryFileW(hDrop, 0xFFFFFFFF, nullptr, 0);
-            for (UINT i = 0; i < fileCount; ++i) {
-                UINT pathLen = DragQueryFileW(hDrop, i, nullptr, 0);
-                if (pathLen > 0) {
-                    std::wstring filePathW(pathLen + 1, L'\0');
-                    DragQueryFileW(hDrop, i, filePathW.data(), pathLen + 1);
-                    filePathW.resize(pathLen);
-                    int utf8Len = WideCharToMultiByte(CP_UTF8, 0, filePathW.c_str(), -1, nullptr, 0, nullptr, nullptr);
-                    if (utf8Len > 0) {
-                        std::string filePathUtf8(utf8Len - 1, '\0');
-                        WideCharToMultiByte(CP_UTF8, 0, filePathW.c_str(), -1, filePathUtf8.data(), utf8Len, nullptr, nullptr);
-                        std::filesystem::path droppedPath(filePathW);
-                        if (isValidWavFile(droppedPath)) {
-                            if (s_dropContext.player) {
-                                s_dropContext.player->loadWavFile(filePathUtf8);
-                            }
-                            if (s_dropContext.looper) {
-                                s_dropContext.looper->loadWavFile(filePathUtf8);
-                            }
-                        }
-                    }
-                }
-            }
+            g_dragDropRouter.handleDropMessage(hDrop);
             DragFinish(hDrop);
             return 0;
         }

@@ -1,37 +1,45 @@
-# Progress — Milestone 2
+# Progress Log — Milestone 2 Worker
 
-Last visited: 2026-10-06T21:59:45Z
+Last visited: 2026-10-12T18:37:30Z
 
-- [x] Initialized DISPATCH.md, BRIEFING.md, and progress.md
-- [x] Read foundational files:
-  - [x] ORIGINAL_REQUEST.md
-  - [x] orchestrator/PROJECT.md
-  - [x] explorer_m2_1 handoff (Features 7 & 8)
-  - [x] explorer_m2_2 handoff (Feature 9)
-  - [x] explorer_m2_3 handoff (Features 10, 11, 12, 13)
-- [x] Feature 7 & 8: In-Process ZIP Extraction & Direct Updater Execution
-  - Vendored miniz v3.1.2 in `third_party/miniz/`
-  - Implemented `sanitizeZipEntryPath` with Zip Slip defense
-  - Implemented `extractZipArchive` with in-process miniz and Zip Bomb quotas
-  - Implemented `applyUpdateAndRestart` via Win32 `CreateProcessW` directly invoking `Praccy.exe --apply-update`
-  - Implemented `--apply-update` updater loop in `src/main.cpp`
-  - Eliminated all occurrences of `std::system`, `cmd.exe`, `powershell.exe`, and batch files
-- [x] Feature 9: Win32 SEH/VEH Plugin Crash Isolation
-  - Implemented `src/plugins/crash_isolation.h` with MSVC C2712 leaf SEH and MinGW VEH + setjmp/longjmp context stack
-  - Added fault tracking (`m_faulted`, `m_faultReason`, `isFaulted()`) to `AudioNode` and `IPluginInstance`
-  - Wrapped VST3 and CLAP audio processing, parameter queries, GUI, and state calls in crash isolation
-  - Implemented instant dry signal bypass in `PluginSlot::process()`
-  - Added crimson fault alert badge, dry signal indicator, and reload button in `src/ui/rack_view.cpp`
-- [x] Features 10, 11, 12: Non-throwing std::from_chars parsing, window placement, compiler hardening
-  - Created `src/utils/parse_utils.h` with `parseInteger`, `parseFloat`, `parseDouble`, `parseHexByte`, `hexToBytes`
-  - Refactored `src/state/scene_manager.cpp` and `src/state/app_config.cpp` to non-throwing parsing
-  - Implemented `saveWindowPlacement` and `restoreWindowPlacement` with `MonitorFromRect` multi-monitor validation
-  - Hardened `CMakeLists.txt` with `/W4 /WX` and `-Wall -Wextra -Werror` while cleanly isolating third-party sources
-- [x] Feature 13 & Testing: Unit tests in tests/test_praccy.cpp, build & test verification
-  - Added `testZipSlipSanitization()`
-  - Added `testInProcessMinizArchiveExtraction()`
-  - Added `testZeroProhibitedCommandsInCodebase()` (45 files inspected)
-  - Added `testPluginCrashIsolation()`
-  - Added `testCorruptedPresetsIni()`
-  - Verified 19/19 tests passing cleanly
-- [x] Final handoff report authored and parent notified
+## Status
+Milestone 2 (Shared Infrastructure & State Engine) implementation complete across all 6 technical objectives.
+Empirical verification:
+- `test_challenger_m2` passes (exit code 0).
+- `test_challenger_m2_1` passes (exit code 0).
+- Clean compilation for all 10 project build targets with zero errors.
+
+## Completed Objectives
+1. **Archive Security & Utility (`src/utils/archive_utils.h` & `archive_utils.cpp`)**:
+   - In-process ZIP extraction wrapping vendored `miniz`.
+   - Native Win32 path sanitization (`sanitizeZipPath`): blocks Zip Slip traversal, drive letters, UNC shares, reserved MS-DOS device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`), null bytes, trailing spaces/dots.
+   - Decompression bomb guards: `MAX_SINGLE_FILE = 30MB`, `MAX_TOTAL_UNCOMPRESSED = 128MB`, `MAX_COMPRESSION_RATIO = 100`, `MAX_FILE_COUNT = 100`.
+   - Refactored `src/ui/update_checker.cpp` to use `praccy::utils::archive_utils::extractZipArchive`.
+
+2. **Centralized Drag-and-Drop Routing (`src/ui/drag_drop_router.h` & `drag_drop_router.cpp`)**:
+   - Implemented `DragDropRouter` classifying dropped files:
+     - Audio tracks (`.wav`, `.wave`, `.flac`, `.mp3`, `.ogg`, `.aiff`, `.aif`) -> AudioPlayer / QuickLooper.
+     - Presets (`.pracpreset`, `.ini`, `.preset`, `.vstpreset`, `.clappreset`) -> SceneManager.
+     - Signal chains (`.pracchaim`, `.chain`, `.rack`) -> RackView / GraphEngine.
+   - Parsed Win32 `HDROP` handles with Win32 `DragQueryFileW`.
+   - Connected router to `src/main.cpp` `WM_DROPFILES` message handler.
+
+3. **Flat O(1) MIDI CC Dispatch Table (`src/midi/midi_manager.h` & `midi_manager.cpp`)**:
+   - Replaced $O(N)$ vector traversal with flat lookup matrix `FlatCcBinding m_ccTable[17][128]` (channels 0..16, CC 0..127).
+   - O(1) lookup in `handleControlChange(channel, cc, val)`.
+   - Strictly 0 heap allocations and 0 mutex locks in the CC dispatch path.
+
+4. **AppConfig Retroactive Buffer Persistence (`src/state/app_config.h` & `app_config.cpp`)**:
+   - Added `uint32_t retroactiveBufferMinutes{2};` with validation for allowed durations (1, 2, 5, 10 minutes).
+   - Implemented loading and saving in `config.ini` under `[Audio] retroactive_buffer_minutes`.
+
+5. **Transactional UndoManager (`src/state/undo_manager.h` & `undo_manager.cpp`)**:
+   - Full-fidelity transactional state undo/redo engine with 64 history levels.
+   - Captures `ScenePreset` snapshots.
+   - Coalescing logic: 400ms idle threshold for continuous parameter sweeps, structural rack mutations, scene switches, mouse-release commits.
+   - Equality operators for `PluginSlotPreset`, `BranchPreset`, `NodePreset`, `ScenePreset`.
+   - Seamless crossfading integration via `applyScenePresetToGraph`.
+
+6. **Build System Updates (`CMakeLists.txt`)**:
+   - Added `src/utils/archive_utils.cpp`, `src/ui/drag_drop_router.cpp`, `src/state/undo_manager.cpp` to `Praccy`, `test_praccy`, `test_challenger_m2`, `test_challenger_m2_1`.
+   - Re-enabled `test_asio_driver` compilation with `-Wno-mismatched-new-delete`.

@@ -9,11 +9,15 @@
 #include "../plugins/vst3_host.h"
 #include "../plugins/plugin_window.h"
 #include "../state/app_config.h"
+#include "../utils/wav_writer.h"
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
+#include <regex>
+#include <filesystem>
+#include <ctime>
 
 namespace praccy::ui {
 
@@ -179,6 +183,12 @@ RackView::RackView(audio::GraphEngine& graph,
       m_pluginBrowserModal(std::make_unique<PluginBrowserModal>(scanner, graph)),
       m_settingsModal(std::make_unique<SettingsModal>(asio, scanner, [this]() { m_pluginBrowserModal->open(); })),
       m_practiceToolsModal(std::make_unique<PracticeToolsModal>(looper, player)) {
+    state::AppConfig cfg;
+    cfg.load();
+    m_riffBuffer.prepare(48000.0, static_cast<int>(cfg.retroactiveBufferMinutes));
+    m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Initial Scene"),
+                               "Initial Scene",
+                               state::UndoActionType::SceneSwitch);
 }
 
 void RackView::render() {
@@ -208,19 +218,119 @@ void RackView::render() {
         renderSignalRack();
         renderBottomBar();
 
-        // Keyboard shortcuts
+        // Keyboard shortcuts - strictly guarded by !io.WantTextInput
         ImGuiIO& io = ImGui::GetIO();
         if (!io.WantTextInput) {
+            // 1. Undo / Redo: Ctrl+Z, Ctrl+Y, Ctrl+Shift+Z
+            if (io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
+                if (m_undoManager.canUndo()) {
+                    m_undoManager.undo(m_graph, m_scenes);
+                    triggerHudToast("UNDO: " + m_undoManager.lastActionDescription());
+                } else {
+                    triggerHudToast("NOTHING TO UNDO");
+                }
+            } else if ((io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y, false)) ||
+                       (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false))) {
+                if (m_undoManager.canRedo()) {
+                    m_undoManager.redo(m_graph, m_scenes);
+                    triggerHudToast("REDO: " + m_undoManager.lastActionDescription());
+                } else {
+                    triggerHudToast("NOTHING TO REDO");
+                }
+            }
+
+            // 2. Global Map Mode: Ctrl+M, Ctrl+K
+            if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_M, false)) {
+                m_midiMapMode = !m_midiMapMode;
+                if (m_midiMapMode) m_keyMapMode = false;
+                triggerHudToast(m_midiMapMode ? "MIDI MAP MODE: ACTIVE" : "MIDI MAP MODE: OFF");
+            }
+            if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_K, false)) {
+                m_keyMapMode = !m_keyMapMode;
+                if (m_keyMapMode) m_midiMapMode = false;
+                triggerHudToast(m_keyMapMode ? "KEY MAP MODE: ACTIVE" : "KEY MAP MODE: OFF");
+            }
+
+            // 3. Retroactive Riff capture: Ctrl+Shift+R
+            if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_R, false)) {
+                saveLastRiff();
+            }
+
+            // 4. Spotlight palette: Ctrl+P
             if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_P, false)) {
                 m_pluginBrowserModal->open();
             }
 
+            // 5. Presets 1-8
             for (int k = 0; k < 8 && k < static_cast<int>(m_scenes.numScenes()); ++k) {
                 if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_1 + k), false)) {
                     if (m_scenes.applyScene(k, m_graph)) {
                         triggerHudToast("PRESET " + std::to_string(k + 1) + " RECALLED");
+                        m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Recall Preset " + std::to_string(k + 1)),
+                                                   "Preset " + std::to_string(k + 1),
+                                                   state::UndoActionType::SceneSwitch);
                     }
                 }
+            }
+
+            // 6. Focused Card Shortcuts: [, ], Q, 0
+            if (!m_focusedSlot && m_graph.numNodes() > 0) {
+                for (size_t n = 0; n < m_graph.numNodes(); ++n) {
+                    auto* node = m_graph.getNode(n);
+                    if (node && node->type() == audio::NodeType::Plugin) {
+                        m_focusedSlot = dynamic_cast<audio::PluginSlot*>(node);
+                        m_focusedSlotIndex = static_cast<int>(n);
+                        break;
+                    }
+                }
+            }
+
+            if (m_focusedSlot) {
+                if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket, false)) {
+                    cycleAdjacentScenePreset(-1);
+                } else if (ImGui::IsKeyPressed(ImGuiKey_RightBracket, false)) {
+                    cycleAdjacentScenePreset(+1);
+                }
+
+                if (ImGui::IsKeyPressed(ImGuiKey_Q, false)) {
+                    m_pluginBrowserModal->open();
+                }
+
+                if (ImGui::IsKeyPressed(ImGuiKey_0, false)) {
+                    m_focusedSlot->setBypassed(!m_focusedSlot->isBypassed());
+                    triggerHudToast(m_focusedSlot->isBypassed() ? ("BYPASS: " + m_focusedSlot->name())
+                                                                : ("ACTIVE: " + m_focusedSlot->name()));
+                    m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Bypass " + m_focusedSlot->name()),
+                                               "Bypass: " + m_focusedSlot->name(),
+                                               state::UndoActionType::ParameterTweak);
+                }
+            }
+        }
+
+        // Global Map Mode Pulsating Violet Canvas Border
+        if (m_midiMapMode || m_keyMapMode) {
+            const auto& tokens = themeTokens();
+            const ImGuiViewport* vp = ImGui::GetMainViewport();
+            if (vp) {
+                float t = static_cast<float>(ImGui::GetTime());
+                float alpha = 0.45f + 0.45f * std::sin(4.0f * t);
+                ImU32 violet = ColorToken(tokens.borders.mapModeViolet.r,
+                                          tokens.borders.mapModeViolet.g,
+                                          tokens.borders.mapModeViolet.b,
+                                          alpha);
+
+                ImDrawList* fg = ImGui::GetForegroundDrawList();
+                fg->AddRect(vp->Pos, ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y), violet, 0.0f, 0, 4.0f);
+
+                const char* mapBanner = m_midiMapMode ? "● MIDI MAP MODE ACTIVE — CLICK ANY CONTROL TO LEARN MIDI CC"
+                                                      : "● KEY MAP MODE ACTIVE — CLICK ANY CONTROL TO ASSIGN KEY";
+                ImVec2 bSz = ImGui::CalcTextSize(mapBanner);
+                ImVec2 bPos(vp->Pos.x + (vp->Size.x - bSz.x) * 0.5f, vp->Pos.y + 10.0f);
+                fg->AddRectFilled(ImVec2(bPos.x - 12.0f, bPos.y - 4.0f), ImVec2(bPos.x + bSz.x + 12.0f, bPos.y + bSz.y + 4.0f),
+                                  tokens.surfaces.popupBg, 4.0f);
+                fg->AddRect(ImVec2(bPos.x - 12.0f, bPos.y - 4.0f), ImVec2(bPos.x + bSz.x + 12.0f, bPos.y + bSz.y + 4.0f),
+                            violet, 4.0f, 0, 1.5f);
+                fg->AddText(bPos, tokens.text.accent.u32, mapBanner);
             }
         }
 
@@ -714,20 +824,119 @@ void RackView::renderSceneBar() {
 
         bool isActive = (static_cast<int>(s) == m_scenes.activeSceneIndex());
         if (isActive) {
-            ImGui::PushStyleColor(ImGuiCol_Button, tokens.signal.active.vec4);
+            ImGui::PushStyleColor(ImGuiCol_Button, tokens.surfaces.sceneActiveEmerald.vec4);
+            ImGui::PushStyleColor(ImGuiCol_Border, tokens.borders.focus.vec4);
             ImGui::PushStyleColor(ImGuiCol_Text, tokens.text.primary.vec4);
         }
 
         if (CenteredButton(sc->name.c_str())) {
             m_scenes.applyScene(static_cast<int>(s), m_graph);
             triggerHudToast("Loaded " + sc->name);
+            m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, sc->name),
+                                       sc->name,
+                                       state::UndoActionType::SceneSwitch);
         }
 
         if (isActive) {
-            ImGui::PopStyleColor(2);
+            ImGui::PopStyleColor(3);
         }
         ImGui::SameLine(0, 8);
     }
+
+    // Instant A/B Tone Snapshot Comparison Toggle
+    ImGui::SameLine(0, 10);
+    ImGui::TextColored(tokens.text.muted.vec4, "|");
+    ImGui::SameLine(0, 10);
+    ImGui::TextColored(tokens.text.secondary.vec4, "A/B:");
+    ImGui::SameLine(0, 6);
+
+    const bool isToneAActive = (m_scenes.activeToneSnapshot() == state::SceneManager::ToneSnapshotSlot::A);
+    const bool isToneBActive = (m_scenes.activeToneSnapshot() == state::SceneManager::ToneSnapshotSlot::B);
+
+    if (isToneAActive) {
+        ImGui::PushStyleColor(ImGuiCol_Button, tokens.surfaces.sceneActiveEmerald.vec4);
+        ImGui::PushStyleColor(ImGuiCol_Border, tokens.borders.focus.vec4);
+    }
+    if (CenteredButton(" A ##ToneA", ImVec2(28, 22))) {
+        if (!isToneAActive) {
+            if (isToneBActive) {
+                m_scenes.captureToneSnapshotB(m_graph);
+            }
+            if (m_scenes.hasToneSnapshotA()) {
+                m_scenes.applyToneSnapshotA(m_graph);
+                triggerHudToast("A/B: SWITCHED TO TONE A");
+            } else {
+                m_scenes.captureToneSnapshotA(m_graph);
+                m_scenes.setActiveToneSnapshot(state::SceneManager::ToneSnapshotSlot::A);
+                triggerHudToast("A/B: STORED TO TONE A");
+            }
+        }
+    }
+    if (isToneAActive) {
+        ImGui::PopStyleColor(2);
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Instant A/B Tone Memory A (Click to compare with 10ms crossfade)");
+
+    ImGui::SameLine(0, 4);
+    if (isToneBActive) {
+        ImGui::PushStyleColor(ImGuiCol_Button, tokens.surfaces.sceneActiveEmerald.vec4);
+        ImGui::PushStyleColor(ImGuiCol_Border, tokens.borders.focus.vec4);
+    }
+    if (CenteredButton(" B ##ToneB", ImVec2(28, 22))) {
+        if (!isToneBActive) {
+            if (isToneAActive || m_scenes.activeToneSnapshot() == state::SceneManager::ToneSnapshotSlot::None) {
+                m_scenes.captureToneSnapshotA(m_graph);
+            }
+            if (m_scenes.hasToneSnapshotB()) {
+                m_scenes.applyToneSnapshotB(m_graph);
+                triggerHudToast("A/B: SWITCHED TO TONE B");
+            } else {
+                m_scenes.copyToneSnapshotAToB();
+                m_scenes.setActiveToneSnapshot(state::SceneManager::ToneSnapshotSlot::B);
+                triggerHudToast("A/B: INITIALIZED TONE B FROM TONE A");
+            }
+        }
+    }
+    if (isToneBActive) {
+        ImGui::PopStyleColor(2);
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Instant A/B Tone Memory B (Click to compare with 10ms crossfade)");
+
+    ImGui::SameLine(0, 4);
+    if (CenteredButton("Copy A->B##ToneCopy", ImVec2(76, 22))) {
+        m_scenes.captureToneSnapshotA(m_graph);
+        m_scenes.copyToneSnapshotAToB();
+        triggerHudToast("A/B: COPIED TONE A TO B");
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copy current Tone A snapshot memory to Tone B");
+
+    // Instant Undo / Redo in SceneBar
+    ImGui::SameLine(0, 10);
+    ImGui::TextColored(tokens.text.muted.vec4, "|");
+    ImGui::SameLine(0, 10);
+
+    bool canUndo = m_undoManager.canUndo();
+    if (!canUndo) ImGui::BeginDisabled();
+    if (CenteredButton("Undo##SceneUndo", ImVec2(48, 22))) {
+        m_undoManager.undo(m_graph, m_scenes);
+        triggerHudToast("UNDO: " + m_undoManager.lastActionDescription());
+    }
+    if (!canUndo) ImGui::EndDisabled();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Undo last parameter or chain edit (Ctrl+Z)");
+
+    ImGui::SameLine(0, 4);
+    bool canRedo = m_undoManager.canRedo();
+    if (!canRedo) ImGui::BeginDisabled();
+    if (CenteredButton("Redo##SceneRedo", ImVec2(48, 22))) {
+        m_undoManager.redo(m_graph, m_scenes);
+        triggerHudToast("REDO: " + m_undoManager.lastActionDescription());
+    }
+    if (!canRedo) ImGui::EndDisabled();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Redo last undone edit (Ctrl+Y / Ctrl+Shift+Z)");
+
+    ImGui::SameLine(0, 10);
+    ImGui::TextColored(tokens.text.muted.vec4, "|");
+    ImGui::SameLine(0, 10);
 
     if (CenteredButton("Save Scene")) {
         m_scenes.captureCurrentScene(m_scenes.activeSceneIndex(), m_graph);
@@ -1049,6 +1258,8 @@ void RackView::renderInputCard(float cardY) {
 void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int blockIndex, int branchIndex) {
     if (!slot) return;
 
+    initMacrosForSlot(slot);
+
     ImGui::BeginGroup();
     const auto& tokens = themeTokens();
     auto* pluginInst = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
@@ -1065,6 +1276,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
     // Standardized exact dimensions: 240 x 224 px
     const float cardWidth = 240.0f;
     const float cardHeight = 224.0f;
+    const ImVec2 cardScreenMin = ImGui::GetCursorScreenPos();
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 6.0f));
     ImGui::BeginChild(childId, ImVec2(cardWidth, cardHeight), true, ImGuiWindowFlags_NoScrollbar);
 
@@ -1112,8 +1324,18 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         const ImVec4 titleColor = isFaulted ? tokens.signal.faulted.vec4 :
                                   (bypassed ? tokens.signal.bypassed.vec4 : tokens.text.primary.vec4);
         ImGui::TextColored(titleColor, "%s", displayTitle.c_str());
+
+        // Header drag-and-drop source
+        if (branchIndex == -1) {
+            if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+                CardDragPayload payload{slotIndex, blockIndex, branchIndex};
+                ImGui::SetDragDropPayload("RACK_CARD_PAYLOAD", &payload, sizeof(payload));
+                ImGui::Text("Moving %s (Slot %d)", slot->name().c_str(), slotIndex + 1);
+                ImGui::EndDragDropSource();
+            }
+        }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("%s (%s)", rawName.c_str(), pluginInst ? pluginInst->vendor().c_str() : "Praccy Audio");
+            ImGui::SetTooltip("%s (%s)\nDrag to reorder slot", rawName.c_str(), pluginInst ? pluginInst->vendor().c_str() : "Praccy Audio");
         }
 
         // Action buttons & Sliding Pill Toggle on far right
@@ -1124,6 +1346,9 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             std::snprintf(spId, sizeof(spId), "##Sp_%d", slotIndex);
             if (renderCenteredSplitButton(spId, ImVec2(18, 18))) {
                 m_graph.splitSerialNodeIntoParallel(slotIndex);
+                m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Split Parallel"),
+                                           "Split Parallel",
+                                           state::UndoActionType::StructuralMutation);
                 ImGui::EndChild();
                 ImGui::PopStyleVar();
                 ImGui::PopStyleColor();
@@ -1149,6 +1374,9 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                     if (br) br->removeSlot(slotIndex);
                 }
             }
+            m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Delete Slot"),
+                                       "Delete Slot",
+                                       state::UndoActionType::StructuralMutation);
             ImGui::EndChild();
             ImGui::PopStyleVar();
             ImGui::PopStyleColor();
@@ -1164,17 +1392,20 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         std::snprintf(pillId, sizeof(pillId), "##Pill_%d_%d_%d", slotIndex, blockIndex, branchIndex);
         if (renderSlidingPillToggle(pillId, &activeState, ImVec2(38.0f, 18.0f))) {
             slot->setBypassed(!activeState);
+            m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Toggle Bypass"),
+                                       "Bypass: " + slot->name(),
+                                       state::UndoActionType::ParameterTweak);
         }
     }
 
     // =========================================================================
-    // SECTION 2: BODY SECTION (H = 96px, Y = 36px..132px)
+    // SECTION 2: BODY SECTION (H = 56px, Y = 34px..90px)
     // =========================================================================
     {
-        ImGui::SetCursorPos(ImVec2(8.0f, 36.0f));
+        ImGui::SetCursorPos(ImVec2(8.0f, 34.0f));
         const ImVec2 previewPos = ImGui::GetCursorScreenPos();
         const float previewW = 224.0f;
-        const float previewH = 96.0f;
+        const float previewH = 56.0f;
         ImDrawList* dl = ImGui::GetWindowDrawList();
 
         Thumbnail* thumb = ThumbnailManager::instance().getThumbnail(slot->name());
@@ -1210,18 +1441,18 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         if (isFaulted) {
             const char* crashTitle = "PLUGIN CRASH ISOLATED";
             ImVec2 tSz = ImGui::CalcTextSize(crashTitle);
-            dl->AddText(ImVec2(previewPos.x + (previewW - tSz.x) * 0.5f, previewPos.y + 16.0f),
+            dl->AddText(ImVec2(previewPos.x + (previewW - tSz.x) * 0.5f, previewPos.y + 8.0f),
                         tokens.signal.faulted, crashTitle);
 
             const char* crashSub = "Dry signal pass-through active";
             ImVec2 sSz = ImGui::CalcTextSize(crashSub);
-            dl->AddText(ImVec2(previewPos.x + (previewW - sSz.x) * 0.5f, previewPos.y + 36.0f),
+            dl->AddText(ImVec2(previewPos.x + (previewW - sSz.x) * 0.5f, previewPos.y + 24.0f),
                         tokens.text.secondary, crashSub);
 
-            ImGui::SetCursorScreenPos(ImVec2(previewPos.x + (previewW - 130.0f) * 0.5f, previewPos.y + 58.0f));
+            ImGui::SetCursorScreenPos(ImVec2(previewPos.x + (previewW - 130.0f) * 0.5f, previewPos.y + 32.0f));
             char reloadBtnId[48];
             std::snprintf(reloadBtnId, sizeof(reloadBtnId), "RELOAD PLUGIN##%d_%d_%d", slotIndex, blockIndex, branchIndex);
-            if (ImGui::Button(reloadBtnId, ImVec2(130.0f, 24.0f))) {
+            if (ImGui::Button(reloadBtnId, ImVec2(130.0f, 20.0f))) {
                 pluginInst->resetFault();
             }
         } else if (thumb && thumb->srv) {
@@ -1260,17 +1491,16 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                 dl->AddText(pPos, tokens.text.primary, expandPrompt);
             }
         } else {
-            // High-Tech Procedural Vector Waveform Faceplate (Eliminated all inert dummy knobs!)
+            // High-Tech Procedural Vector Waveform Faceplate
             float midY = previewPos.y + previewH * 0.5f;
             float leftX = previewPos.x + 16.0f;
             float rightX = previewPos.x + previewW - 16.0f;
 
-            // Draw clean DSP sine/drive waveform polyline
             ImVec2 wavePts[16];
             for (int w = 0; w < 16; ++w) {
                 float frac = w / 15.0f;
                 float x = leftX + frac * (rightX - leftX);
-                float y = midY - std::sin(frac * 6.2831853f * 2.0f) * 18.0f * (bypassed ? 0.3f : 1.0f);
+                float y = midY - std::sin(frac * 6.2831853f * 2.0f) * 12.0f * (bypassed ? 0.3f : 1.0f);
                 wavePts[w] = ImVec2(x, y);
             }
             ImU32 waveCol = bypassed ? static_cast<ImU32>(tokens.text.muted) :
@@ -1279,7 +1509,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
 
             const char* promptText = isWindowOpen ? "PARAMETERS OPEN" : "CLICK TO TWEAK DSP";
             ImVec2 pSz = ImGui::CalcTextSize(promptText);
-            dl->AddText(ImVec2(previewPos.x + (previewW - pSz.x) * 0.5f, previewPos.y + 68.0f),
+            dl->AddText(ImVec2(previewPos.x + (previewW - pSz.x) * 0.5f, previewPos.y + 38.0f),
                         isPreviewHovered ? tokens.text.primary.u32 : tokens.text.secondary.u32, promptText);
         }
 
@@ -1290,6 +1520,8 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         dl->AddRect(previewPos, ImVec2(previewPos.x + previewW, previewPos.y + previewH), frameBorder, 5.0f, 0, 1.5f);
 
         if (previewClicked && !isFaulted) {
+            m_focusedSlot = slot;
+            m_focusedSlotIndex = slotIndex;
             if (hasGui) {
                 plugins::PluginWindowManager::instance().openPluginWindow(pluginInst);
                 HWND hw = plugins::PluginWindowManager::instance().getWindow(pluginInst);
@@ -1306,33 +1538,124 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
     }
 
     // =========================================================================
-    // SECTION 3: PARAMETER READOUT HEADER (H = 16px, Y = 136px..152px)
-    // Monospace Font g_fontMono guarantees jitter-free stable layout
+    // SECTION 3: 4 FRONT-PANEL MACRO MINI-KNOBS (H = 54px, Y = 94px..148px)
     // =========================================================================
     {
-        ImGui::SetCursorPos(ImVec2(8.0f, 136.0f));
-        if (g_fontMono) ImGui::PushFont(g_fontMono);
+        auto& macros = m_slotMacros[slot];
+        const float colW = 56.0f;
+        const float knobR = 11.0f;
+        const float knobY = 94.0f;
 
-        float mixVal = slot->dryWet() * 100.0f;
-        char mixStr[32];
-        std::snprintf(mixStr, sizeof(mixStr), "MIX: %3.0f%%", mixVal);
-        ImGui::TextColored(tokens.text.accent.vec4, "%s", mixStr);
+        for (int m = 0; m < 4; ++m) {
+            auto& macro = macros[m];
+            float colX = 8.0f + static_cast<float>(m) * colW;
 
-        ImGui::SameLine(cardWidth - 8.0f - 96.0f);
-        float trimVal = slot->outputGainDb();
-        char trimStr[32];
-        std::snprintf(trimStr, sizeof(trimStr), "TRIM:%+5.1fdB", trimVal);
-        ImGui::TextColored(tokens.text.secondary.vec4, "%s", trimStr);
+            // Sync current value from real source
+            if (macro.bound && pluginInst) {
+                macro.currentValue = pluginInst->getParameterValue(macro.paramId);
+            } else if (macro.isSlotTrim) {
+                macro.currentValue = slot->outputGainDb();
+            } else if (macro.isSlotMix) {
+                macro.currentValue = slot->dryWet() * 100.0f;
+            }
 
-        if (g_fontMono) ImGui::PopFont();
+            ImGui::SetCursorPos(ImVec2(colX + 13.0f, knobY));
+            char knobId[64];
+            std::snprintf(knobId, sizeof(knobId), "##MacroKnob_%d_%d_%d_%d", slotIndex, blockIndex, branchIndex, m);
+
+            bool changed = renderRotaryKnob(knobId, &macro.currentValue, macro.minValue, macro.maxValue,
+                                           knobR, "%.1f", macro.defaultValue);
+
+            if (changed) {
+                if (macro.bound) {
+                    slot->setParameter(macro.paramId, macro.currentValue);
+                } else if (macro.isSlotTrim) {
+                    slot->setOutputGainDb(macro.currentValue);
+                } else if (macro.isSlotMix) {
+                    slot->setDryWet(macro.currentValue / 100.0f);
+                }
+            }
+
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                m_undoManager.pushSnapshot(
+                    state::SceneManager::captureGraphSnapshot(m_graph, "Tweak " + macro.label),
+                    "Macro: " + macro.label,
+                    state::UndoActionType::ParameterTweak,
+                    slot->name() + ":" + macro.label
+                );
+            }
+
+            char macroPopupId[64];
+            std::snprintf(macroPopupId, sizeof(macroPopupId), "MacroCtx_%d_%d_%d_%d", slotIndex, blockIndex, branchIndex, m);
+            if (ImGui::BeginPopupContextItem(macroPopupId)) {
+                ImGui::TextColored(tokens.text.accent.vec4, "REASSIGN MACRO %d", m + 1);
+                ImGui::Separator();
+
+                if (pluginInst) {
+                    size_t pCount = pluginInst->numParameters();
+                    for (size_t p = 0; p < pCount; ++p) {
+                        auto desc = pluginInst->getParameterDesc(p);
+                        bool isSel = macro.bound && (macro.paramId == desc.id);
+                        if (ImGui::Selectable(desc.name.c_str(), isSel)) {
+                            macro.bound = true;
+                            macro.isSlotMix = false;
+                            macro.isSlotTrim = false;
+                            macro.paramId = desc.id;
+                            macro.label = desc.name;
+                            macro.minValue = desc.minValue;
+                            macro.maxValue = desc.maxValue;
+                            macro.defaultValue = desc.defaultValue;
+                            macro.currentValue = pluginInst->getParameterValue(desc.id);
+                        }
+                    }
+                    ImGui::Separator();
+                }
+
+                if (ImGui::Selectable("Slot Dry/Wet Mix", macro.isSlotMix)) {
+                    macro.bound = false;
+                    macro.isSlotMix = true;
+                    macro.isSlotTrim = false;
+                    macro.label = "MIX";
+                    macro.minValue = 0.0f;
+                    macro.maxValue = 100.0f;
+                    macro.defaultValue = 100.0f;
+                    macro.currentValue = slot->dryWet() * 100.0f;
+                }
+                if (ImGui::Selectable("Slot Output Trim", macro.isSlotTrim)) {
+                    macro.bound = false;
+                    macro.isSlotMix = false;
+                    macro.isSlotTrim = true;
+                    macro.label = "TRIM";
+                    macro.minValue = -24.0f;
+                    macro.maxValue = 12.0f;
+                    macro.defaultValue = 0.0f;
+                    macro.currentValue = slot->outputGainDb();
+                }
+
+                ImGui::EndPopup();
+            }
+
+            // Micro-label centered beneath knob
+            std::string dLabel = (m == 0 ? "GAIN" : (m == 1 ? "TONE" : (m == 2 ? "VOL" : "MIX")));
+            if (!macro.label.empty()) {
+                if (macro.label.size() <= 5) {
+                    dLabel = macro.label;
+                } else {
+                    dLabel = macro.label.substr(0, 4) + ".";
+                }
+            }
+            ImVec2 lSz = ImGui::CalcTextSize(dLabel.c_str());
+            ImGui::SetCursorPos(ImVec2(colX + (colW - lSz.x) * 0.5f, 132.0f));
+            ImGui::TextColored(tokens.text.secondary.vec4, "%s", dLabel.c_str());
+        }
     }
 
     // =========================================================================
-    // SECTION 4: TACTILE MIX SLIDER & MINI METER (H = 26px, Y = 156px..182px)
+    // SECTION 4: TACTILE MIX SLIDER & MINI METER (H = 26px, Y = 152px..178px)
     // =========================================================================
     {
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 3.5f));
-        ImGui::SetCursorPos(ImVec2(8.0f, 156.0f));
+        ImGui::SetCursorPos(ImVec2(8.0f, 152.0f));
 
         float mix = slot->dryWet() * 100.0f;
         char mixLabel[32];
@@ -1341,6 +1664,14 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         if (ResettableSliderFloat(mixLabel, &mix, 0.0f, 100.0f, 100.0f, "Mix: %.0f%%")) {
             slot->setDryWet(mix / 100.0f);
         }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            m_undoManager.pushSnapshot(
+                state::SceneManager::captureGraphSnapshot(m_graph, "Mix " + slot->name()),
+                "Mix: " + slot->name(),
+                state::UndoActionType::ParameterTweak,
+                slot->name() + ":Mix"
+            );
+        }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Dry/Wet Mix (Double-click to reset 100%%)");
 
         ImGui::SameLine(0, 6.0f);
@@ -1348,16 +1679,24 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
     }
 
     // =========================================================================
-    // SECTION 5: TACTILE OUTPUT TRIM SLIDER (H = 26px, Y = 186px..212px)
+    // SECTION 5: TACTILE OUTPUT TRIM SLIDER (H = 26px, Y = 182px..208px)
     // =========================================================================
     {
-        ImGui::SetCursorPos(ImVec2(8.0f, 186.0f));
+        ImGui::SetCursorPos(ImVec2(8.0f, 182.0f));
         float outTrim = slot->outputGainDb();
         char trimLabel[32];
         std::snprintf(trimLabel, sizeof(trimLabel), "##Trim_%d_%d_%d", slotIndex, blockIndex, branchIndex);
         ImGui::SetNextItemWidth(206.0f);
         if (ResettableSliderFloat(trimLabel, &outTrim, -24.0f, +12.0f, 0.0f, "Trim: %+.1f dB")) {
             slot->setOutputGainDb(outTrim);
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            m_undoManager.pushSnapshot(
+                state::SceneManager::captureGraphSnapshot(m_graph, "Trim " + slot->name()),
+                "Trim: " + slot->name(),
+                state::UndoActionType::ParameterTweak,
+                slot->name() + ":Trim"
+            );
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Output Trim (Double-click to reset 0.0 dB)");
         ImGui::PopStyleVar(); // FramePadding
@@ -1404,6 +1743,9 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                     if (br) br->removeSlot(slotIndex);
                 }
             }
+            m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Delete Slot"),
+                                       "Delete Slot",
+                                       state::UndoActionType::StructuralMutation);
         }
         ImGui::EndPopup();
     }
@@ -1411,6 +1753,32 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
     ImGui::EndChild();
     ImGui::PopStyleVar(); // WindowPadding
     ImGui::PopStyleColor(); // ChildBg
+
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+        m_focusedSlot = slot;
+        m_focusedSlotIndex = slotIndex;
+    }
+
+    if (m_focusedSlot == slot) {
+        ImDrawList* fgDl = ImGui::GetWindowDrawList();
+        fgDl->AddRect(cardScreenMin, ImVec2(cardScreenMin.x + cardWidth, cardScreenMin.y + cardHeight),
+                      tokens.borders.focus.u32, 6.0f, 0, 2.0f);
+    }
+
+    if (branchIndex == -1 && ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("RACK_CARD_PAYLOAD")) {
+            const auto* pl = static_cast<const CardDragPayload*>(p->Data);
+            if (pl && pl->sourceIndex >= 0 && pl->sourceIndex != slotIndex) {
+                m_graph.reorderNodes(static_cast<size_t>(pl->sourceIndex), static_cast<size_t>(slotIndex));
+                triggerHudToast("REORDERED: " + slot->name());
+                m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Reorder Rack"),
+                                           "Reorder Rack",
+                                           state::UndoActionType::StructuralMutation);
+            }
+        }
+        ImGui::EndDragDropTarget();
+    }
+
     ImGui::EndGroup();
 }
 
@@ -1979,6 +2347,52 @@ void RackView::renderBottomBar() {
         ImGui::SetTooltip("Open Practice Tools (Riff Looper & WAV Backing Track Player)");
     }
 
+    ImGui::SameLine(0, 8);
+    ImGui::PushStyleColor(ImGuiCol_Button, tokens.surfaces.buttonBg.vec4);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, tokens.surfaces.buttonBgHovered.vec4);
+    ImGui::PushStyleColor(ImGuiCol_Text, tokens.text.accent.vec4);
+    if (CenteredButton("★ Save Last Riff", ImVec2(125.0f, 26.0f))) {
+        saveLastRiff();
+    }
+    ImGui::PopStyleColor(3);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("%s", "Export circular audio buffer to %USERPROFILE%\\Documents\\Praccy\\Riffs\\ (Ctrl+Shift+R)");
+    }
+
+    ImGui::SameLine(0, 8);
+    if (m_midiMapMode) {
+        ImGui::PushStyleColor(ImGuiCol_Button, tokens.surfaces.buttonBgActive.vec4);
+        ImGui::PushStyleColor(ImGuiCol_Border, tokens.borders.mapModeViolet.vec4);
+    }
+    if (CenteredButton("MIDI Map", ImVec2(75.0f, 26.0f))) {
+        m_midiMapMode = !m_midiMapMode;
+        if (m_midiMapMode) m_keyMapMode = false;
+        triggerHudToast(m_midiMapMode ? "MIDI MAP MODE: ACTIVE" : "MIDI MAP MODE: OFF");
+    }
+    if (m_midiMapMode) {
+        ImGui::PopStyleColor(2);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Toggle MIDI Map Mode (Ctrl+M)");
+    }
+
+    ImGui::SameLine(0, 6);
+    if (m_keyMapMode) {
+        ImGui::PushStyleColor(ImGuiCol_Button, tokens.surfaces.buttonBgActive.vec4);
+        ImGui::PushStyleColor(ImGuiCol_Border, tokens.borders.mapModeViolet.vec4);
+    }
+    if (CenteredButton("Key Map", ImVec2(75.0f, 26.0f))) {
+        m_keyMapMode = !m_keyMapMode;
+        if (m_keyMapMode) m_midiMapMode = false;
+        triggerHudToast(m_keyMapMode ? "KEY MAP MODE: ACTIVE" : "KEY MAP MODE: OFF");
+    }
+    if (m_keyMapMode) {
+        ImGui::PopStyleColor(2);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Toggle Key Map Mode (Ctrl+K)");
+    }
+
     ImGui::SameLine(0, 14);
     ImGui::AlignTextToFramePadding();
 
@@ -2098,7 +2512,11 @@ void RackView::renderDspTweakModal() {
                 char label[64];
                 std::snprintf(label, sizeof(label), "##p_%zu", i);
                 if (ResettableSliderFloat(label, &val, desc.minValue, desc.maxValue, desc.defaultValue, "%.2f")) {
-                    pInst->setParameterValue(desc.id, val);
+                    if (m_dspTweakSlot) {
+                        m_dspTweakSlot->setParameter(desc.id, val);
+                    } else if (pInst) {
+                        pInst->setParameterValue(desc.id, val);
+                    }
                 }
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("Double-click to reset (default: %.2f)", desc.defaultValue);
@@ -2343,5 +2761,130 @@ void RackView::renderFloatingHudToast() {
     ImGui::End();
 }
 
+void RackView::saveLastRiff() {
+    std::vector<float> stagingL;
+    std::vector<float> stagingR;
+    size_t capturedFrames = 0;
+    double sampleRate = m_asio.isRunning() ? m_asio.currentSampleRate() : 48000.0;
+    if (sampleRate <= 0.0) sampleRate = 48000.0;
+
+    bool captured = m_riffBuffer.latchAndCopySlice(stagingL, stagingR, capturedFrames, sampleRate);
+    if (!captured || capturedFrames == 0) {
+        triggerHudToast("NO AUDIO RECORDED IN RIFF BUFFER");
+        return;
+    }
+    stagingL.resize(capturedFrames);
+    stagingR.resize(capturedFrames);
+
+    std::string userProfile = "";
+    const char* up = std::getenv("USERPROFILE");
+    if (up && *up) {
+        userProfile = up;
+    } else {
+        userProfile = ".";
+    }
+
+    std::filesystem::path riffDir = std::filesystem::path(userProfile) / "Documents" / "Praccy" / "Riffs";
+    try {
+        std::filesystem::create_directories(riffDir);
+    } catch (...) {}
+
+    auto now = std::time(nullptr);
+    std::tm tmNow{};
+#if defined(_WIN32)
+    localtime_s(&tmNow, &now);
+#else
+    localtime_r(&now, &tmNow);
+#endif
+    char timeStr[64];
+    std::strftime(timeStr, sizeof(timeStr), "Riff_%Y%m%d_%H%M%S.wav", &tmNow);
+    std::filesystem::path outPath = riffDir / timeStr;
+
+    uint32_t sr = static_cast<uint32_t>(sampleRate);
+    std::string pathStr = outPath.string();
+
+    utils::asyncWriteWav24Bit(pathStr, std::move(stagingL), std::move(stagingR), sr, nullptr);
+    triggerHudToast("SAVED RIFF: " + std::string(timeStr));
+}
+
+void RackView::cycleAdjacentScenePreset(int delta) {
+    if (m_scenes.numScenes() == 0) return;
+    int current = m_scenes.activeSceneIndex();
+    int maxScenes = static_cast<int>(std::min<size_t>(m_scenes.numScenes(), 8));
+    int next = std::clamp(current + delta, 0, maxScenes - 1);
+    if (next != current) {
+        if (m_scenes.applyScene(next, m_graph)) {
+            const auto* sc = m_scenes.getScene(next);
+            std::string name = sc ? sc->name : ("Preset " + std::to_string(next + 1));
+            triggerHudToast("SCENE: " + name);
+            m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, name),
+                                       name,
+                                       state::UndoActionType::SceneSwitch);
+        }
+    }
+}
+
+void RackView::initMacrosForSlot(audio::PluginSlot* slot) {
+    if (!slot) return;
+    if (m_slotMacros.find(slot) != m_slotMacros.end()) return;
+
+    std::array<DeviceMacro, 4> macros;
+    macros[0] = {"GAIN", 0, false, false, false, 0.0f, 0.0f, 0.0f, 1.0f};
+    macros[1] = {"TONE", 0, false, false, false, 0.5f, 0.5f, 0.0f, 1.0f};
+    macros[2] = {"VOL",  0, false, false, true,  slot->outputGainDb(), 0.0f, -24.0f, 12.0f};
+    macros[3] = {"MIX",  0, false, true,  false, slot->dryWet() * 100.0f, 100.0f, 0.0f, 100.0f};
+
+    auto* pInst = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
+    if (pInst) {
+        const std::regex regexGain(R"((gain|drive|dist|overdrive|input|crunch|preamp))", std::regex::icase);
+        const std::regex regexTone(R"((tone|eq|treble|bass|mid|filter|bright|presence|cut))", std::regex::icase);
+        const std::regex regexVol(R"((vol|volume|master|level|output|post))", std::regex::icase);
+        const std::regex regexMix(R"((mix|blend|dry|wet))", std::regex::icase);
+
+        size_t nParams = pInst->numParameters();
+        for (size_t i = 0; i < nParams; ++i) {
+            auto desc = pInst->getParameterDesc(i);
+            if (!macros[0].bound && std::regex_search(desc.name, regexGain)) {
+                macros[0].paramId = desc.id;
+                macros[0].bound = true;
+                macros[0].label = desc.name;
+                macros[0].minValue = desc.minValue;
+                macros[0].maxValue = desc.maxValue;
+                macros[0].defaultValue = desc.defaultValue;
+                macros[0].currentValue = pInst->getParameterValue(desc.id);
+            } else if (!macros[1].bound && std::regex_search(desc.name, regexTone)) {
+                macros[1].paramId = desc.id;
+                macros[1].bound = true;
+                macros[1].label = desc.name;
+                macros[1].minValue = desc.minValue;
+                macros[1].maxValue = desc.maxValue;
+                macros[1].defaultValue = desc.defaultValue;
+                macros[1].currentValue = pInst->getParameterValue(desc.id);
+            } else if (!macros[2].bound && std::regex_search(desc.name, regexVol)) {
+                macros[2].paramId = desc.id;
+                macros[2].bound = true;
+                macros[2].isSlotTrim = false;
+                macros[2].label = desc.name;
+                macros[2].minValue = desc.minValue;
+                macros[2].maxValue = desc.maxValue;
+                macros[2].defaultValue = desc.defaultValue;
+                macros[2].currentValue = pInst->getParameterValue(desc.id);
+            } else if (!macros[3].bound && std::regex_search(desc.name, regexMix)) {
+                macros[3].paramId = desc.id;
+                macros[3].bound = true;
+                macros[3].isSlotMix = false;
+                macros[3].label = desc.name;
+                macros[3].minValue = desc.minValue;
+                macros[3].maxValue = desc.maxValue;
+                macros[3].defaultValue = desc.defaultValue;
+                macros[3].currentValue = pInst->getParameterValue(desc.id);
+            }
+        }
+    }
+
+    m_slotMacros[slot] = macros;
+}
+
 } // namespace praccy::ui
+
 

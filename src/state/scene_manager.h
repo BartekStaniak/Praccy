@@ -68,8 +68,29 @@ public:
 
     static std::unique_ptr<audio::PluginSlot> createSlotFromPreset(const PluginSlotPreset& p);
 
+    // Graph snapshot serialization & crossfaded application
+    static ScenePreset captureGraphSnapshot(audio::GraphEngine& graph, const std::string& name = "Snapshot");
+    static bool applyGraphSnapshot(const ScenePreset& preset, audio::GraphEngine& graph);
+
+    // Instant A/B Tone Snapshot Comparison
+    enum class ToneSnapshotSlot : uint8_t { None, A, B };
+    void captureToneSnapshotA(audio::GraphEngine& graph);
+    void captureToneSnapshotB(audio::GraphEngine& graph);
+    bool applyToneSnapshotA(audio::GraphEngine& graph);
+    bool applyToneSnapshotB(audio::GraphEngine& graph);
+    void copyToneSnapshotAToB();
+    [[nodiscard]] ToneSnapshotSlot activeToneSnapshot() const noexcept { return m_activeToneSlot; }
+    void setActiveToneSnapshot(ToneSnapshotSlot slot) noexcept { m_activeToneSlot = slot; }
+    [[nodiscard]] bool hasToneSnapshotA() const noexcept { return !m_toneSnapshotA.nodes.empty(); }
+    [[nodiscard]] bool hasToneSnapshotB() const noexcept { return !m_toneSnapshotB.nodes.empty(); }
+    [[nodiscard]] const ScenePreset& toneSnapshotA() const noexcept { return m_toneSnapshotA; }
+    [[nodiscard]] const ScenePreset& toneSnapshotB() const noexcept { return m_toneSnapshotB; }
+
 private:
     int m_activeSceneIndex{0};
+    ToneSnapshotSlot m_activeToneSlot{ToneSnapshotSlot::None};
+    ScenePreset m_toneSnapshotA;
+    ScenePreset m_toneSnapshotB;
     std::vector<ScenePreset> m_scenes;
     std::vector<ScenePreset> m_userPresets;
     std::string m_statusMessage;

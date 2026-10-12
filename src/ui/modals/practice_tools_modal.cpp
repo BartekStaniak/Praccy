@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <fstream>
+#include <cstring>
 
 namespace praccy::ui {
 
@@ -243,11 +245,22 @@ void PracticeToolsModal::renderBackingTrackTab() {
 
         ImGui::Spacing();
 
-        // Seek Bar
-        float normPos = m_player.positionNormalized();
-        ImGui::SetNextItemWidth(520);
-        if (ImGui::SliderFloat("##PlayerSeek", &normPos, 0.0f, 1.0f, "")) {
-            m_player.seek(normPos);
+        ImGui::Spacing();
+
+        if (m_lastLoadedTrack != m_player.filePath()) {
+            m_lastLoadedTrack = m_player.filePath();
+            generateWaveform800(m_lastLoadedTrack);
+        }
+
+        ImGui::TextColored(tokens.text.secondary.vec4, "Interactive Overview Waveform (800-Point Strip):");
+        renderOverviewWaveformStrip(520.0f, 54.0f);
+
+        ImGui::Spacing();
+        ImGui::Text("Loop Region: %.1f%% - %.1f%%", m_loopStart * 100.0f, m_loopEnd * 100.0f);
+        ImGui::SameLine(0, 16);
+        if (CenteredButton("Reset Loop Points", ImVec2(120, 20))) {
+            m_loopStart = 0.0f;
+            m_loopEnd = 1.0f;
         }
 
         ImGui::Spacing();
@@ -262,6 +275,239 @@ void PracticeToolsModal::renderBackingTrackTab() {
     } else {
         ImGui::Spacing();
         ImGui::TextDisabled("(No audio track loaded. Enter a WAV file path above and click Load, or drag-and-drop a WAV file)");
+    }
+}
+
+void PracticeToolsModal::generateWaveform800(const std::string& wavPath) {
+    m_waveform800.clear();
+    m_waveform800.resize(800, WaveformPeak{-0.05f, 0.05f});
+
+    if (wavPath.empty()) return;
+
+    std::ifstream file(wavPath, std::ios::binary);
+    if (!file.is_open()) {
+        for (int i = 0; i < 800; ++i) {
+            float t = static_cast<float>(i) / 800.0f;
+            float amp = 0.35f + 0.25f * std::sin(t * 18.0f) + 0.15f * std::cos(t * 42.0f);
+            amp = std::clamp(amp, 0.05f, 0.95f);
+            m_waveform800[i] = WaveformPeak{-amp, amp};
+        }
+        return;
+    }
+
+    char riffTag[4]{};
+    uint32_t fileSize = 0;
+    char waveTag[4]{};
+    file.read(riffTag, 4);
+    file.read(reinterpret_cast<char*>(&fileSize), 4);
+    file.read(waveTag, 4);
+
+    if (std::memcmp(riffTag, "RIFF", 4) != 0 || std::memcmp(waveTag, "WAVE", 4) != 0) {
+        for (int i = 0; i < 800; ++i) {
+            float t = static_cast<float>(i) / 800.0f;
+            float amp = 0.3f + 0.2f * std::sin(t * 20.0f);
+            m_waveform800[i] = WaveformPeak{-amp, amp};
+        }
+        return;
+    }
+
+    uint16_t numChannels = 0;
+    uint32_t sampleRate = 0;
+    uint16_t bitsPerSample = 0;
+    uint16_t audioFormat = 1;
+    bool foundFmt = false;
+    std::vector<uint8_t> rawData;
+
+    while (file) {
+        char chunkTag[4]{};
+        uint32_t chunkSize = 0;
+        file.read(chunkTag, 4);
+        file.read(reinterpret_cast<char*>(&chunkSize), 4);
+        if (file.gcount() < 8) break;
+
+        if (std::memcmp(chunkTag, "fmt ", 4) == 0) {
+            file.read(reinterpret_cast<char*>(&audioFormat), 2);
+            file.read(reinterpret_cast<char*>(&numChannels), 2);
+            file.read(reinterpret_cast<char*>(&sampleRate), 4);
+            uint32_t byteRate = 0;
+            uint16_t blockAlign = 0;
+            file.read(reinterpret_cast<char*>(&byteRate), 4);
+            file.read(reinterpret_cast<char*>(&blockAlign), 2);
+            file.read(reinterpret_cast<char*>(&bitsPerSample), 2);
+            if (chunkSize > 16) {
+                file.seekg(chunkSize - 16, std::ios::cur);
+            }
+            foundFmt = true;
+        } else if (std::memcmp(chunkTag, "data", 4) == 0) {
+            rawData.resize(chunkSize);
+            file.read(reinterpret_cast<char*>(rawData.data()), chunkSize);
+            break;
+        } else {
+            file.seekg(chunkSize, std::ios::cur);
+        }
+    }
+
+    if (!foundFmt || rawData.empty() || numChannels == 0 || bitsPerSample == 0) {
+        for (int i = 0; i < 800; ++i) {
+            float t = static_cast<float>(i) / 800.0f;
+            float amp = 0.3f + 0.2f * std::sin(t * 20.0f);
+            m_waveform800[i] = WaveformPeak{-amp, amp};
+        }
+        return;
+    }
+
+    const size_t bytesPerSample = bitsPerSample / 8;
+    const size_t frameSize = numChannels * bytesPerSample;
+    const size_t totalFrames = rawData.size() / frameSize;
+    if (totalFrames == 0) return;
+
+    const size_t bucketSize = std::max<size_t>(1, totalFrames / 800);
+    const uint8_t* ptr = rawData.data();
+
+    for (size_t b = 0; b < 800; ++b) {
+        size_t startFrame = b * bucketSize;
+        size_t endFrame = std::min(totalFrames, (b == 799) ? totalFrames : (startFrame + bucketSize));
+        float minVal = 0.0f;
+        float maxVal = 0.0f;
+
+        size_t step = std::max<size_t>(1, (endFrame - startFrame) / 128);
+        for (size_t f = startFrame; f < endFrame; f += step) {
+            const uint8_t* framePtr = ptr + f * frameSize;
+            float s = 0.0f;
+            if (audioFormat == 1) { // PCM
+                if (bitsPerSample == 16) {
+                    s = reinterpret_cast<const int16_t*>(framePtr)[0] / 32768.0f;
+                } else if (bitsPerSample == 24) {
+                    int32_t val = (framePtr[0] << 8) | (framePtr[1] << 16) | (framePtr[2] << 24);
+                    s = (val >> 8) / 8388608.0f;
+                } else if (bitsPerSample == 32) {
+                    s = reinterpret_cast<const int32_t*>(framePtr)[0] / 2147483648.0f;
+                }
+            } else if (audioFormat == 3 && bitsPerSample == 32) { // IEEE float
+                s = reinterpret_cast<const float*>(framePtr)[0];
+            }
+            if (std::isnan(s)) s = 0.0f;
+            if (s < minVal) minVal = s;
+            if (s > maxVal) maxVal = s;
+        }
+
+        if (minVal == 0.0f && maxVal == 0.0f) {
+            minVal = -0.02f;
+            maxVal = 0.02f;
+        }
+        m_waveform800[b] = WaveformPeak{minVal, maxVal};
+    }
+}
+
+void PracticeToolsModal::renderOverviewWaveformStrip(float stripWidth, float stripHeight) {
+    const auto& tokens = themeTokens();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImGuiIO& io = ImGui::GetIO();
+    ImVec2 screenPos = ImGui::GetCursorScreenPos();
+    ImVec2 stripMax(screenPos.x + stripWidth, screenPos.y + stripHeight);
+
+    // Frame background and border
+    dl->AddRectFilled(screenPos, stripMax, tokens.surfaces.frameBg, 4.0f);
+    dl->AddRect(screenPos, stripMax, tokens.borders.subtle, 4.0f);
+
+    const float midY = screenPos.y + stripHeight * 0.5f;
+    dl->AddLine(ImVec2(screenPos.x, midY), ImVec2(stripMax.x, midY), tokens.borders.subtle, 1.0f);
+
+    const float curPlayhead = std::clamp(m_player.positionNormalized(), 0.0f, 1.0f);
+    const float playheadX = screenPos.x + stripWidth * curPlayhead;
+
+    const float loopStartX = screenPos.x + stripWidth * m_loopStart;
+    const float loopEndX = screenPos.x + stripWidth * m_loopEnd;
+
+    // Loop region shaded background
+    if (m_loopEnd > m_loopStart) {
+        ImU32 loopShadeCol = ColorToken(tokens.text.accent.r, tokens.text.accent.g, tokens.text.accent.b, 0.15f);
+        dl->AddRectFilled(ImVec2(loopStartX, screenPos.y), ImVec2(loopEndX, stripMax.y), loopShadeCol, 2.0f);
+    }
+
+    // Draw 800 peak points mapped to stripWidth
+    const size_t numPoints = m_waveform800.size();
+    if (numPoints > 0) {
+        for (int px = 0; px < static_cast<int>(stripWidth); ++px) {
+            float frac = static_cast<float>(px) / stripWidth;
+            size_t idx = std::min(numPoints - 1, static_cast<size_t>(frac * static_cast<float>(numPoints)));
+            const auto& pt = m_waveform800[idx];
+
+            float x = screenPos.x + static_cast<float>(px);
+            float yTop = midY - std::clamp(pt.maxVal, 0.0f, 1.0f) * (stripHeight * 0.44f);
+            float yBot = midY - std::clamp(pt.minVal, -1.0f, 0.0f) * (stripHeight * 0.44f);
+            if (yBot < yTop + 1.0f) yBot = yTop + 1.0f;
+
+            ImU32 barCol = (x <= playheadX) ? tokens.signal.active.u32 : tokens.text.secondary.u32;
+            if (x >= loopStartX && x <= loopEndX) {
+                barCol = (x <= playheadX) ? tokens.signal.active.u32 : tokens.text.accent.u32;
+            }
+
+            dl->AddLine(ImVec2(x, yTop), ImVec2(x, yBot), barCol, 1.0f);
+        }
+    }
+
+    // Draggable Loop Start Handle [L
+    dl->AddLine(ImVec2(loopStartX, screenPos.y), ImVec2(loopStartX, stripMax.y), tokens.text.accent.u32, 2.0f);
+    dl->AddRectFilled(ImVec2(loopStartX - 7.0f, screenPos.y), ImVec2(loopStartX + 1.0f, screenPos.y + 14.0f),
+                      tokens.text.accent.u32, 2.0f);
+    dl->AddText(ImVec2(loopStartX - 6.0f, screenPos.y), tokens.surfaces.windowBg.u32, "L");
+
+    // Draggable Loop End Handle R]
+    dl->AddLine(ImVec2(loopEndX, screenPos.y), ImVec2(loopEndX, stripMax.y), tokens.text.accent.u32, 2.0f);
+    dl->AddRectFilled(ImVec2(loopEndX - 1.0f, screenPos.y), ImVec2(loopEndX + 7.0f, screenPos.y + 14.0f),
+                      tokens.text.accent.u32, 2.0f);
+    dl->AddText(ImVec2(loopEndX + 1.0f, screenPos.y), tokens.surfaces.windowBg.u32, "R");
+
+    // Playhead line & needle
+    dl->AddLine(ImVec2(playheadX, screenPos.y), ImVec2(playheadX, stripMax.y), tokens.text.primary.u32, 2.0f);
+    dl->AddTriangleFilled(ImVec2(playheadX - 4.0f, screenPos.y), ImVec2(playheadX + 4.0f, screenPos.y),
+                          ImVec2(playheadX, screenPos.y + 7.0f), tokens.text.primary.u32);
+
+    // InvisibleButton to handle mouse click-to-seek and drag
+    char btnId[32];
+    std::snprintf(btnId, sizeof(btnId), "##WaveformSeek_%p", this);
+    ImGui::InvisibleButton(btnId, ImVec2(stripWidth, stripHeight));
+    bool isHovered = ImGui::IsItemHovered();
+    bool isActive = ImGui::IsItemActive();
+
+    if (isActive) {
+        float mouseRelX = io.MousePos.x - screenPos.x;
+        float normX = std::clamp(mouseRelX / stripWidth, 0.0f, 1.0f);
+
+        if (m_isDraggingLoopStart) {
+            m_loopStart = std::clamp(normX, 0.0f, m_loopEnd - 0.02f);
+        } else if (m_isDraggingLoopEnd) {
+            m_loopEnd = std::clamp(normX, m_loopStart + 0.02f, 1.0f);
+        } else {
+            if (std::abs(io.MouseClickedPos[0].x - loopStartX) < 10.0f) {
+                m_isDraggingLoopStart = true;
+                m_loopStart = std::clamp(normX, 0.0f, m_loopEnd - 0.02f);
+            } else if (std::abs(io.MouseClickedPos[0].x - loopEndX) < 10.0f) {
+                m_isDraggingLoopEnd = true;
+                m_loopEnd = std::clamp(normX, m_loopStart + 0.02f, 1.0f);
+            } else {
+                m_player.seek(normX);
+            }
+        }
+    } else {
+        m_isDraggingLoopStart = false;
+        m_isDraggingLoopEnd = false;
+    }
+
+    if (isHovered) {
+        if (std::abs(io.MousePos.x - loopStartX) < 10.0f || std::abs(io.MousePos.x - loopEndX) < 10.0f) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+        } else {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        }
+    }
+
+    // Auto-looping within custom loop boundaries
+    if (m_player.isPlaying() && m_player.isLooping()) {
+        if (curPlayhead >= m_loopEnd || curPlayhead < m_loopStart) {
+            m_player.seek(m_loopStart);
+        }
     }
 }
 

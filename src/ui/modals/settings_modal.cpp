@@ -180,6 +180,42 @@ void SettingsModal::renderAudioTab() {
     } else {
         ImGui::BulletText("Audio Engine State: STOPPED (Driver loaded: %s)", m_asio.isLoaded() ? "Yes" : "No");
     }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    ImGui::TextColored(tokens.text.accent.vec4, "RETROACTIVE RIFF RECORDER:");
+    ImGui::Spacing();
+
+    state::AppConfig cfg;
+    cfg.load();
+    uint32_t currentMinutes = cfg.retroactiveBufferMinutes;
+    if (currentMinutes != 1 && currentMinutes != 2 && currentMinutes != 5 && currentMinutes != 10) {
+        currentMinutes = 2;
+    }
+
+    ImGui::Text("Circular Audio Buffer Duration:");
+    const uint32_t durations[] = {1, 2, 5, 10};
+    for (int d = 0; d < 4; ++d) {
+        char radioLabel[32];
+        std::snprintf(radioLabel, sizeof(radioLabel), "%u min##RiffDur", durations[d]);
+        if (d > 0) ImGui::SameLine(0, 16);
+        if (ImGui::RadioButton(radioLabel, currentMinutes == durations[d])) {
+            cfg.retroactiveBufferMinutes = durations[d];
+            cfg.save();
+            currentMinutes = durations[d];
+        }
+    }
+
+    double sRate = m_asio.isRunning() ? m_asio.currentSampleRate() : 48000.0;
+    if (sRate <= 0.0) sRate = 48000.0;
+    double ramBytes = static_cast<double>(currentMinutes) * 60.0 * sRate * 2.0 * static_cast<double>(sizeof(float));
+    double ramMb = ramBytes / (1024.0 * 1024.0);
+
+    ImGui::Spacing();
+    ImGui::BulletText("Live RAM Footprint: %.1f MB (%.0f Hz stereo 32-bit float)", ramMb, sRate);
+    ImGui::TextDisabled("Continuously records audio in a lock-free circular buffer. Press Ctrl+Shift+R to export.");
 }
 
 void SettingsModal::renderPluginsTab() {

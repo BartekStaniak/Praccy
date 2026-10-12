@@ -1,4 +1,5 @@
 #include "graph_engine.h"
+#include "../plugins/plugin_base.h"
 #include <cmath>
 #include <algorithm>
 
@@ -25,6 +26,7 @@ void PluginSlot::reset() {
     if (m_innerNode) {
         m_innerNode->reset();
     }
+    m_automationRegister.reset();
 }
 
 const std::string& PluginSlot::name() const noexcept {
@@ -47,6 +49,15 @@ void PluginSlot::process(AudioProcessContext& ctx) {
         ctx.output.copyFrom(ctx.input);
         return;
     }
+
+    // 1. Drain pending parameter automation wait-free at block boundary
+    m_automationRegister.drainDirty([&](uint32_t paramId, float value) {
+        if (m_innerNode) {
+            if (auto* p = dynamic_cast<plugins::IPluginInstance*>(m_innerNode.get())) {
+                p->setParameterValue(paramId, value);
+            }
+        }
+    });
 
     const bool currentlyBypassed = isBypassed();
     const bool transitioning = m_bypassRamp.isTransitioning();
@@ -154,6 +165,17 @@ void ParallelBranch::prepare(double sampleRate, uint32_t maxBlockSize) {
     m_slotTemp.resize(2, maxBlockSize);
     m_activeSlots.reserve(MAX_BRANCH_SLOTS);
 
+    // Pre-allocate PDC stereo circular delay buffers strictly in prepare() (16,384 samples)
+    m_delayBufferL.assign(PDC_BUFFER_SIZE, 0.0f);
+    m_delayBufferR.assign(PDC_BUFFER_SIZE, 0.0f);
+    m_delayWritePos = 0;
+    m_currentDelay = 0;
+    m_targetDelay = 0;
+    m_oldDelay = 0;
+    m_crossfadePos = 0;
+    m_isCrossfading = false;
+    m_branchLatency.store(0, std::memory_order_relaxed);
+
     // Drain any pending commands before preparing
     SlotCommand cmd;
     while (m_commandQueue.try_dequeue(cmd)) {
@@ -168,9 +190,42 @@ void ParallelBranch::prepare(double sampleRate, uint32_t maxBlockSize) {
 }
 
 void ParallelBranch::reset() {
+    std::fill(m_delayBufferL.begin(), m_delayBufferL.end(), 0.0f);
+    std::fill(m_delayBufferR.begin(), m_delayBufferR.end(), 0.0f);
+    m_delayWritePos = 0;
+    m_currentDelay = 0;
+    m_targetDelay = 0;
+    m_oldDelay = 0;
+    m_crossfadePos = 0;
+    m_isCrossfading = false;
+    m_branchLatency.store(0, std::memory_order_relaxed);
+
     for (auto& slot : m_activeSlots) {
         if (slot) slot->reset();
     }
+}
+
+void ParallelBranch::setTargetDelay(uint32_t target) noexcept {
+    target = std::min<uint32_t>(target, static_cast<uint32_t>(PDC_BUFFER_SIZE));
+    if (target != m_currentDelay && !m_isCrossfading) {
+        m_oldDelay = m_currentDelay;
+        m_targetDelay = target;
+        m_crossfadePos = 0;
+        m_isCrossfading = true;
+    } else if (target != m_targetDelay && m_isCrossfading) {
+        m_targetDelay = target;
+    } else if (target == m_currentDelay) {
+        m_targetDelay = target;
+        m_isCrossfading = false;
+    }
+}
+
+uint32_t ParallelBranch::totalLatencySamples() const noexcept {
+    uint32_t total = 0;
+    for (const auto& slot : m_activeSlots) {
+        if (slot) total += slot->latencySamples();
+    }
+    return total;
 }
 
 void ParallelBranch::addSlot(std::unique_ptr<PluginSlot> slot) {
@@ -350,6 +405,62 @@ void ParallelBranch::process(AudioProcessContext& ctx) {
         branchView.copyFrom(tempView);
     }
 
+    // 4. Dynamic phase-coherent Parallel Delay Compensation (PDC)
+    float* bL = branchView.channel(0);
+    float* bR = branchView.numChannels() > 1 ? branchView.channel(1) : bL;
+
+    for (uint32_t s = 0; s < numSamples; ++s) {
+        const float inSampL = bL[s];
+        const float inSampR = bR[s];
+
+        float outSampL = inSampL;
+        float outSampR = inSampR;
+
+        if (m_isCrossfading) {
+            const float t = static_cast<float>(m_crossfadePos) / 64.0f;
+            const float angle = t * DspUtils::HALF_PI;
+            const float gOld = std::cos(angle);
+            const float gNew = std::sin(angle);
+
+            // Read sample at old delay tap
+            float oldL = inSampL, oldR = inSampR;
+            if (m_oldDelay > 0) {
+                const size_t rOld = (m_delayWritePos + PDC_BUFFER_SIZE - m_oldDelay) & PDC_BUFFER_MASK;
+                oldL = m_delayBufferL[rOld];
+                oldR = m_delayBufferR[rOld];
+            }
+
+            // Read sample at new target delay tap
+            float newL = inSampL, newR = inSampR;
+            if (m_targetDelay > 0) {
+                const size_t rNew = (m_delayWritePos + PDC_BUFFER_SIZE - m_targetDelay) & PDC_BUFFER_MASK;
+                newL = m_delayBufferL[rNew];
+                newR = m_delayBufferR[rNew];
+            }
+
+            outSampL = (oldL * gOld) + (newL * gNew);
+            outSampR = (oldR * gOld) + (newR * gNew);
+
+            m_crossfadePos++;
+            if (m_crossfadePos >= 64) {
+                m_isCrossfading = false;
+                m_currentDelay = m_targetDelay;
+            }
+        } else if (m_currentDelay > 0) {
+            const size_t rPos = (m_delayWritePos + PDC_BUFFER_SIZE - m_currentDelay) & PDC_BUFFER_MASK;
+            outSampL = m_delayBufferL[rPos];
+            outSampR = m_delayBufferR[rPos];
+        }
+
+        // Store sample into circular buffer (read-before-write)
+        m_delayBufferL[m_delayWritePos] = inSampL;
+        m_delayBufferR[m_delayWritePos] = inSampR;
+        m_delayWritePos = (m_delayWritePos + 1) & PDC_BUFFER_MASK;
+
+        bL[s] = outSampL;
+        bR[s] = outSampR;
+    }
+
     m_meter.process(branchView.channel(0), branchView.numChannels() > 1 ? branchView.channel(1) : nullptr, numSamples);
 }
 
@@ -361,20 +472,34 @@ ParallelSplitMergeBlock::ParallelSplitMergeBlock(std::string name)
     : m_name(std::move(name)) {}
 
 void ParallelSplitMergeBlock::prepare(double sampleRate, uint32_t maxBlockSize) {
+    m_sampleRate = sampleRate;
+    m_maxBlockSize = maxBlockSize;
     m_mixBuffer.resize(2, maxBlockSize);
     for (auto& branch : m_branches) {
-        branch->prepare(sampleRate, maxBlockSize);
+        if (branch) branch->prepare(sampleRate, maxBlockSize);
     }
 }
 
 void ParallelSplitMergeBlock::reset() {
     for (auto& branch : m_branches) {
-        branch->reset();
+        if (branch) branch->reset();
     }
 }
 
+uint32_t ParallelSplitMergeBlock::latencySamples() const noexcept {
+    uint32_t maxLat = 0;
+    for (const auto& branch : m_branches) {
+        if (branch && !branch->isMuted()) {
+            maxLat = std::max(maxLat, branch->totalLatencySamples());
+        }
+    }
+    return maxLat;
+}
+
 ParallelBranch* ParallelSplitMergeBlock::addBranch(const std::string& branchName) {
-    m_branches.push_back(std::make_unique<ParallelBranch>(branchName));
+    auto branch = std::make_unique<ParallelBranch>(branchName);
+    branch->prepare(m_sampleRate, m_maxBlockSize);
+    m_branches.push_back(std::move(branch));
     return m_branches.back().get();
 }
 
@@ -400,6 +525,27 @@ void ParallelSplitMergeBlock::process(AudioProcessContext& ctx) {
     if (m_branches.empty() || numSamples == 0) {
         ctx.output.copyFrom(ctx.input);
         return;
+    }
+
+    // 1. Calculate dynamic PDC branch latencies
+    uint32_t maxBranchLatency = 0;
+    for (const auto& branch : m_branches) {
+        if (branch) {
+            const uint32_t lat = branch->totalLatencySamples();
+            branch->setBranchLatency(lat);
+            if (!branch->isMuted()) {
+                maxBranchLatency = std::max(maxBranchLatency, lat);
+            }
+        }
+    }
+
+    // 2. Set target delay for each branch: Delta L = max(L) - L_i (up to 16,384 samples)
+    for (auto& branch : m_branches) {
+        if (branch) {
+            const uint32_t lat = branch->branchLatency();
+            const uint32_t deltaL = (maxBranchLatency >= lat) ? (maxBranchLatency - lat) : 0;
+            branch->setTargetDelay(deltaL);
+        }
     }
 
     auto mixView = m_mixBuffer.view(numSamples);
@@ -502,8 +648,150 @@ void NoiseGate::process(AudioBufferView& buffer) noexcept {
 // GraphEngine Implementation
 // ==========================================
 
-GraphEngine::GraphEngine() = default;
-GraphEngine::~GraphEngine() = default;
+GraphEngine::GraphEngine() {
+    m_uiNodes.reserve(MAX_GRAPH_NODES);
+    m_activeNodes.reserve(MAX_GRAPH_NODES);
+    m_retiringNodes.reserve(MAX_GRAPH_NODES);
+}
+
+GraphEngine::~GraphEngine() {
+    {
+        std::lock_guard<std::mutex> lock(m_uiMutex);
+        m_uiNodes.clear();
+    }
+
+    // 1. Drain pending commands
+    GraphCommand cmd;
+    while (m_commandQueue.try_dequeue(cmd)) {
+        cmd.node.reset();
+        cmd.chainPayload.reset();
+    }
+
+    // 2. Drain stashed reclamations
+    for (size_t i = 0; i < m_stashedCount; ++i) {
+        m_stashedReclamations[i].reset();
+    }
+    m_stashedCount = 0;
+    for (size_t i = 0; i < m_stashedChainCount; ++i) {
+        m_stashedChains[i].reset();
+    }
+    m_stashedChainCount = 0;
+
+    // 3. Drain reclamation queues
+    std::unique_ptr<AudioNode> reclaimed;
+    while (m_reclaimQueue.try_dequeue(reclaimed)) {
+        reclaimed.reset();
+    }
+    std::unique_ptr<NodeChain> reclaimedChain;
+    while (m_chainReclaimQueue.try_dequeue(reclaimedChain)) {
+        reclaimedChain.reset();
+    }
+
+    // 4. Clear active and retiring nodes
+    m_activeNodes.clear();
+    m_retiringNodes.clear();
+}
+
+void GraphEngine::stashForReclamation(std::unique_ptr<AudioNode> node) noexcept {
+    if (m_stashedCount < m_stashedReclamations.size()) {
+        m_stashedReclamations[m_stashedCount++] = std::move(node);
+    } else {
+        // Emergency overflow: retain in active nodes in bypassed state to avoid audio-thread destruction
+        node->setBypassed(true);
+        if (m_activeNodes.size() < MAX_GRAPH_NODES) {
+            m_activeNodes.push_back(std::move(node));
+        }
+    }
+}
+
+void GraphEngine::stashChainForReclamation(std::unique_ptr<NodeChain> chain) noexcept {
+    if (m_stashedChainCount < m_stashedChains.size()) {
+        m_stashedChains[m_stashedChainCount++] = std::move(chain);
+    }
+}
+
+void GraphEngine::flushStashedReclamations() noexcept {
+    while (m_stashedCount > 0) {
+        if (m_reclaimQueue.try_enqueue(std::move(m_stashedReclamations[m_stashedCount - 1]))) {
+            --m_stashedCount;
+        } else {
+            break;
+        }
+    }
+    while (m_stashedChainCount > 0) {
+        if (m_chainReclaimQueue.try_enqueue(std::move(m_stashedChains[m_stashedChainCount - 1]))) {
+            --m_stashedChainCount;
+        } else {
+            break;
+        }
+    }
+}
+
+void GraphEngine::drainCommandQueueIntoActive() {
+    GraphCommand cmd;
+    while (m_commandQueue.try_dequeue(cmd)) {
+        switch (cmd.type) {
+            case GraphCommandType::Add: {
+                if (cmd.node) {
+                    m_activeNodes.push_back(std::move(cmd.node));
+                }
+                break;
+            }
+            case GraphCommandType::Insert: {
+                if (cmd.node) {
+                    if (cmd.indexA <= m_activeNodes.size()) {
+                        m_activeNodes.insert(m_activeNodes.begin() + cmd.indexA, std::move(cmd.node));
+                    } else {
+                        m_activeNodes.push_back(std::move(cmd.node));
+                    }
+                }
+                break;
+            }
+            case GraphCommandType::Remove: {
+                auto it = m_activeNodes.end();
+                if (cmd.targetNode != nullptr) {
+                    it = std::find_if(m_activeNodes.begin(), m_activeNodes.end(),
+                        [&](const auto& n) { return n.get() == cmd.targetNode; });
+                } else if (cmd.indexA < m_activeNodes.size()) {
+                    it = m_activeNodes.begin() + cmd.indexA;
+                }
+                if (it != m_activeNodes.end()) {
+                    m_activeNodes.erase(it);
+                }
+                break;
+            }
+            case GraphCommandType::Swap: {
+                if (cmd.indexA < m_activeNodes.size() && cmd.indexB < m_activeNodes.size()) {
+                    std::swap(m_activeNodes[cmd.indexA], m_activeNodes[cmd.indexB]);
+                }
+                break;
+            }
+            case GraphCommandType::Reorder: {
+                if (cmd.indexA < m_activeNodes.size() && cmd.indexB < m_activeNodes.size() && cmd.indexA != cmd.indexB) {
+                    auto node = std::move(m_activeNodes[cmd.indexA]);
+                    m_activeNodes.erase(m_activeNodes.begin() + cmd.indexA);
+                    m_activeNodes.insert(m_activeNodes.begin() + cmd.indexB, std::move(node));
+                }
+                break;
+            }
+            case GraphCommandType::Clear: {
+                m_activeNodes.clear();
+                break;
+            }
+            case GraphCommandType::CrossfadeTo: {
+                if (cmd.chainPayload) {
+                    m_activeNodes.clear();
+                    for (auto& n : cmd.chainPayload->nodes) {
+                        if (n) {
+                            m_activeNodes.push_back(std::move(n));
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
+}
 
 void GraphEngine::prepare(double sampleRate, uint32_t maxBlockSize) {
     m_sampleRate = sampleRate;
@@ -514,42 +802,144 @@ void GraphEngine::prepare(double sampleRate, uint32_t maxBlockSize) {
     m_scratchBuffer.resize(2, maxBlockSize);
     m_retiringBuffer.resize(2, maxBlockSize);
     m_activeBuffer.resize(2, maxBlockSize);
+    m_activeNodes.reserve(MAX_GRAPH_NODES);
+    m_retiringNodes.reserve(MAX_GRAPH_NODES);
     const uint32_t rampSamples = static_cast<uint32_t>(sampleRate * 0.010);
     m_sceneCrossfadeRamp.reset(std::max(1u, rampSamples));
+    m_microCrossfadeRamp.reset(64);
+    m_hasProcessedAudio = false;
+    m_lastBlockSampleL = 0.0f;
+    m_lastBlockSampleR = 0.0f;
+    m_isSceneCrossfading.store(false, std::memory_order_relaxed);
 
-    std::lock_guard<std::mutex> lock(m_graphMutex);
-    for (auto& node : m_nodes) {
-        node->prepare(sampleRate, maxBlockSize);
+    drainCommandQueueIntoActive();
+    for (auto& node : m_activeNodes) {
+        if (node) node->prepare(sampleRate, maxBlockSize);
     }
 }
 
 void GraphEngine::reset() {
-    std::lock_guard<std::mutex> lock(m_graphMutex);
-    for (auto& node : m_nodes) {
-        node->reset();
+    m_hasProcessedAudio = false;
+    m_lastBlockSampleL = 0.0f;
+    m_lastBlockSampleR = 0.0f;
+    m_isSceneCrossfading.store(false, std::memory_order_relaxed);
+    m_activeNodes.reserve(MAX_GRAPH_NODES);
+    m_retiringNodes.reserve(MAX_GRAPH_NODES);
+
+    drainCommandQueueIntoActive();
+    for (auto& node : m_activeNodes) {
+        if (node) node->reset();
     }
 }
 
 void GraphEngine::addSerialNode(std::unique_ptr<AudioNode> node) {
-    std::lock_guard<std::mutex> lock(m_graphMutex);
-    if (node) {
-        node->prepare(m_sampleRate, m_maxBlockSize);
-        m_nodes.push_back(std::move(node));
+    if (!node) return;
+    processReclamation();
+
+    node->prepare(m_sampleRate, m_maxBlockSize);
+
+    std::lock_guard<std::mutex> lock(m_uiMutex);
+    AudioNode* rawPtr = node.get();
+    m_uiNodes.push_back(rawPtr);
+
+    GraphCommand cmd = GraphCommand::makeAdd(std::move(node));
+    if (!m_commandQueue.try_enqueue(std::move(cmd))) {
+        m_uiNodes.pop_back();
+    }
+}
+
+void GraphEngine::insertSerialNode(size_t index, std::unique_ptr<AudioNode> node) {
+    if (!node) return;
+    processReclamation();
+
+    node->prepare(m_sampleRate, m_maxBlockSize);
+
+    std::lock_guard<std::mutex> lock(m_uiMutex);
+    AudioNode* rawPtr = node.get();
+    if (index >= m_uiNodes.size()) {
+        m_uiNodes.push_back(rawPtr);
+        GraphCommand cmd = GraphCommand::makeAdd(std::move(node));
+        if (!m_commandQueue.try_enqueue(std::move(cmd))) {
+            m_uiNodes.pop_back();
+        }
+    } else {
+        m_uiNodes.insert(m_uiNodes.begin() + index, rawPtr);
+        GraphCommand cmd = GraphCommand::makeInsert(index, std::move(node));
+        if (!m_commandQueue.try_enqueue(std::move(cmd))) {
+            m_uiNodes.erase(m_uiNodes.begin() + index);
+        }
     }
 }
 
 void GraphEngine::removeSerialNode(size_t index) {
-    std::lock_guard<std::mutex> lock(m_graphMutex);
-    if (index < m_nodes.size()) {
-        m_nodes.erase(m_nodes.begin() + index);
+    processReclamation();
+    std::lock_guard<std::mutex> lock(m_uiMutex);
+    if (index >= m_uiNodes.size()) return;
+
+    AudioNode* target = m_uiNodes[index];
+    m_uiNodes.erase(m_uiNodes.begin() + index);
+
+    GraphCommand cmd = GraphCommand::makeRemove(index, target);
+    m_commandQueue.try_enqueue(std::move(cmd));
+}
+
+std::unique_ptr<AudioNode> GraphEngine::takeSerialNode(size_t index) {
+    processReclamation();
+    std::lock_guard<std::mutex> lock(m_uiMutex);
+
+    // Drain pending commands into active nodes
+    drainCommandQueueIntoActive();
+
+    AudioNode* targetPtr = nullptr;
+    if (index < m_uiNodes.size()) {
+        targetPtr = m_uiNodes[index];
+        m_uiNodes.erase(m_uiNodes.begin() + index);
+    }
+
+    if (targetPtr) {
+        auto it = std::find_if(m_activeNodes.begin(), m_activeNodes.end(),
+            [&](const auto& n) { return n.get() == targetPtr; });
+        if (it != m_activeNodes.end()) {
+            auto ptr = std::move(*it);
+            m_activeNodes.erase(it);
+            return ptr;
+        }
+    }
+
+    if (index < m_activeNodes.size()) {
+        auto ptr = std::move(m_activeNodes[index]);
+        m_activeNodes.erase(m_activeNodes.begin() + index);
+        return ptr;
+    }
+
+    return nullptr;
+}
+
+void GraphEngine::swapNodes(size_t indexA, size_t indexB) {
+    if (indexA == indexB) return;
+    std::lock_guard<std::mutex> lock(m_uiMutex);
+    if (indexA < m_uiNodes.size() && indexB < m_uiNodes.size()) {
+        std::swap(m_uiNodes[indexA], m_uiNodes[indexB]);
+        GraphCommand cmd = GraphCommand::makeSwap(indexA, indexB);
+        m_commandQueue.try_enqueue(std::move(cmd));
+    }
+}
+
+void GraphEngine::reorderNodes(size_t fromIndex, size_t toIndex) {
+    if (fromIndex == toIndex) return;
+    std::lock_guard<std::mutex> lock(m_uiMutex);
+    if (fromIndex < m_uiNodes.size() && toIndex < m_uiNodes.size()) {
+        auto* ptr = m_uiNodes[fromIndex];
+        m_uiNodes.erase(m_uiNodes.begin() + fromIndex);
+        m_uiNodes.insert(m_uiNodes.begin() + toIndex, ptr);
+        GraphCommand cmd = GraphCommand::makeReorder(fromIndex, toIndex);
+        m_commandQueue.try_enqueue(std::move(cmd));
     }
 }
 
 void GraphEngine::splitSerialNodeIntoParallel(size_t index) {
-    std::lock_guard<std::mutex> lock(m_graphMutex);
-    if (index >= m_nodes.size()) return;
-
-    auto originalNode = std::move(m_nodes[index]);
+    auto originalNode = takeSerialNode(index);
+    if (!originalNode) return;
 
     auto parallelBlock = std::make_unique<ParallelSplitMergeBlock>("Parallel Split/Merge");
     parallelBlock->prepare(m_sampleRate, m_maxBlockSize);
@@ -568,15 +958,18 @@ void GraphEngine::splitSerialNodeIntoParallel(size_t index) {
     branchB->prepare(m_sampleRate, m_maxBlockSize);
     branchB->setPan(+0.5f);
 
-    m_nodes[index] = std::move(parallelBlock);
+    insertSerialNode(index, std::move(parallelBlock));
 }
 
 void GraphEngine::dissolveParallelBlock(size_t blockIndex, int branchToKeep) {
-    std::lock_guard<std::mutex> lock(m_graphMutex);
-    if (blockIndex >= m_nodes.size()) return;
+    auto blockNode = takeSerialNode(blockIndex);
+    if (!blockNode) return;
 
-    auto* block = dynamic_cast<ParallelSplitMergeBlock*>(m_nodes[blockIndex].get());
-    if (!block) return;
+    auto* block = dynamic_cast<ParallelSplitMergeBlock*>(blockNode.get());
+    if (!block) {
+        insertSerialNode(blockIndex, std::move(blockNode));
+        return;
+    }
 
     // Collect preserved slots from the branch to keep
     std::vector<std::unique_ptr<PluginSlot>> preservedSlots;
@@ -590,61 +983,216 @@ void GraphEngine::dissolveParallelBlock(size_t blockIndex, int branchToKeep) {
         }
     }
 
-    // Remove the parallel block
-    m_nodes.erase(m_nodes.begin() + blockIndex);
-
     // Splice preserved slots into the serial chain at blockIndex
     for (size_t i = 0; i < preservedSlots.size(); ++i) {
-        m_nodes.insert(m_nodes.begin() + blockIndex + i, std::move(preservedSlots[i]));
+        insertSerialNode(blockIndex + i, std::move(preservedSlots[i]));
     }
 }
 
 void GraphEngine::clearNodes() {
-    std::lock_guard<std::mutex> lock(m_graphMutex);
-    m_nodes.clear();
+    processReclamation();
+    std::lock_guard<std::mutex> lock(m_uiMutex);
+    m_uiNodes.clear();
     m_retiringNodes.clear();
     m_sceneCrossfadeRamp.reset(1);
+
+    GraphCommand cmd = GraphCommand::makeClear();
+    m_commandQueue.try_enqueue(std::move(cmd));
 }
 
 void GraphEngine::crossfadeToNodes(std::vector<std::unique_ptr<AudioNode>> newNodes) {
-    std::lock_guard<std::mutex> lock(m_graphMutex);
+    processReclamation();
+
+    auto chain = std::make_unique<NodeChain>();
+    chain->nodes.reserve(newNodes.size());
+
+    std::vector<AudioNode*> rawPointers;
+    rawPointers.reserve(newNodes.size());
     for (auto& node : newNodes) {
         if (node) {
             node->prepare(m_sampleRate, m_maxBlockSize);
+            rawPointers.push_back(node.get());
+            chain->nodes.push_back(std::move(node));
         }
     }
-    m_retiringNodes = std::move(m_nodes);
-    m_nodes = std::move(newNodes);
-    const uint32_t rampSamples = static_cast<uint32_t>(m_sampleRate * 0.010);
-    m_sceneCrossfadeRamp.reset(std::max(1u, rampSamples));
-    m_sceneCrossfadeRamp.startTransition(true);
+
+    std::lock_guard<std::mutex> lock(m_uiMutex);
+    m_uiNodes = std::move(rawPointers);
+
+    GraphCommand cmd = GraphCommand::makeCrossfadeTo(std::move(chain));
+    m_commandQueue.try_enqueue(std::move(cmd));
 }
 
 void GraphEngine::processReclamation() noexcept {
-    std::unique_lock<std::mutex> lock(m_graphMutex, std::try_to_lock);
-    if (!lock.owns_lock()) return;
-    if (!m_sceneCrossfadeRamp.isTransitioning() && !m_retiringNodes.empty()) {
-        m_retiringNodes.clear();
+    // 1. Drain retired nodes from GraphEngine's SPSC queue
+    std::unique_ptr<AudioNode> reclaimed;
+    while (m_reclaimQueue.try_dequeue(reclaimed)) {
+        reclaimed.reset();
     }
-    for (auto& node : m_nodes) {
-        if (auto* splitBlock = dynamic_cast<ParallelSplitMergeBlock*>(node.get())) {
-            splitBlock->collectReclaimedSlots();
+
+    // 2. Drain retired node chains
+    std::unique_ptr<NodeChain> reclaimedChain;
+    while (m_chainReclaimQueue.try_dequeue(reclaimedChain)) {
+        reclaimedChain.reset();
+    }
+
+    // 3. Collect reclaimed slots from all parallel branches
+    std::lock_guard<std::mutex> lock(m_uiMutex);
+    for (auto* node : m_uiNodes) {
+        if (node) {
+            if (auto* splitBlock = dynamic_cast<ParallelSplitMergeBlock*>(node)) {
+                splitBlock->collectReclaimedSlots();
+            }
         }
     }
 }
 
 size_t GraphEngine::numNodes() const noexcept {
-    return m_nodes.size();
+    return m_uiNodes.size();
 }
 
 AudioNode* GraphEngine::getNode(size_t index) noexcept {
-    if (index < m_nodes.size()) return m_nodes[index].get();
+    if (index < m_uiNodes.size()) return m_uiNodes[index];
     return nullptr;
 }
 
 void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& hardwareOut) {
     const uint32_t numSamples = hardwareIn.numSamples();
     if (numSamples == 0) return;
+
+    // 1. Drain pending structural commands from UI thread (Wait-Free, Lock-Free)
+    GraphCommand cmd;
+    bool hadStructuralMutation = false;
+    while (m_commandQueue.try_dequeue(cmd)) {
+        switch (cmd.type) {
+            case GraphCommandType::Add: {
+                if (cmd.node) {
+                    if (m_activeNodes.size() < MAX_GRAPH_NODES) {
+                        m_activeNodes.push_back(std::move(cmd.node));
+                    } else {
+                        if (!m_reclaimQueue.try_enqueue(std::move(cmd.node))) {
+                            stashForReclamation(std::move(cmd.node));
+                        }
+                    }
+                }
+                break;
+            }
+            case GraphCommandType::Insert: {
+                if (cmd.node) {
+                    if (m_activeNodes.size() < MAX_GRAPH_NODES) {
+                        if (cmd.indexA <= m_activeNodes.size()) {
+                            m_activeNodes.insert(m_activeNodes.begin() + cmd.indexA, std::move(cmd.node));
+                        } else {
+                            m_activeNodes.push_back(std::move(cmd.node));
+                        }
+                    } else {
+                        if (!m_reclaimQueue.try_enqueue(std::move(cmd.node))) {
+                            stashForReclamation(std::move(cmd.node));
+                        }
+                    }
+                }
+                break;
+            }
+            case GraphCommandType::Remove: {
+                auto it = m_activeNodes.end();
+                if (cmd.targetNode != nullptr) {
+                    it = std::find_if(m_activeNodes.begin(), m_activeNodes.end(),
+                        [&](const auto& n) { return n.get() == cmd.targetNode; });
+                } else if (cmd.indexA < m_activeNodes.size()) {
+                    it = m_activeNodes.begin() + cmd.indexA;
+                }
+                if (it != m_activeNodes.end()) {
+                    auto removed = std::move(*it);
+                    m_activeNodes.erase(it);
+                    if (!m_reclaimQueue.try_enqueue(std::move(removed))) {
+                        stashForReclamation(std::move(removed));
+                    }
+                    if (m_hasProcessedAudio) {
+                        hadStructuralMutation = true;
+                    }
+                }
+                break;
+            }
+            case GraphCommandType::Swap: {
+                if (cmd.indexA < m_activeNodes.size() && cmd.indexB < m_activeNodes.size()) {
+                    std::swap(m_activeNodes[cmd.indexA], m_activeNodes[cmd.indexB]);
+                    if (m_hasProcessedAudio) {
+                        hadStructuralMutation = true;
+                    }
+                }
+                break;
+            }
+            case GraphCommandType::Reorder: {
+                if (cmd.indexA < m_activeNodes.size() && cmd.indexB < m_activeNodes.size() && cmd.indexA != cmd.indexB) {
+                    auto node = std::move(m_activeNodes[cmd.indexA]);
+                    m_activeNodes.erase(m_activeNodes.begin() + cmd.indexA);
+                    m_activeNodes.insert(m_activeNodes.begin() + cmd.indexB, std::move(node));
+                    if (m_hasProcessedAudio) {
+                        hadStructuralMutation = true;
+                    }
+                }
+                break;
+            }
+            case GraphCommandType::Clear: {
+                for (auto& n : m_activeNodes) {
+                    if (n) {
+                        if (!m_reclaimQueue.try_enqueue(std::move(n))) {
+                            stashForReclamation(std::move(n));
+                        }
+                    }
+                }
+                m_activeNodes.clear();
+                if (m_hasProcessedAudio) {
+                    hadStructuralMutation = true;
+                }
+                break;
+            }
+            case GraphCommandType::CrossfadeTo: {
+                for (auto& n : m_retiringNodes) {
+                    if (n) {
+                        if (!m_reclaimQueue.try_enqueue(std::move(n))) {
+                            stashForReclamation(std::move(n));
+                        }
+                    }
+                }
+                m_retiringNodes.clear();
+
+                for (auto& n : m_activeNodes) {
+                    if (n) {
+                        m_retiringNodes.push_back(std::move(n));
+                    }
+                }
+                m_activeNodes.clear();
+
+                if (cmd.chainPayload) {
+                    for (auto& n : cmd.chainPayload->nodes) {
+                        if (n) {
+                            m_activeNodes.push_back(std::move(n));
+                        }
+                    }
+                    cmd.chainPayload->nodes.clear();
+                    if (!m_chainReclaimQueue.try_enqueue(std::move(cmd.chainPayload))) {
+                        stashChainForReclamation(std::move(cmd.chainPayload));
+                    }
+                }
+
+                const uint32_t rampSamples = static_cast<uint32_t>(m_sampleRate * 0.010);
+                m_sceneCrossfadeRamp.reset(std::max(1u, rampSamples));
+                m_sceneCrossfadeRamp.startTransition(true);
+                m_isSceneCrossfading.store(true, std::memory_order_release);
+                break;
+            }
+        }
+    }
+
+    // 2. Attempt to flush any previously stashed items
+    flushStashedReclamations();
+
+    // 3. Initiate 64-sample equal-power micro-crossfade on structural mutation
+    if (hadStructuralMutation && !m_sceneCrossfadeRamp.isTransitioning()) {
+        m_microCrossfadeRamp.reset(64);
+        m_microCrossfadeRamp.startTransition(true);
+    }
 
     auto mainView = m_mainProcessingBuffer.view(numSamples);
     const uint32_t inCh = hardwareIn.numChannels();
@@ -690,64 +1238,88 @@ void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& ha
     // Apply Input Noise Gate
     m_noiseGate.process(mainView);
 
-    // Execute serial rack chain
-    {
-        std::unique_lock<std::mutex> lock(m_graphMutex, std::try_to_lock);
-        if (lock.owns_lock()) {
-            if (m_sceneCrossfadeRamp.isTransitioning()) {
-                // 1. Process Retiring (Outgoing) Chain
-                auto retView = m_retiringBuffer.view(numSamples);
-                retView.copyFrom(mainView);
-                for (auto& node : m_retiringNodes) {
-                    auto stepScratch = m_scratchBuffer.view(numSamples);
-                    AudioProcessContext ctx{
-                        .input = retView,
-                        .output = stepScratch,
-                        .sampleRate = m_sampleRate,
-                        .numSamples = numSamples
-                    };
-                    node->process(ctx);
-                    retView.copyFrom(stepScratch);
-                }
+    // Execute serial rack chain (Completely Lock-Free, 0 Mutex Locks)
+    if (m_sceneCrossfadeRamp.isTransitioning()) {
+        // 1. Process Retiring (Outgoing) Chain
+        auto retView = m_retiringBuffer.view(numSamples);
+        retView.copyFrom(mainView);
+        for (auto& node : m_retiringNodes) {
+            if (!node) continue;
+            auto stepScratch = m_scratchBuffer.view(numSamples);
+            AudioProcessContext ctx{
+                .input = retView,
+                .output = stepScratch,
+                .sampleRate = m_sampleRate,
+                .numSamples = numSamples
+            };
+            node->process(ctx);
+            retView.copyFrom(stepScratch);
+        }
 
-                // 2. Process Active (Incoming) Chain
-                auto actView = m_activeBuffer.view(numSamples);
-                actView.copyFrom(mainView);
-                for (auto& node : m_nodes) {
-                    auto stepScratch = m_scratchBuffer.view(numSamples);
-                    AudioProcessContext ctx{
-                        .input = actView,
-                        .output = stepScratch,
-                        .sampleRate = m_sampleRate,
-                        .numSamples = numSamples
-                    };
-                    node->process(ctx);
-                    actView.copyFrom(stepScratch);
-                }
+        // 2. Process Active (Incoming) Chain
+        auto actView = m_activeBuffer.view(numSamples);
+        actView.copyFrom(mainView);
+        for (auto& node : m_activeNodes) {
+            if (!node) continue;
+            auto stepScratch = m_scratchBuffer.view(numSamples);
+            AudioProcessContext ctx{
+                .input = actView,
+                .output = stepScratch,
+                .sampleRate = m_sampleRate,
+                .numSamples = numSamples
+            };
+            node->process(ctx);
+            actView.copyFrom(stepScratch);
+        }
 
-                // 3. Sample-by-Sample EqualPower Crossfade
-                const uint32_t numCh = mainView.numChannels();
-                for (uint32_t s = 0; s < numSamples; ++s) {
-                    float gainOut = 0.0f, gainIn = 0.0f;
-                    m_sceneCrossfadeRamp.getNextGains(gainOut, gainIn);
-                    for (uint32_t ch = 0; ch < numCh; ++ch) {
-                        float* out = mainView.channel(ch);
-                        const float* oldS = retView.channel(ch);
-                        const float* newS = actView.channel(ch);
-                        out[s] = (oldS[s] * gainOut) + (newS[s] * gainIn);
+        // 3. Sample-by-Sample EqualPower Crossfade
+        const uint32_t numCh = mainView.numChannels();
+        for (uint32_t s = 0; s < numSamples; ++s) {
+            float gainOut = 0.0f, gainIn = 0.0f;
+            m_sceneCrossfadeRamp.getNextGains(gainOut, gainIn);
+            for (uint32_t ch = 0; ch < numCh; ++ch) {
+                float* out = mainView.channel(ch);
+                const float* oldS = retView.channel(ch);
+                const float* newS = actView.channel(ch);
+                out[s] = (oldS[s] * gainOut) + (newS[s] * gainIn);
+            }
+        }
+
+        if (!m_sceneCrossfadeRamp.isTransitioning()) {
+            m_isSceneCrossfading.store(false, std::memory_order_release);
+            for (auto& node : m_retiringNodes) {
+                if (node) {
+                    if (!m_reclaimQueue.try_enqueue(std::move(node))) {
+                        stashForReclamation(std::move(node));
                     }
                 }
-            } else {
-                for (auto& node : m_nodes) {
-                    auto scratchView = m_scratchBuffer.view(numSamples);
-                    AudioProcessContext ctx{
-                        .input = mainView,
-                        .output = scratchView,
-                        .sampleRate = m_sampleRate,
-                        .numSamples = numSamples
-                    };
-                    node->process(ctx);
-                    mainView.copyFrom(scratchView);
+            }
+            m_retiringNodes.clear();
+        }
+    } else {
+        for (auto& node : m_activeNodes) {
+            if (!node) continue;
+            auto scratchView = m_scratchBuffer.view(numSamples);
+            AudioProcessContext ctx{
+                .input = mainView,
+                .output = scratchView,
+                .sampleRate = m_sampleRate,
+                .numSamples = numSamples
+            };
+            node->process(ctx);
+            mainView.copyFrom(scratchView);
+        }
+
+        // Apply 64-sample equal-power micro-crossfade if structural mutation occurred
+        if (m_microCrossfadeRamp.isTransitioning()) {
+            const uint32_t numCh = mainView.numChannels();
+            for (uint32_t s = 0; s < numSamples; ++s) {
+                float gainOld = 0.0f, gainNew = 0.0f;
+                m_microCrossfadeRamp.getNextGains(gainOld, gainNew);
+                for (uint32_t ch = 0; ch < numCh; ++ch) {
+                    float* out = mainView.channel(ch);
+                    const float prevSamp = (ch == 0) ? m_lastBlockSampleL : m_lastBlockSampleR;
+                    out[s] = (prevSamp * gainOld) + (out[s] * gainNew);
                 }
             }
         }
@@ -772,6 +1344,11 @@ void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& ha
     }
 
     hardwareOut.copyFrom(mainView);
+
+    // Store last samples for micro-crossfading on structural mutations
+    m_lastBlockSampleL = hardwareOut.channel(0)[numSamples - 1];
+    m_lastBlockSampleR = (hardwareOut.numChannels() > 1) ? hardwareOut.channel(1)[numSamples - 1] : m_lastBlockSampleL;
+    m_hasProcessedAudio = true;
 
     // Track output levels
     m_outputMeter.process(hardwareOut.channel(0), hardwareOut.numChannels() > 1 ? hardwareOut.channel(1) : nullptr, numSamples);

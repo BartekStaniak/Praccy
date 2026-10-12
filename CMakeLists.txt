@@ -49,12 +49,15 @@ set(PRACCY_SOURCES
     src/tools/quick_looper.cpp
     src/state/scene_manager.cpp
     src/state/app_config.cpp
+    src/state/undo_manager.cpp
     src/ui/rack_view.cpp
     src/ui/modals/plugin_browser_modal.cpp
     src/ui/modals/settings_modal.cpp
     src/ui/modals/practice_tools_modal.cpp
     src/ui/thumbnail_manager.cpp
     src/ui/update_checker.cpp
+    src/ui/drag_drop_router.cpp
+    src/utils/archive_utils.cpp
     resources/praccy.rc
 
     ${THIRD_PARTY_SOURCES}
@@ -126,7 +129,10 @@ add_executable(test_praccy
     src/tools/quick_looper.cpp
     src/state/scene_manager.cpp
     src/state/app_config.cpp
+    src/state/undo_manager.cpp
     src/ui/update_checker.cpp
+    src/ui/drag_drop_router.cpp
+    src/utils/archive_utils.cpp
     third_party/miniz/miniz.c
     third_party/imgui/imgui.cpp
     third_party/imgui/imgui_draw.cpp
@@ -154,23 +160,27 @@ else()
     target_compile_options(test_praccy PRIVATE -O3 -Wall -Wextra -Werror -Wno-unused-parameter)
 endif()
 
-# test_asio_driver disabled due to mismatched allocation warnings; remove or re‑enable after fixing
-# add_executable(test_asio_driver
-#     tests/test_asio_driver.cpp
-#     src/audio/asio_manager.cpp
-#     src/audio/graph_engine.cpp
-#     src/plugins/builtin_dsp.cpp
-#     src/tools/tuner.cpp
-# )
-# target_include_directories(test_asio_driver PRIVATE
-#     src
-#     tests
-# )
-# if(MSVC)
-#     target_compile_options(test_asio_driver PRIVATE /O2 /W4 /WX /permissive-)
-# else()
-#     target_compile_options(test_asio_driver PRIVATE -O3 -Wall -Wextra -Wno-unused-parameter -Wno-mismatched-new-delete)
-# endif()
+add_executable(test_asio_driver
+    tests/test_asio_driver.cpp
+    src/audio/asio_manager.cpp
+    src/audio/graph_engine.cpp
+    src/plugins/builtin_dsp.cpp
+    src/tools/tuner.cpp
+)
+target_include_directories(test_asio_driver PRIVATE
+    src
+    tests
+)
+target_include_directories(test_asio_driver SYSTEM PRIVATE
+    third_party
+    third_party/readerwriterqueue
+)
+target_link_libraries(test_asio_driver PRIVATE ole32 uuid user32 gdi32 winmm avrt)
+if(MSVC)
+    target_compile_options(test_asio_driver PRIVATE /O2 /W4 /WX /permissive-)
+else()
+    target_compile_options(test_asio_driver PRIVATE -O3 -Wall -Wextra -Wno-unused-parameter -Wno-mismatched-new-delete)
+endif()
 
 add_executable(test_challenger_m1
     tests/test_challenger_m1.cpp
@@ -232,6 +242,7 @@ add_test(NAME test_challenger_m1_2 COMMAND test_challenger_m1_2)
 add_executable(test_challenger_m2
     tests/test_challenger_m2.cpp
     src/ui/update_checker.cpp
+    src/utils/archive_utils.cpp
     third_party/miniz/miniz.c
     src/state/scene_manager.cpp
     src/state/app_config.cpp
@@ -269,6 +280,7 @@ add_test(NAME test_challenger_m2 COMMAND test_challenger_m2)
 add_executable(test_challenger_m2_1
     tests/test_challenger_m2_1.cpp
     src/ui/update_checker.cpp
+    src/utils/archive_utils.cpp
     third_party/miniz/miniz.c
     src/state/scene_manager.cpp
     src/state/app_config.cpp
@@ -393,6 +405,51 @@ else()
     target_compile_options(test_challenger_m4_2 PRIVATE -O3 -Wall -Wextra -Werror -Wno-unused-parameter)
 endif()
 add_test(NAME test_challenger_m4_2 COMMAND test_challenger_m4_2)
+
+add_executable(test_praccy_v2_1
+    tests/test_praccy_v2_1.cpp
+    src/audio/asio_manager.cpp
+    src/audio/graph_engine.cpp
+    src/plugins/builtin_dsp.cpp
+    src/plugins/vst3_host.cpp
+    src/plugins/clap_host.cpp
+    src/plugins/plugin_window.cpp
+    src/tools/tuner.cpp
+    src/tools/metronome.cpp
+    src/tools/audio_player.cpp
+    src/tools/quick_looper.cpp
+    src/utils/archive_utils.cpp
+    third_party/miniz/miniz.c
+    src/ui/drag_drop_router.cpp
+    src/state/undo_manager.cpp
+    src/state/scene_manager.cpp
+    src/state/app_config.cpp
+    src/midi/midi_manager.cpp
+    third_party/imgui/imgui.cpp
+    third_party/imgui/imgui_draw.cpp
+    third_party/imgui/imgui_tables.cpp
+    third_party/imgui/imgui_widgets.cpp
+    third_party/vst3_pluginterfaces/base/funknown.cpp
+    third_party/vst3_pluginterfaces/base/coreiids.cpp
+)
+target_include_directories(test_praccy_v2_1 PRIVATE
+    src
+    tests
+)
+target_include_directories(test_praccy_v2_1 SYSTEM PRIVATE
+    third_party
+    third_party/imgui
+    third_party/miniz
+    third_party/clap/include
+    third_party/readerwriterqueue
+)
+target_link_libraries(test_praccy_v2_1 PRIVATE ole32 uuid user32 gdi32 winmm avrt wininet shell32)
+if(MSVC)
+    target_compile_options(test_praccy_v2_1 PRIVATE /O2 /W4 /WX /permissive-)
+else()
+    target_compile_options(test_praccy_v2_1 PRIVATE -O3 -Wall -Wextra -Werror -Wno-unused-parameter $<$<COMPILE_LANGUAGE:CXX>:-Wno-mismatched-new-delete>)
+endif()
+add_test(NAME test_praccy_v2_1 COMMAND test_praccy_v2_1)
 
 
 
