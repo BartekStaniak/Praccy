@@ -334,7 +334,7 @@ void SettingsModal::renderUpdatesTab() {
     ImGui::Separator();
     ImGui::Spacing();
 
-    ImGui::Text("Installed Version: %s", "v2.0.0");
+    ImGui::Text("Installed Version: %s", "v2.4.0");
     ImGui::Spacing();
 
     state::AppConfig cfg;
@@ -357,7 +357,7 @@ void SettingsModal::renderUpdatesTab() {
 void SettingsModal::renderAboutTab() {
     const auto& tokens = themeTokens();
     ImGui::Spacing();
-    ImGui::TextColored(tokens.text.accent.vec4, "PRACCY v2.0.0");
+    ImGui::TextColored(tokens.text.accent.vec4, "PRACCY v2.4.0");
     ImGui::TextDisabled("Professional Ultra-Low-Latency Guitar & Audio Practice Suite");
     ImGui::Separator();
     ImGui::Spacing();
