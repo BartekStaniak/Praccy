@@ -32,17 +32,7 @@ struct CardDragPayload {
     int sourceBranchIndex{-1};
 };
 
-struct DeviceMacro {
-    std::string label;
-    uint32_t paramId{0};
-    bool bound{false};
-    bool isSlotMix{false};
-    bool isSlotTrim{false};
-    float currentValue{0.0f};
-    float defaultValue{0.0f};
-    float minValue{0.0f};
-    float maxValue{1.0f};
-};
+using DeviceMacro = audio::PluginSlot::Macro;
 
 class RackView {
 public:
@@ -96,6 +86,8 @@ private:
 
     void cycleAdjacentScenePreset(int delta);
     void initMacrosForSlot(audio::PluginSlot* slot);
+    void syncMacrosFromGraph();
+    void moveSlot(int srcIdx, int srcBlockIdx, int srcBranchIdx, int dstIdx, int dstBlockIdx, int dstBranchIdx);
 
     audio::GraphEngine& m_graph;
     audio::AsioManager& m_asio;
@@ -128,7 +120,9 @@ private:
     bool m_showPresetBrowserModal{false};
     char m_presetSearchFilter[64]{0};
     int m_selectedCategoryTagIndex{0}; // 0: All, 1: High Gain Metal, 2: Glassy Clean, 3: Ambient FX, 4: Edge of Breakup, 5: Favorites
-    std::unordered_set<std::string> m_favoritePresets;
+    bool isPresetFavorite(const std::string& name) const;
+    void toggleFavoritePreset(const std::string& name);
+    std::vector<std::string> m_favoritePresets;
     std::string m_auditionedPreset;
 
     std::string m_hudToastText;
@@ -149,7 +143,7 @@ private:
     bool m_keyMapMode{false};
     audio::PluginSlot* m_focusedSlot{nullptr};
     int m_focusedSlotIndex{-1};
-    state::AppConfig::RackViewMode m_rackViewMode{state::AppConfig::RackViewMode::Simple};
+    state::AppConfig::RackViewMode m_rackViewMode{state::AppConfig::RackViewMode::Modular};
 };
 
 } // namespace praccy::ui

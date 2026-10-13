@@ -36,3 +36,5 @@ __pycache__/
 *.pyc
 test_extract_temp/
 test_archive_temp.zip
+temp_out/
+.agents/

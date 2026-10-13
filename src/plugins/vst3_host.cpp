@@ -112,6 +112,7 @@ public:
 class PraccyPlugFrame : public Steinberg::IPlugFrame {
 public:
     HWND parentHwnd{nullptr};
+    bool inResize{false};
 
     Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID _iid, void** obj) override {
         if (memcmp(_iid, Steinberg::IPlugFrame::iid, sizeof(Steinberg::TUID)) == 0 ||
@@ -127,6 +128,8 @@ public:
 
     Steinberg::tresult PLUGIN_API resizeView(Steinberg::IPlugView* view, Steinberg::ViewRect* newSize) override {
         if (!view || !newSize) return Steinberg::kInvalidArgument;
+        if (inResize) return Steinberg::kResultOk;
+        inResize = true;
         if (parentHwnd && IsWindow(parentHwnd)) {
             int newW = newSize->right - newSize->left;
             int newH = newSize->bottom - newSize->top;
@@ -137,6 +140,7 @@ public:
             SetWindowPos(parentHwnd, nullptr, 0, 0, totalW, totalH, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
             view->onSize(newSize);
         }
+        inResize = false;
         return Steinberg::kResultOk;
     }
 };
@@ -524,8 +528,8 @@ void Vst3PluginInstance::getPreferredSize(int& width, int& height) const {
 void Vst3PluginInstance::closeGui() {
     if (m_plugView) {
         safeCallPluginGui([&]() {
-            m_plugView->setFrame(nullptr);
             m_plugView->removed();
+            m_plugView->setFrame(nullptr);
             m_plugView->release();
         });
         m_plugView = nullptr;

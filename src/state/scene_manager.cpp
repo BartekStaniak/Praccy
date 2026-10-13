@@ -172,6 +172,22 @@ std::unique_ptr<audio::PluginSlot> SceneManager::createSlotFromPreset(const Plug
     slot->setDryWet(p.dryWet);
     slot->setInputGainDb(p.inputGainDb);
     slot->setOutputGainDb(p.outputGainDb);
+
+    if (!p.macros.empty()) {
+        for (size_t i = 0; i < p.macros.size() && i < 4; ++i) {
+            const auto& mb = p.macros[i];
+            auto& sm = slot->macros()[i];
+            sm.paramId = mb.paramId;
+            sm.label = mb.label;
+            sm.currentValue = mb.value;
+            sm.defaultValue = mb.defaultValue;
+            sm.bound = (mb.paramId != 0 || !mb.label.empty());
+            if (i == 2 && mb.label == "VOL") sm.isSlotTrim = true;
+            if (i == 3 && mb.label == "MIX") sm.isSlotMix = true;
+        }
+        slot->setMacrosInitialized(true);
+    }
+
     return slot;
 }
 
@@ -194,6 +210,15 @@ ScenePreset SceneManager::captureGraphSnapshot(audio::GraphEngine& graph, const 
                 np.slot.dryWet = slot->dryWet();
                 np.slot.inputGainDb = slot->inputGainDb();
                 np.slot.outputGainDb = slot->outputGainDb();
+
+                for (const auto& sm : slot->macros()) {
+                    PluginSlotPreset::MacroBinding mb;
+                    mb.paramId = sm.paramId;
+                    mb.label = sm.label;
+                    mb.value = sm.currentValue;
+                    mb.defaultValue = sm.defaultValue;
+                    np.slot.macros.push_back(std::move(mb));
+                }
 
                 auto* inner = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
                 if (inner) {
@@ -237,6 +262,15 @@ ScenePreset SceneManager::captureGraphSnapshot(audio::GraphEngine& graph, const 
                         sp.inputGainDb = bSlot->inputGainDb();
                         sp.outputGainDb = bSlot->outputGainDb();
 
+                        for (const auto& sm : bSlot->macros()) {
+                            PluginSlotPreset::MacroBinding mb;
+                            mb.paramId = sm.paramId;
+                            mb.label = sm.label;
+                            mb.value = sm.currentValue;
+                            mb.defaultValue = sm.defaultValue;
+                            sp.macros.push_back(std::move(mb));
+                        }
+
                         auto* inner = dynamic_cast<plugins::IPluginInstance*>(bSlot->innerNode());
                         if (inner) {
                             sp.path = inner->path();
@@ -260,7 +294,140 @@ ScenePreset SceneManager::captureGraphSnapshot(audio::GraphEngine& graph, const 
     return scene;
 }
 
+static bool isSamePlugin(const PluginSlotPreset& p, audio::PluginSlot* slot) {
+    if (!slot) return false;
+    auto* inner = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
+    if (!inner) return false;
+    if (!p.path.empty() && !inner->path().empty()) {
+        if (p.path == inner->path()) return true;
+    }
+    if (!p.name.empty() && (p.name == slot->name() || p.name == inner->name())) {
+        return true;
+    }
+    if ((p.path == "builtin://drive" || p.name == "Praccy Drive") &&
+        dynamic_cast<plugins::OverdriveEffect*>(inner)) return true;
+    if ((p.path == "builtin://amp" || p.name == "Praccy Amp Sim") &&
+        dynamic_cast<plugins::TubeAmpEffect*>(inner)) return true;
+    if ((p.path == "builtin://delay" || p.name == "Praccy Stereo Delay") &&
+        dynamic_cast<plugins::StereoDelayEffect*>(inner)) return true;
+    return false;
+}
+
+bool SceneManager::canApplyInPlace(const ScenePreset& scene, audio::GraphEngine& graph) {
+    if (scene.nodes.empty()) return false;
+    if (graph.numNodes() != scene.nodes.size()) return false;
+
+    for (size_t i = 0; i < scene.nodes.size(); ++i) {
+        auto* node = graph.getNode(i);
+        if (!node) return false;
+
+        const auto& np = scene.nodes[i];
+        if (np.kind == NodePreset::Kind::Plugin) {
+            auto* slot = dynamic_cast<audio::PluginSlot*>(node);
+            if (!slot || !isSamePlugin(np.slot, slot)) return false;
+        } else if (np.kind == NodePreset::Kind::ParallelBlock) {
+            auto* block = dynamic_cast<audio::ParallelSplitMergeBlock*>(node);
+            if (!block || block->numBranches() != np.branches.size()) return false;
+            for (size_t b = 0; b < np.branches.size(); ++b) {
+                auto* branch = block->getBranch(b);
+                if (!branch || branch->numSlots() != np.branches[b].slots.size()) return false;
+                for (size_t s = 0; s < np.branches[b].slots.size(); ++s) {
+                    auto* bSlot = branch->getSlot(s);
+                    if (!bSlot || !isSamePlugin(np.branches[b].slots[s], bSlot)) return false;
+                }
+            }
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool SceneManager::applyGraphSnapshotInPlace(const ScenePreset& scene, audio::GraphEngine& graph) {
+    for (size_t i = 0; i < scene.nodes.size(); ++i) {
+        auto* node = graph.getNode(i);
+        if (!node) continue;
+        const auto& np = scene.nodes[i];
+        if (np.kind == NodePreset::Kind::Plugin) {
+            auto* slot = dynamic_cast<audio::PluginSlot*>(node);
+            if (!slot) continue;
+            auto* inner = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
+            const auto& sp = np.slot;
+            slot->setBypassed(sp.bypassed);
+            slot->setDryWet(sp.dryWet);
+            slot->setInputGainDb(sp.inputGainDb);
+            slot->setOutputGainDb(sp.outputGainDb);
+            if (!sp.state.empty() && inner) {
+                inner->loadState(sp.state);
+            }
+            if (!sp.macros.empty()) {
+                for (size_t m = 0; m < sp.macros.size() && m < 4; ++m) {
+                    const auto& mb = sp.macros[m];
+                    auto& sm = slot->macros()[m];
+                    sm.paramId = mb.paramId;
+                    sm.label = mb.label;
+                    sm.defaultValue = mb.defaultValue;
+                    sm.currentValue = mb.value;
+                    sm.bound = true;
+                    slot->setParameter(mb.paramId, mb.value);
+                    if (inner) {
+                        inner->setParameterValue(mb.paramId, mb.value);
+                    }
+                }
+            }
+        } else if (np.kind == NodePreset::Kind::ParallelBlock) {
+            auto* block = dynamic_cast<audio::ParallelSplitMergeBlock*>(node);
+            if (!block) continue;
+            block->setBlend(np.branchBlend);
+            for (size_t b = 0; b < np.branches.size(); ++b) {
+                const auto& bp = np.branches[b];
+                auto* branch = block->getBranch(b);
+                if (!branch) continue;
+                branch->setGainDb(bp.gainDb);
+                branch->setPan(bp.pan);
+                branch->setMuted(bp.muted);
+                branch->setSolo(bp.solo);
+                branch->setPhaseInvert(bp.phaseInvert);
+                for (size_t s = 0; s < bp.slots.size(); ++s) {
+                    auto* bSlot = branch->getSlot(s);
+                    if (!bSlot) continue;
+                    auto* bInner = dynamic_cast<plugins::IPluginInstance*>(bSlot->innerNode());
+                    const auto& sp = bp.slots[s];
+                    bSlot->setBypassed(sp.bypassed);
+                    bSlot->setDryWet(sp.dryWet);
+                    bSlot->setInputGainDb(sp.inputGainDb);
+                    bSlot->setOutputGainDb(sp.outputGainDb);
+                    if (!sp.state.empty() && bInner) {
+                        bInner->loadState(sp.state);
+                    }
+                    if (!sp.macros.empty()) {
+                        for (size_t m = 0; m < sp.macros.size() && m < 4; ++m) {
+                            const auto& mb = sp.macros[m];
+                            auto& sm = bSlot->macros()[m];
+                            sm.paramId = mb.paramId;
+                            sm.label = mb.label;
+                            sm.defaultValue = mb.defaultValue;
+                            sm.currentValue = mb.value;
+                            sm.bound = true;
+                            bSlot->setParameter(mb.paramId, mb.value);
+                            if (bInner) {
+                                bInner->setParameterValue(mb.paramId, mb.value);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    graph.triggerCrossfade(10.0f);
+    return true;
+}
+
 bool SceneManager::applyGraphSnapshot(const ScenePreset& scene, audio::GraphEngine& graph) {
+    if (canApplyInPlace(scene, graph)) {
+        return applyGraphSnapshotInPlace(scene, graph);
+    }
+
     plugins::PluginWindowManager::instance().closeAllWindows();
 
     std::vector<std::unique_ptr<audio::AudioNode>> newNodes;

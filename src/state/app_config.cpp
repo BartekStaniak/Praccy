@@ -33,6 +33,8 @@ bool AppConfig::load(const std::string& customPath) {
 
     customPluginPaths.clear();
     favoritePlugins.clear();
+    favoritePresets.clear();
+    customPluginCategories.clear();
     recentPlugins.clear();
     std::string line;
     while (std::getline(file, line)) {
@@ -64,6 +66,13 @@ bool AppConfig::load(const std::string& customPath) {
             customPluginPaths.push_back(val);
         } else if (key == "favorite_plugin") {
             favoritePlugins.push_back(val);
+        } else if (key == "favorite_preset") {
+            favoritePresets.push_back(val);
+        } else if (key == "plugin_category") {
+            auto sep = val.find('|');
+            if (sep != std::string::npos) {
+                customPluginCategories[val.substr(0, sep)] = val.substr(sep + 1);
+            }
         } else if (key == "recent_plugin") {
             recentPlugins.push_back(val);
         } else if (key == "retroactive_buffer_minutes") {
@@ -76,9 +85,10 @@ bool AppConfig::load(const std::string& customPath) {
         } else if (key == "rack_view_mode") {
             int modeVal = utils::parseInteger<int>(val, 0);
             rackViewMode = (modeVal == 1) ? RackViewMode::Modular : RackViewMode::Simple;
+        } else if (key == "theme_id") {
+            themeId = std::clamp(utils::parseInteger<int>(val, 0), 0, 3);
         } else if (key == "window_x") {
             windowX = utils::parseInteger<int>(val, 100);
-        } else if (key == "window_y") {
             windowY = utils::parseInteger<int>(val, 100);
         } else if (key == "window_w") {
             windowW = utils::parseInteger<int>(val, 1280);
@@ -105,6 +115,7 @@ bool AppConfig::save(const std::string& customPath) const {
     file << "check_beta_updates=" << (checkBetaUpdates ? "1" : "0") << "\n";
     file << "retroactive_buffer_minutes=" << retroactiveBufferMinutes << "\n";
     file << "rack_view_mode=" << static_cast<int>(rackViewMode) << "\n";
+    file << "theme_id=" << themeId << "\n";
     file << "window_x=" << windowX << "\n";
     file << "window_y=" << windowY << "\n";
     file << "window_w=" << windowW << "\n";
@@ -117,6 +128,14 @@ bool AppConfig::save(const std::string& customPath) const {
 
     for (const auto& fp : favoritePlugins) {
         file << "favorite_plugin=" << fp << "\n";
+    }
+
+    for (const auto& fpre : favoritePresets) {
+        file << "favorite_preset=" << fpre << "\n";
+    }
+
+    for (const auto& [name, cat] : customPluginCategories) {
+        file << "plugin_category=" << name << "|" << cat << "\n";
     }
 
     for (const auto& rp : recentPlugins) {

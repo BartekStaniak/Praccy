@@ -94,6 +94,8 @@ public:
     // Graph snapshot serialization & crossfaded application
     static ScenePreset captureGraphSnapshot(audio::GraphEngine& graph, const std::string& name = "Snapshot");
     static bool applyGraphSnapshot(const ScenePreset& preset, audio::GraphEngine& graph);
+    static bool canApplyInPlace(const ScenePreset& preset, audio::GraphEngine& graph);
+    static bool applyGraphSnapshotInPlace(const ScenePreset& preset, audio::GraphEngine& graph);
 
     // Instant A/B Tone Snapshot Comparison
     enum class ToneSnapshotSlot : uint8_t { None, A, B };

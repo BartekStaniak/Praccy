@@ -28,7 +28,7 @@ enum class UpdateStatus {
 struct UpdateInfo {
     UpdateStatus status{UpdateStatus::Idle};
     bool isBeta{false};
-    std::string currentVersion{"v2.4.0"};
+    std::string currentVersion{"v2.5-beta1"};
     std::string latestVersion;   // e.g. "v1.0.1" or "dev (f4610ff)"
     std::string releaseTitle;
     std::string releaseNotes;

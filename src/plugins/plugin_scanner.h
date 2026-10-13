@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <unordered_set>
+#include <unordered_map>
 #include <filesystem>
 #include <mutex>
 #include <atomic>
@@ -36,6 +37,8 @@ struct PluginDescriptor {
     }
 };
 
+std::string detectPluginCategory(const std::string& name, const std::string& vendor);
+
 enum class PluginSortMode {
     NameAscending = 0,
     NameDescending,
@@ -62,6 +65,10 @@ public:
     void toggleFavorite(const std::string& nameOrPath);
     [[nodiscard]] size_t numFavorites() const;
 
+    void setCustomCategory(const std::string& pluginName, const std::string& category);
+    void resetCustomCategory(const std::string& pluginName);
+    [[nodiscard]] std::string getPluginCategory(const std::string& pluginName, const std::string& vendor = "") const;
+
     [[nodiscard]] const PluginDescriptor* resolvePlugin(
         const std::string& name,
         const std::string& bundleFileName = "",
@@ -87,6 +94,7 @@ private:
     std::vector<std::string> m_searchPaths;
     std::vector<PluginDescriptor> m_plugins;
     std::unordered_set<std::string> m_favorites;
+    std::unordered_map<std::string, std::string> m_categoryOverrides;
     mutable std::mutex m_mutex;
     std::atomic<bool> m_isScanning{false};
     std::atomic<bool> m_shouldStop{false};

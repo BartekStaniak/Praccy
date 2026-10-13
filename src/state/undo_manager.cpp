@@ -7,42 +7,7 @@ namespace praccy::state {
 namespace {
 
 void applyScenePresetToGraph(const ScenePreset& preset, audio::GraphEngine& graph) {
-    plugins::PluginWindowManager::instance().closeAllWindows();
-
-    std::vector<std::unique_ptr<audio::AudioNode>> newNodes;
-
-    for (const auto& np : preset.nodes) {
-        if (np.kind == NodePreset::Kind::Plugin) {
-            auto slot = SceneManager::createSlotFromPreset(np.slot);
-            if (slot) {
-                slot->prepare(graph.sampleRate(), graph.maxBlockSize());
-                newNodes.push_back(std::move(slot));
-            }
-        } else if (np.kind == NodePreset::Kind::ParallelBlock) {
-            auto block = std::make_unique<audio::ParallelSplitMergeBlock>();
-            block->prepare(graph.sampleRate(), graph.maxBlockSize());
-            for (const auto& bp : np.branches) {
-                auto* branch = block->addBranch(bp.name);
-                branch->prepare(graph.sampleRate(), graph.maxBlockSize());
-                branch->setGainDb(bp.gainDb);
-                branch->setPan(bp.pan);
-                branch->setMuted(bp.muted);
-                branch->setSolo(bp.solo);
-                branch->setPhaseInvert(bp.phaseInvert);
-
-                for (const auto& sp : bp.slots) {
-                    auto slot = SceneManager::createSlotFromPreset(sp);
-                    if (slot) {
-                        slot->prepare(graph.sampleRate(), graph.maxBlockSize());
-                        branch->addSlot(std::move(slot));
-                    }
-                }
-            }
-            newNodes.push_back(std::move(block));
-        }
-    }
-
-    graph.crossfadeToNodes(std::move(newNodes));
+    SceneManager::applyGraphSnapshot(preset, graph);
 }
 
 } // anonymous namespace

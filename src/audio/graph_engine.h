@@ -70,6 +70,23 @@ public:
     [[nodiscard]] AudioNode* innerNode() const noexcept { return m_innerNode.get(); }
     [[nodiscard]] LevelMeter& meter() noexcept { return m_meter; }
 
+    struct Macro {
+        std::string label;
+        uint32_t paramId{0};
+        bool bound{false};
+        bool isSlotMix{false};
+        bool isSlotTrim{false};
+        float currentValue{0.0f};
+        float defaultValue{0.0f};
+        float minValue{0.0f};
+        float maxValue{1.0f};
+    };
+
+    [[nodiscard]] std::array<Macro, 4>& macros() noexcept { return m_macros; }
+    [[nodiscard]] const std::array<Macro, 4>& macros() const noexcept { return m_macros; }
+    [[nodiscard]] bool hasMacrosInitialized() const noexcept { return m_macrosInitialized; }
+    void setMacrosInitialized(bool init) noexcept { m_macrosInitialized = init; }
+
 private:
     std::unique_ptr<AudioNode> m_innerNode;
     std::atomic<float> m_dryWet{1.0f};      // 1.0 = 100% wet
@@ -81,11 +98,15 @@ private:
     OwnedAudioBuffer m_dryBuffer;
     OwnedAudioBuffer m_processBuffer;
     LevelMeter m_meter;
+    std::array<Macro, 4> m_macros{};
+    bool m_macrosInitialized{false};
 };
 
 enum class SlotCommandType : uint8_t {
     Add,
+    Insert,
     Remove,
+    Reorder,
     Clear
 };
 
@@ -96,12 +117,29 @@ struct SlotCommand {
     SlotCommandType type{SlotCommandType::Add};
     std::unique_ptr<PluginSlot> slot{nullptr};
     size_t index{0};
+    size_t targetIndex{0};
     PluginSlot* targetSlot{nullptr};
 
     static SlotCommand makeAdd(std::unique_ptr<PluginSlot> newSlot) noexcept {
         SlotCommand cmd;
         cmd.type = SlotCommandType::Add;
         cmd.slot = std::move(newSlot);
+        return cmd;
+    }
+
+    static SlotCommand makeInsert(size_t idx, std::unique_ptr<PluginSlot> newSlot) noexcept {
+        SlotCommand cmd;
+        cmd.type = SlotCommandType::Insert;
+        cmd.index = idx;
+        cmd.slot = std::move(newSlot);
+        return cmd;
+    }
+
+    static SlotCommand makeReorder(size_t fromIdx, size_t toIdx) noexcept {
+        SlotCommand cmd;
+        cmd.type = SlotCommandType::Reorder;
+        cmd.index = fromIdx;
+        cmd.targetIndex = toIdx;
         return cmd;
     }
 
@@ -140,8 +178,10 @@ public:
 
     // UI-thread mutations (Push to SPSC command queue, update UI shadow list)
     void addSlot(std::unique_ptr<PluginSlot> slot);
+    void insertSlot(size_t index, std::unique_ptr<PluginSlot> slot);
     void removeSlot(size_t index);
     std::unique_ptr<PluginSlot> takeSlot(size_t index);
+    void reorderSlots(size_t fromIndex, size_t toIndex);
 
     // Thread-safe UI readouts (Reads UI shadow list, zero lock contention)
     [[nodiscard]] size_t numSlots() const noexcept { return m_uiSlots.size(); }
@@ -407,6 +447,10 @@ public:
     void dissolveParallelBlock(size_t blockIndex, int branchToKeep);
     void clearNodes();
     void crossfadeToNodes(std::vector<std::unique_ptr<AudioNode>> newNodes);
+    void triggerCrossfade(float durationMs = 10.0f) noexcept {
+        const uint32_t rampSamples = static_cast<uint32_t>(m_sampleRate * (durationMs / 1000.0f));
+        m_pendingCrossfadeSamples.store(std::max(1u, rampSamples), std::memory_order_release);
+    }
     [[nodiscard]] bool isSceneCrossfading() const noexcept {
         return m_isSceneCrossfading.load(std::memory_order_acquire);
     }
@@ -485,6 +529,11 @@ private:
     float m_lastBlockSampleR{0.0f};
     bool m_hasProcessedAudio{false};
     std::atomic<bool> m_isSceneCrossfading{false};
+
+    // 10ms smooth equal-power crossfade for in-place preset / snapshot / A-B switching
+    std::atomic<uint32_t> m_pendingCrossfadeSamples{0};
+    EqualPowerRamp m_inplaceCrossfadeRamp;
+    OwnedAudioBuffer m_outgoingTailBuffer;
 };
 
 } // namespace praccy::audio

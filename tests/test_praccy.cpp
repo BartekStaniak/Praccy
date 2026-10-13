@@ -1924,7 +1924,7 @@ void testHardwareGradeWidgetsAndCategoryBadges() {
     HardwareKnobOptions opt;
     assert(opt.radius == 13.0f);
     assert(opt.arcThickness == 2.2f);
-    assert(opt.sensitivity == 0.005f);
+    assert(opt.sensitivity == 0.012f);
 
     // 4. Gravity sag computation parity
     auto computeSag = [](float dx) {
@@ -1936,9 +1936,9 @@ void testHardwareGradeWidgetsAndCategoryBadges() {
 
     // 5. Rack View Mode Enum Parity
     state::AppConfig cfg;
-    assert(cfg.rackViewMode == state::AppConfig::RackViewMode::Simple);
-    cfg.rackViewMode = state::AppConfig::RackViewMode::Modular;
     assert(cfg.rackViewMode == state::AppConfig::RackViewMode::Modular);
+    cfg.rackViewMode = state::AppConfig::RackViewMode::Simple;
+    assert(cfg.rackViewMode == state::AppConfig::RackViewMode::Simple);
 
     std::cout << "PASSED\n";
 }

@@ -229,6 +229,7 @@ int PluginBrowserModal::SearchInputCallback(ImGuiInputTextCallbackData* data) {
 
 void PluginBrowserModal::updateFilteredList() {
     m_filteredItems.clear();
+    m_allPlugins = m_scanner.scannedPlugins();
     const auto& allPlugins = m_allPlugins;
 
     auto matchesScope = [this](const plugins::PluginDescriptor& p) -> bool {
@@ -474,19 +475,23 @@ void PluginBrowserModal::renderPluginRow(int index, float rowH) {
         dl->AddRectFilled(rowPos, ImVec2(rowPos.x + 3.0f, rowPos.y + rowH), tokens.borders.focus, 2.0f);
     }
 
-    // Row contents
-    ImGui::SameLine(6.0f);
+    // Row contents with unified vertical centering
+    const float starSz = 20.0f;
+    const float badgeH = 18.0f;
+    const float fontH = ImGui::GetFontSize();
 
-    // 1. Star / Favorite Button
+    // 1. Star / Favorite Button (centered in rowH)
+    float curX = rowPos.x + 8.0f;
+    float starY = rowPos.y + (rowH - starSz) * 0.5f;
+    ImGui::SetCursorScreenPos(ImVec2(curX, starY));
     char starId[32];
     std::snprintf(starId, sizeof(starId), "##Star_%d", index);
-    ImGui::AlignTextToFramePadding();
-    if (renderCenteredStarButton(starId, ImVec2(20.0f, 20.0f), item.isFavorite)) {
+    if (renderCenteredStarButton(starId, ImVec2(starSz, starSz), item.isFavorite)) {
         toggleFavorite(desc->name);
     }
+    curX += starSz + 8.0f;
 
-    // 2. Format Badge
-    ImGui::SameLine(0, 6.0f);
+    // 2. Format Badge (centered in rowH)
     const char* badgeStr = "DSP";
     ImU32 badgeText = tokens.text.badgeInternal;
     if (desc->type == plugins::PluginType::VST3) {
@@ -496,11 +501,15 @@ void PluginBrowserModal::renderPluginRow(int index, float rowH) {
         badgeStr = "CLAP";
         badgeText = tokens.text.badgeClap;
     }
-    renderBadgePill(badgeStr, tokens.surfaces.frameBg, tokens.borders.subtle, badgeText, 18.0f);
+    float badgeY = rowPos.y + (rowH - badgeH) * 0.5f;
+    ImGui::SetCursorScreenPos(ImVec2(curX, badgeY));
+    renderBadgePill(badgeStr, tokens.surfaces.frameBg, tokens.borders.subtle, badgeText, badgeH);
+    ImVec2 badgeSz = ImGui::CalcTextSize(badgeStr);
+    curX += (badgeSz.x + 12.0f) + 10.0f;
 
     // 3. Clean Plugin Title (suffix clutter stripped)
-    ImGui::SameLine(0, 8.0f);
-    ImGui::AlignTextToFramePadding();
+    float textY = rowPos.y + (rowH - fontH) * 0.5f;
+    ImGui::SetCursorScreenPos(ImVec2(curX, textY));
     std::string displayName = cleanPluginName(desc->name);
     ImVec4 titleCol = isSelected ? tokens.text.accent.vec4 : tokens.text.primary.vec4;
     ImGui::TextColored(titleCol, "%s", displayName.c_str());
@@ -511,23 +520,62 @@ void PluginBrowserModal::renderPluginRow(int index, float rowH) {
         ImGui::TextColored(tokens.text.secondary.vec4, "%s", desc->vendor.c_str());
     }
 
-    // 5. Category Badge on right (no double-badging with format badge)
-    if (!desc->category.empty()) {
-        std::string catUpper = desc->category;
-        std::transform(catUpper.begin(), catUpper.end(), catUpper.begin(), [](unsigned char c) {
-            return static_cast<char>(std::toupper(c));
-        });
-        if (catUpper != "VST3" && catUpper != "CLAP" && catUpper != "DSP" && catUpper != badgeStr) {
-            ImVec2 catSz = ImGui::CalcTextSize(desc->category.c_str());
-            float catX = rowPos.x + rowW - catSz.x - 24.0f;
-            if (catX > ImGui::GetCursorScreenPos().x + 20.0f) {
-                ImGui::SameLine(catX - rowPos.x);
-                renderBadgePill(desc->category.c_str(), tokens.surfaces.frameBg, tokens.borders.subtle, tokens.text.muted, 18.0f);
+    // 5. Intelligent Type/Category Capsule on the far right
+    std::string catName = m_scanner.getPluginCategory(desc->name, desc->vendor);
+    bool pillHovered = false;
+    if (!catName.empty()) {
+        ImVec2 catSz = ImGui::CalcTextSize(catName.c_str());
+        const float catPillW = catSz.x + 12.0f;
+        float catX = rowPos.x + rowW - catPillW - 14.0f;
+        if (catX > ImGui::GetCursorScreenPos().x + 20.0f) {
+            float catY = rowPos.y + (rowH - badgeH) * 0.5f;
+            ImGui::SetCursorScreenPos(ImVec2(catX, catY));
+            char catBtnId[64];
+            std::snprintf(catBtnId, sizeof(catBtnId), "##CatPill_%d", index);
+            ImGui::InvisibleButton(catBtnId, ImVec2(catPillW, badgeH));
+            pillHovered = ImGui::IsItemHovered();
+            if (pillHovered) {
+                ImGui::SetTooltip("Category: %s\nRight-click to change category", catName.c_str());
+            }
+
+            ImGui::SetCursorScreenPos(ImVec2(catX, catY));
+            renderBadgePill(catName.c_str(), tokens.surfaces.frameBg,
+                            pillHovered ? tokens.borders.focus : tokens.borders.subtle,
+                            pillHovered ? tokens.text.primary : tokens.text.muted, badgeH);
+
+            if (ImGui::BeginPopupContextItem(catBtnId, ImGuiPopupFlags_MouseButtonRight)) {
+                ImGui::TextDisabled("Category for %s:", desc->name.c_str());
+                ImGui::Separator();
+                const char* kCategories[] = {
+                    "Amp Emulation",
+                    "Distortion",
+                    "Dynamics",
+                    "Equalizer",
+                    "Delay/Echo",
+                    "Reverb",
+                    "Modulation",
+                    "Pitch/Tuning",
+                    "Utility/Metering",
+                    "Audio FX"
+                };
+                for (const char* c : kCategories) {
+                    bool isCur = (catName == c);
+                    if (ImGui::MenuItem(c, nullptr, isCur)) {
+                        m_scanner.setCustomCategory(desc->name, c);
+                        updateFilteredList();
+                    }
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Reset to Auto-detected")) {
+                    m_scanner.resetCustomCategory(desc->name);
+                    updateFilteredList();
+                }
+                ImGui::EndPopup();
             }
         }
     }
 
-    if (clicked) {
+    if (clicked && !pillHovered) {
         m_selectedIndex = index;
         instantiateSelectedPlugin();
     }

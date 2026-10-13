@@ -332,17 +332,12 @@ bool ThumbnailManager::captureWindow(const std::string& pluginName, HWND hwnd) {
         }
     }
 
-    // Method 2: If BitBlt failed or window not on screen, try PrintWindow
     if (!captured) {
-        HWND childHwnd = GetWindow(hwnd, GW_CHILD);
-        if (childHwnd && IsWindow(childHwnd)) {
-            captured = PrintWindow(childHwnd, hdcMem, 2 /*PW_RENDERFULLCONTENT*/);
-            if (!captured) captured = PrintWindow(childHwnd, hdcMem, 0);
-        }
-        if (!captured) {
-            captured = PrintWindow(hwnd, hdcMem, 2);
-            if (!captured) captured = PrintWindow(hwnd, hdcMem, 0);
-        }
+        SelectObject(hdcMem, oldBm);
+        DeleteObject(hbm);
+        DeleteDC(hdcMem);
+        ReleaseDC(nullptr, hdcScreen);
+        return false;
     }
 
     Gdiplus::Bitmap fullBmp(hbm, nullptr);

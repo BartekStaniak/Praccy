@@ -181,6 +181,15 @@ void ParallelBranch::prepare(double sampleRate, uint32_t maxBlockSize) {
     while (m_commandQueue.try_dequeue(cmd)) {
         if (cmd.type == SlotCommandType::Add && cmd.slot) {
             m_activeSlots.push_back(std::move(cmd.slot));
+        } else if (cmd.type == SlotCommandType::Insert && cmd.slot) {
+            size_t idx = std::min(cmd.index, m_activeSlots.size());
+            m_activeSlots.insert(m_activeSlots.begin() + idx, std::move(cmd.slot));
+        } else if (cmd.type == SlotCommandType::Reorder) {
+            if (cmd.index < m_activeSlots.size() && cmd.targetIndex < m_activeSlots.size() && cmd.index != cmd.targetIndex) {
+                auto s = std::move(m_activeSlots[cmd.index]);
+                m_activeSlots.erase(m_activeSlots.begin() + cmd.index);
+                m_activeSlots.insert(m_activeSlots.begin() + cmd.targetIndex, std::move(s));
+            }
         }
     }
 
@@ -245,6 +254,22 @@ void ParallelBranch::addSlot(std::unique_ptr<PluginSlot> slot) {
     }
 }
 
+void ParallelBranch::insertSlot(size_t index, std::unique_ptr<PluginSlot> slot) {
+    if (!slot) return;
+    collectReclaimedSlots();
+
+    slot->prepare(m_sampleRate, m_maxBlockSize);
+
+    PluginSlot* rawPtr = slot.get();
+    index = std::min(index, m_uiSlots.size());
+    m_uiSlots.insert(m_uiSlots.begin() + index, rawPtr);
+
+    SlotCommand cmd = SlotCommand::makeInsert(index, std::move(slot));
+    if (!m_commandQueue.try_enqueue(std::move(cmd))) {
+        m_uiSlots.erase(m_uiSlots.begin() + index);
+    }
+}
+
 void ParallelBranch::removeSlot(size_t index) {
     collectReclaimedSlots();
     if (index >= m_uiSlots.size()) return;
@@ -256,6 +281,18 @@ void ParallelBranch::removeSlot(size_t index) {
     m_commandQueue.try_enqueue(std::move(cmd));
 }
 
+void ParallelBranch::reorderSlots(size_t fromIndex, size_t toIndex) {
+    collectReclaimedSlots();
+    if (fromIndex >= m_uiSlots.size() || toIndex >= m_uiSlots.size() || fromIndex == toIndex) return;
+
+    auto* ptr = m_uiSlots[fromIndex];
+    m_uiSlots.erase(m_uiSlots.begin() + fromIndex);
+    m_uiSlots.insert(m_uiSlots.begin() + toIndex, ptr);
+
+    SlotCommand cmd = SlotCommand::makeReorder(fromIndex, toIndex);
+    m_commandQueue.try_enqueue(std::move(cmd));
+}
+
 std::unique_ptr<PluginSlot> ParallelBranch::takeSlot(size_t index) {
     collectReclaimedSlots();
 
@@ -264,6 +301,15 @@ std::unique_ptr<PluginSlot> ParallelBranch::takeSlot(size_t index) {
     while (m_commandQueue.try_dequeue(cmd)) {
         if (cmd.type == SlotCommandType::Add && cmd.slot) {
             m_activeSlots.push_back(std::move(cmd.slot));
+        } else if (cmd.type == SlotCommandType::Insert && cmd.slot) {
+            size_t idx = std::min(cmd.index, m_activeSlots.size());
+            m_activeSlots.insert(m_activeSlots.begin() + idx, std::move(cmd.slot));
+        } else if (cmd.type == SlotCommandType::Reorder) {
+            if (cmd.index < m_activeSlots.size() && cmd.targetIndex < m_activeSlots.size() && cmd.index != cmd.targetIndex) {
+                auto s = std::move(m_activeSlots[cmd.index]);
+                m_activeSlots.erase(m_activeSlots.begin() + cmd.index);
+                m_activeSlots.insert(m_activeSlots.begin() + cmd.targetIndex, std::move(s));
+            }
         } else if (cmd.type == SlotCommandType::Remove) {
             auto it = m_activeSlots.end();
             if (cmd.targetSlot != nullptr) {
@@ -350,6 +396,27 @@ void ParallelBranch::process(AudioProcessContext& ctx) {
                             stashForReclamation(std::move(cmd.slot));
                         }
                     }
+                }
+                break;
+            }
+            case SlotCommandType::Insert: {
+                if (cmd.slot) {
+                    if (m_activeSlots.size() < MAX_BRANCH_SLOTS) {
+                        size_t idx = std::min(cmd.index, m_activeSlots.size());
+                        m_activeSlots.insert(m_activeSlots.begin() + idx, std::move(cmd.slot));
+                    } else {
+                        if (!m_reclaimQueue.try_enqueue(std::move(cmd.slot))) {
+                            stashForReclamation(std::move(cmd.slot));
+                        }
+                    }
+                }
+                break;
+            }
+            case SlotCommandType::Reorder: {
+                if (cmd.index < m_activeSlots.size() && cmd.targetIndex < m_activeSlots.size() && cmd.index != cmd.targetIndex) {
+                    auto s = std::move(m_activeSlots[cmd.index]);
+                    m_activeSlots.erase(m_activeSlots.begin() + cmd.index);
+                    m_activeSlots.insert(m_activeSlots.begin() + cmd.targetIndex, std::move(s));
                 }
                 break;
             }
@@ -807,6 +874,9 @@ void GraphEngine::prepare(double sampleRate, uint32_t maxBlockSize) {
     const uint32_t rampSamples = static_cast<uint32_t>(sampleRate * 0.010);
     m_sceneCrossfadeRamp.reset(std::max(1u, rampSamples));
     m_microCrossfadeRamp.reset(64);
+    m_outgoingTailBuffer.resize(2, maxBlockSize);
+    m_inplaceCrossfadeRamp.reset(std::max(1u, rampSamples));
+    m_pendingCrossfadeSamples.store(0, std::memory_order_relaxed);
     m_hasProcessedAudio = false;
     m_lastBlockSampleL = 0.0f;
     m_lastBlockSampleR = 0.0f;
@@ -823,6 +893,8 @@ void GraphEngine::reset() {
     m_lastBlockSampleL = 0.0f;
     m_lastBlockSampleR = 0.0f;
     m_isSceneCrossfading.store(false, std::memory_order_relaxed);
+    m_pendingCrossfadeSamples.store(0, std::memory_order_relaxed);
+    m_inplaceCrossfadeRamp.reset(std::max(1u, static_cast<uint32_t>(m_sampleRate * 0.010)));
     m_activeNodes.reserve(MAX_GRAPH_NODES);
     m_retiringNodes.reserve(MAX_GRAPH_NODES);
 
@@ -1059,6 +1131,13 @@ AudioNode* GraphEngine::getNode(size_t index) noexcept {
 void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& hardwareOut) {
     const uint32_t numSamples = hardwareIn.numSamples();
     if (numSamples == 0) return;
+
+    // Check for triggered in-place 10ms crossfade (Wait-Free, Lock-Free)
+    uint32_t pendingCrossfade = m_pendingCrossfadeSamples.exchange(0, std::memory_order_acq_rel);
+    if (pendingCrossfade > 0) {
+        m_inplaceCrossfadeRamp.reset(pendingCrossfade);
+        m_inplaceCrossfadeRamp.startTransition(true);
+    }
 
     // 1. Drain pending structural commands from UI thread (Wait-Free, Lock-Free)
     GraphCommand cmd;
@@ -1310,8 +1389,23 @@ void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& ha
             mainView.copyFrom(scratchView);
         }
 
-        // Apply 64-sample equal-power micro-crossfade if structural mutation occurred
-        if (m_microCrossfadeRamp.isTransitioning()) {
+        // Apply smooth 10ms equal-power crossfade between previous audio tail and new tone
+        if (m_inplaceCrossfadeRamp.isTransitioning()) {
+            const uint32_t numCh = mainView.numChannels();
+            const uint32_t tailLimit = std::min(numSamples, m_outgoingTailBuffer.maxSamples());
+            auto tailView = m_outgoingTailBuffer.view(tailLimit);
+            for (uint32_t s = 0; s < numSamples; ++s) {
+                float gainOld = 0.0f, gainNew = 0.0f;
+                m_inplaceCrossfadeRamp.getNextGains(gainOld, gainNew);
+                for (uint32_t ch = 0; ch < numCh; ++ch) {
+                    float* out = mainView.channel(ch);
+                    float oldS = (s < tailLimit && ch < tailView.numChannels())
+                                 ? tailView.channel(ch)[s]
+                                 : (ch == 0 ? m_lastBlockSampleL : m_lastBlockSampleR);
+                    out[s] = (oldS * gainOld) + (out[s] * gainNew);
+                }
+            }
+        } else if (m_microCrossfadeRamp.isTransitioning()) {
             const uint32_t numCh = mainView.numChannels();
             for (uint32_t s = 0; s < numSamples; ++s) {
                 float gainOld = 0.0f, gainNew = 0.0f;
@@ -1344,6 +1438,12 @@ void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& ha
     }
 
     hardwareOut.copyFrom(mainView);
+
+    // Store outgoing audio tail for smooth in-place crossfading on tone / preset switches
+    if (numSamples > 0 && numSamples <= m_outgoingTailBuffer.maxSamples()) {
+        auto tailView = m_outgoingTailBuffer.view(numSamples);
+        tailView.copyFrom(mainView);
+    }
 
     // Store last samples for micro-crossfading on structural mutations
     m_lastBlockSampleL = hardwareOut.channel(0)[numSamples - 1];

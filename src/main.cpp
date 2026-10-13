@@ -172,6 +172,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         LocalFree(argv);
     }
 
+    // 0. Initialize OLE/COM apartment for hosted plugin UI technologies (Direct2D, WIC, shell)
+    OleInitialize(nullptr);
+
     // 1. Enable Per-Monitor v2 DPI awareness before window creation
     ImGui_ImplWin32_EnableDpiAwareness();
 
@@ -221,7 +224,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
-    praccy::ui::applyPraccyTheme();
+    praccy::state::AppConfig startupCfg;
+    startupCfg.load();
+    praccy::ui::applyTheme(static_cast<praccy::ui::ThemeId>(std::clamp(startupCfg.themeId, 0, 3)));
     if (dpiScale > 1.0f) {
         ImGui::GetStyle().ScaleAllSizes(dpiScale);
     }
@@ -233,6 +238,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     static const ImWchar glyphRanges[] = {
         0x0020, 0x00FF, // Basic Latin + Latin Supplement
+        0x2190, 0x21FF, // Arrows (←, ↑, →, ↓, etc.)
         0,
     };
 
@@ -282,6 +288,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         symConfig.MergeMode = true;
         symConfig.FontDataOwnedByAtlas = true; // AddFontFromFileTTF allocates heap memory via ImFileLoadToMemory; atlas must own it to free on ClearInputData()
         static const ImWchar symRanges[] = {
+            0x2190, 0x21FF, // Arrows (←, ↑, →, ↓, etc.)
             0x2600, 0x26FF, // Miscellaneous Symbols (★, ☆, etc.)
             0x2700, 0x27BF, // Dingbats
             0,
@@ -582,6 +589,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     DestroyWindow(hwnd);
     UnregisterClassW(wc.lpszClassName, wc.hInstance);
     if (hDarkBrush) DeleteObject(hDarkBrush);
+    OleUninitialize();
 
     return 0;
 }

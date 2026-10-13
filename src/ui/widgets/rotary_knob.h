@@ -20,7 +20,7 @@ struct HardwareKnobOptions {
     bool showValue{true};         // Numerical value + unit in g_fontMono
     bool showLabel{true};         // Full label centered below
     const char* unit{""};         // Unit suffix (e.g. "dB", "%", "Hz", "ms")
-    float sensitivity{0.005f};    // Base drag speed
+    float sensitivity{0.012f};    // Base drag speed (~80px vertical travel for full 0..100% sweep)
 };
 
 /**
@@ -32,7 +32,8 @@ struct HardwareKnobOptions {
  * - Metallic knurled disc body with subtle bevel border
  * - Directional needle pointer line with central cap
  * - Double-click reset to defaultValue
- * - Fine adjustment resolution (5x precision) when holding Shift
+ * - Fine adjustment resolution (4x precision) when holding Shift
+ * - Vertical drag mode: Drag UP -> turns right (increases), Drag DOWN -> turns left (decreases)
  * - Two-tier typography: numerical value + unit in g_fontMono, full label centered below
  */
 inline bool DrawHardwareKnob(
@@ -75,10 +76,12 @@ inline bool DrawHardwareKnob(
             *value = std::clamp(defaultVal, minVal, maxVal);
         }
     } else if (isActive) {
-        // Shift key enables 5x finer adjustment resolution
-        const float speedMult = io.KeyShift ? 0.2f : 1.0f;
+        // Shift key enables 4x finer adjustment resolution for precision tuning
+        const float speedMult = io.KeyShift ? 0.25f : 1.0f;
         const float range = (maxVal - minVal);
         const float speed = opt.sensitivity * speedMult * (range != 0.0f ? range : 1.0f);
+        // Drag UP (negative MouseDelta.y) -> turns right (increases value)
+        // Drag DOWN (positive MouseDelta.y) -> turns left (decreases value)
         const float delta = -io.MouseDelta.y * speed;
         if (delta != 0.0f) {
             *value = std::clamp(*value + delta, minVal, maxVal);
@@ -190,10 +193,10 @@ inline bool DrawHardwareKnob(
         char valBuf[64];
         std::snprintf(valBuf, sizeof(valBuf), format, *value);
         if (opt.unit && opt.unit[0] != '\0') {
-            ImGui::SetTooltip("%s: %s %s\n(Shift+Drag for fine adjustment, Double-click to reset)",
+            ImGui::SetTooltip("%s: %s %s\n(Drag Up: turn right, Drag Down: turn left\nShift+Drag: fine adjustment, Double-click: reset)",
                               label ? label : "Parameter", valBuf, opt.unit);
         } else {
-            ImGui::SetTooltip("%s: %s\n(Shift+Drag for fine adjustment, Double-click to reset)",
+            ImGui::SetTooltip("%s: %s\n(Drag Up: turn right, Drag Down: turn left\nShift+Drag: fine adjustment, Double-click: reset)",
                               label ? label : "Parameter", valBuf);
         }
     }

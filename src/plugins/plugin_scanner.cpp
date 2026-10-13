@@ -16,11 +16,14 @@ using GetFactoryProc = Steinberg::IPluginFactory* (PLUGIN_API *)();
 
 PluginScanner::PluginScanner() {
     addDefaultPaths();
-    // Load favorites from app config
+    // Load favorites and custom categories from app config
     state::AppConfig cfg;
     if (cfg.load()) {
         for (const auto& fav : cfg.favoritePlugins) {
             m_favorites.insert(fav);
+        }
+        for (const auto& [name, cat] : cfg.customPluginCategories) {
+            m_categoryOverrides[name] = cat;
         }
     }
 
@@ -291,6 +294,66 @@ std::string PluginScanner::detectVendor(const std::filesystem::path& path, const
     return "Other";
 }
 
+std::string detectPluginCategory(const std::string& name, const std::string& /*vendor*/) {
+    std::string lower = name;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    if (lower.find("tune") != std::string::npos || lower.find("tuner") != std::string::npos ||
+        lower.find("pitch") != std::string::npos || lower.find("scale") != std::string::npos ||
+        lower.find("autotune") != std::string::npos || lower.find("vocod") != std::string::npos ||
+        lower.find("harmon") != std::string::npos) {
+        return "Pitch/Tuning";
+    }
+    if (lower.find("drive") != std::string::npos || lower.find("overdrive") != std::string::npos ||
+        lower.find("dist") != std::string::npos || lower.find("fuzz") != std::string::npos ||
+        lower.find("screamer") != std::string::npos || lower.find("boost") != std::string::npos ||
+        lower.find("muff") != std::string::npos || lower.find("rat") != std::string::npos ||
+        lower.find("klon") != std::string::npos || lower.find("od") != std::string::npos) {
+        return "Distortion";
+    }
+    if (lower.find("amp") != std::string::npos || lower.find("head") != std::string::npos ||
+        lower.find("cab") != std::string::npos || lower.find("marshall") != std::string::npos ||
+        lower.find("fender") != std::string::npos || lower.find("mesa") != std::string::npos ||
+        lower.find("recto") != std::string::npos || lower.find("soldano") != std::string::npos ||
+        lower.find("lead") != std::string::npos || lower.find("crunch") != std::string::npos ||
+        lower.find("ir") != std::string::npos) {
+        return "Amp Emulation";
+    }
+    if (lower.find("comp") != std::string::npos || lower.find("limit") != std::string::npos ||
+        lower.find("gate") != std::string::npos || lower.find("level") != std::string::npos ||
+        lower.find("dynamic") != std::string::npos || lower.find("1176") != std::string::npos ||
+        lower.find("la2a") != std::string::npos || lower.find("opticom") != std::string::npos) {
+        return "Dynamics";
+    }
+    if (lower.find("eq") != std::string::npos || lower.find("filter") != std::string::npos ||
+        lower.find("curve") != std::string::npos || lower.find("graphic") != std::string::npos ||
+        lower.find("param") != std::string::npos) {
+        return "Equalizer";
+    }
+    if (lower.find("delay") != std::string::npos || lower.find("echo") != std::string::npos ||
+        lower.find("tape") != std::string::npos || lower.find("space") != std::string::npos ||
+        lower.find("repeat") != std::string::npos || lower.find("bbd") != std::string::npos) {
+        return "Delay/Echo";
+    }
+    if (lower.find("verb") != std::string::npos || lower.find("reverb") != std::string::npos ||
+        lower.find("hall") != std::string::npos || lower.find("room") != std::string::npos ||
+        lower.find("plate") != std::string::npos || lower.find("spring") != std::string::npos ||
+        lower.find("shimmer") != std::string::npos) {
+        return "Reverb";
+    }
+    if (lower.find("chorus") != std::string::npos || lower.find("flang") != std::string::npos ||
+        lower.find("phas") != std::string::npos || lower.find("trem") != std::string::npos ||
+        lower.find("vibe") != std::string::npos || lower.find("rotary") != std::string::npos ||
+        lower.find("mod") != std::string::npos) {
+        return "Modulation";
+    }
+    if (lower.find("metricab") != std::string::npos || lower.find("meter") != std::string::npos ||
+        lower.find("scope") != std::string::npos || lower.find("util") != std::string::npos) {
+        return "Utility/Metering";
+    }
+    return "Audio FX";
+}
+
 void PluginScanner::scanAll() {
     if (m_isScanning.load()) return;
 
@@ -394,7 +457,8 @@ void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vec
                 desc.bundleFileName = path.filename().string();
                 desc.type = PluginType::CLAP;
                 desc.vendor = detectVendor(path, name);
-                desc.category = "CLAP";
+                auto catIt = m_categoryOverrides.find(name);
+                desc.category = (catIt != m_categoryOverrides.end()) ? catIt->second : detectPluginCategory(name, desc.vendor);
                 outPlugins.push_back(std::move(desc));
             }
         } else if (ext == ".vst3") {
@@ -409,7 +473,8 @@ void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vec
                 desc.bundleFileName = path.filename().string();
                 desc.type = PluginType::VST3;
                 desc.vendor = detectVendor(path, name);
-                desc.category = "VST3";
+                auto catIt = m_categoryOverrides.find(name);
+                desc.category = (catIt != m_categoryOverrides.end()) ? catIt->second : detectPluginCategory(name, desc.vendor);
                 outPlugins.push_back(std::move(desc));
             }
             if (iter->is_directory()) {
@@ -441,6 +506,48 @@ void PluginScanner::toggleFavorite(const std::string& nameOrPath) {
 size_t PluginScanner::numFavorites() const {
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_favorites.size();
+}
+
+void PluginScanner::setCustomCategory(const std::string& pluginName, const std::string& category) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_categoryOverrides[pluginName] = category;
+    for (auto& p : m_plugins) {
+        if (p.name == pluginName) {
+            p.category = category;
+        }
+    }
+    state::AppConfig cfg;
+    cfg.load();
+    cfg.customPluginCategories = m_categoryOverrides;
+    cfg.save();
+}
+
+void PluginScanner::resetCustomCategory(const std::string& pluginName) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_categoryOverrides.erase(pluginName);
+    for (auto& p : m_plugins) {
+        if (p.name == pluginName) {
+            p.category = detectPluginCategory(p.name, p.vendor);
+        }
+    }
+    state::AppConfig cfg;
+    cfg.load();
+    cfg.customPluginCategories = m_categoryOverrides;
+    cfg.save();
+}
+
+std::string PluginScanner::getPluginCategory(const std::string& pluginName, const std::string& vendor) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_categoryOverrides.find(pluginName);
+    if (it != m_categoryOverrides.end()) {
+        return it->second;
+    }
+    for (const auto& p : m_plugins) {
+        if (p.name == pluginName && !p.category.empty() && p.category != "VST3" && p.category != "CLAP" && p.category != "DSP") {
+            return p.category;
+        }
+    }
+    return detectPluginCategory(pluginName, vendor);
 }
 
 std::vector<std::string> PluginScanner::getDevelopers() const {

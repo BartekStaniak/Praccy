@@ -318,6 +318,10 @@ void SettingsModal::renderThemeTab() {
     for (int i = 0; i < 4; ++i) {
         if (ImGui::RadioButton(themes[i], themeIdx == i)) {
             applyTheme(static_cast<ThemeId>(i));
+            state::AppConfig cfg;
+            cfg.load();
+            cfg.themeId = i;
+            cfg.save();
         }
         ImGui::Spacing();
     }
@@ -334,7 +338,7 @@ void SettingsModal::renderUpdatesTab() {
     ImGui::Separator();
     ImGui::Spacing();
 
-    ImGui::Text("Installed Version: %s", "v2.4.0");
+    ImGui::Text("Installed Version: %s", "v2.5-beta1");
     ImGui::Spacing();
 
     state::AppConfig cfg;
@@ -357,7 +361,7 @@ void SettingsModal::renderUpdatesTab() {
 void SettingsModal::renderAboutTab() {
     const auto& tokens = themeTokens();
     ImGui::Spacing();
-    ImGui::TextColored(tokens.text.accent.vec4, "PRACCY v2.4.0");
+    ImGui::TextColored(tokens.text.accent.vec4, "PRACCY v2.5-beta1");
     ImGui::TextDisabled("Professional Ultra-Low-Latency Guitar & Audio Practice Suite");
     ImGui::Separator();
     ImGui::Spacing();

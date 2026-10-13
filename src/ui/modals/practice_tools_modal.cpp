@@ -233,12 +233,12 @@ void PracticeToolsModal::renderLooperTab() {
     ImGui::Spacing();
     ImGui::Spacing();
 
-    // Volume Slider
-    float looperVol = m_looper.volume();
+    // Volume Slider (0% to 200%, default unity 100%)
+    float looperVolPct = m_looper.volume() * 100.0f;
     ImGui::Text("Looper Output Level:");
     ImGui::SetNextItemWidth(360);
-    if (ResettableSliderFloat("##LooperVol", &looperVol, 0.0f, 2.0f, 1.0f, "Volume: %.0f%%")) {
-        m_looper.setVolume(looperVol);
+    if (ResettableSliderFloat("##LooperVol", &looperVolPct, 0.0f, 200.0f, 100.0f, "Volume: %.0f%%")) {
+        m_looper.setVolume(looperVolPct / 100.0f);
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Quick Looper Playback Volume (Double-click to reset 100%%)");

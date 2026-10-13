@@ -4,6 +4,9 @@
 #include <cmath>
 #include <cstring>
 #include <avrt.h>
+#if defined(_M_X64) || defined(__x86_64__)
+#include <xmmintrin.h>
+#endif
 
 namespace praccy::audio {
 
@@ -376,6 +379,11 @@ void AsioManager::packSamples(ASIOSampleType type, const float* src, void* dst, 
 
 void AsioManager::processAudio(int32_t doubleBufferIndex) {
     if (!m_isRunning.load(std::memory_order_relaxed)) return;
+
+#if defined(_M_X64) || defined(__x86_64__)
+    // Denormal Prevention: FTZ (Flush-to-Zero) & DAZ (Denormals-Are-Zero)
+    _mm_setcsr(_mm_getcsr() | 0x8040);
+#endif
 
     const uint32_t bufferSize = static_cast<uint32_t>(m_info.currentBufferSize);
     const int32_t inCh = m_info.numInputChannels;

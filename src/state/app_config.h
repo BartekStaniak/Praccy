@@ -3,6 +3,7 @@
 #include "../audio/input_config.h"
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -25,6 +26,8 @@ struct AppConfig {
     bool checkBetaUpdates{false};
     std::vector<std::string> customPluginPaths;
     std::vector<std::string> favoritePlugins;
+    std::vector<std::string> favoritePresets;
+    std::unordered_map<std::string, std::string> customPluginCategories;
     std::vector<std::string> recentPlugins;
 
     uint32_t retroactiveBufferMinutes{2};
@@ -33,7 +36,9 @@ struct AppConfig {
         Simple = 0,
         Modular = 1
     };
-    RackViewMode rackViewMode{RackViewMode::Simple};
+    RackViewMode rackViewMode{RackViewMode::Modular};
+
+    int themeId{0}; // 0: ObsidianStudio, 1: CyberMidnight, 2: NordicSlate, 3: VintageConsole
 
     // Window geometry persistence
     int windowX{100};
