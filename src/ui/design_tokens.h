@@ -334,36 +334,36 @@ inline const ThemeTokens kThemes[static_cast<size_t>(ThemeId::Count)] = {
         },
         // Borders
         {
-            ColorToken(196, 184, 164), ColorToken(156, 142, 120), ColorToken(184, 75, 24),
-            ColorToken(185, 172, 152), ColorToken(184, 75, 24), ColorToken(150, 60, 18),
-            ColorToken(200, 192, 178, 200), ColorToken(195, 45, 35), ColorToken(184, 75, 24, 160),
-            ColorToken(38, 135, 68, 200), ColorToken(200, 188, 168), ColorToken(80, 65, 50, 60),
+            ColorToken(180, 168, 148), ColorToken(120, 108, 92), ColorToken(168, 64, 18),
+            ColorToken(140, 126, 110), ColorToken(168, 64, 18), ColorToken(140, 50, 14),
+            ColorToken(175, 162, 144, 200), ColorToken(195, 45, 35), ColorToken(168, 64, 18, 160),
+            ColorToken(32, 120, 58, 200), ColorToken(185, 172, 152), ColorToken(80, 65, 50, 60),
             ColorToken(130, 160, 190, 220), ColorToken(190, 130, 95, 220), ColorToken(160, 150, 135, 220),
             ColorToken(168, 85, 247, 255)
         },
         // Text
         {
-            ColorToken(36, 28, 22), ColorToken(95, 80, 68), ColorToken(145, 130, 115),
-            ColorToken(184, 75, 24), ColorToken(248, 245, 238), ColorToken(30, 105, 165),
-            ColorToken(145, 45, 140), ColorToken(184, 75, 24), ColorToken(38, 135, 68),
-            ColorToken(184, 75, 24), ColorToken(195, 45, 35), ColorToken(156, 163, 175, 255)
+            ColorToken(36, 28, 22), ColorToken(95, 80, 68), ColorToken(120, 106, 94),
+            ColorToken(168, 64, 18), ColorToken(248, 245, 238), ColorToken(24, 95, 155),
+            ColorToken(140, 40, 135), ColorToken(168, 64, 18), ColorToken(32, 120, 58),
+            ColorToken(168, 64, 18), ColorToken(195, 45, 35), ColorToken(120, 106, 94, 255)
         },
         // Signal
         {
-            ColorToken(38, 135, 68), ColorToken(150, 140, 128), ColorToken(195, 45, 35),
-            ColorToken(200, 40, 30), ColorToken(195, 95, 20), ColorToken(38, 135, 68),
-            ColorToken(150, 140, 128), ColorToken(38, 135, 68), ColorToken(38, 135, 68),
+            ColorToken(32, 120, 58), ColorToken(140, 130, 118), ColorToken(195, 45, 35),
+            ColorToken(200, 40, 30), ColorToken(195, 95, 20), ColorToken(32, 120, 58),
+            ColorToken(140, 130, 118), ColorToken(32, 120, 58), ColorToken(32, 120, 58),
             ColorToken(205, 135, 25), ColorToken(200, 40, 30), ColorToken(40, 115, 175),
-            ColorToken(195, 90, 30), ColorToken(38, 135, 68), ColorToken(40, 115, 175),
+            ColorToken(195, 90, 30), ColorToken(32, 120, 58), ColorToken(40, 115, 175),
             ColorToken(195, 90, 30)
         },
         // Cables
         {
-            ColorToken(210, 195, 175, 130), ColorToken(180, 80, 30, 240), ColorToken(215, 205, 190, 100),
+            ColorToken(210, 195, 175, 130), ColorToken(168, 64, 18, 240), ColorToken(215, 205, 190, 100),
             ColorToken(155, 145, 132, 200), ColorToken(100, 40, 10), ColorToken(155, 145, 132, 80),
-            ColorToken(195, 180, 160), ColorToken(180, 80, 30), ColorToken(195, 210, 225, 130),
+            ColorToken(195, 180, 160), ColorToken(168, 64, 18), ColorToken(195, 210, 225, 130),
             ColorToken(40, 115, 175, 240), ColorToken(225, 205, 190, 130), ColorToken(195, 90, 30, 240),
-            ColorToken(184, 75, 24, 120)
+            ColorToken(168, 64, 18, 120)
         }
     }
 };
@@ -439,7 +439,7 @@ inline void applyTheme(ThemeId id) {
     colors[ImGuiCol_ScrollbarGrabActive]   = tokens.surfaces.scrollbarGrabActive;
     colors[ImGuiCol_CheckMark]             = tokens.signal.active;
     colors[ImGuiCol_SliderGrab]            = tokens.text.accent;
-    colors[ImGuiCol_SliderGrabActive]      = tokens.signal.active;
+    colors[ImGuiCol_SliderGrabActive]      = tokens.borders.focus;
     colors[ImGuiCol_Button]                = tokens.surfaces.buttonBg;
     colors[ImGuiCol_ButtonHovered]         = tokens.surfaces.buttonBgHovered;
     colors[ImGuiCol_ButtonActive]          = tokens.surfaces.buttonBgActive;

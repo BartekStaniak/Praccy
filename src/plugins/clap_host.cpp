@@ -151,21 +151,30 @@ void ClapPluginInstance::process(audio::AudioProcessContext& ctx) {
     outBuf.latency = 0;
     outBuf.constant_mask = 0;
 
+    m_eventBuffer.clear();
+    std::pair<clap_id, double> ev;
+    while (m_paramQueue.try_dequeue(ev)) {
+        m_eventBuffer.pushParam(ev.first, ev.second);
+    }
+
     clap_process processData{};
     processData.steady_time = -1;
     processData.frames_count = numSamples;
     processData.transport = nullptr;
     processData.audio_inputs = &inBuf;
     processData.audio_outputs = &outBuf;
+    clap_input_events_t inEvs = m_eventBuffer.makeInputEvents();
     processData.audio_inputs_count = 1;
     processData.audio_outputs_count = 1;
-    processData.in_events = nullptr;
+    processData.in_events = (m_eventBuffer.count > 0) ? &inEvs : nullptr;
     processData.out_events = nullptr;
 
     DWORD exCode = 0;
     bool ok = safeCallPluginAudio([&]() {
         m_plugin->process(m_plugin, &processData);
     }, &exCode);
+
+    m_eventBuffer.clear();
 
     if (!ok) {
         m_faulted.store(true, std::memory_order_release);
@@ -175,6 +184,9 @@ void ClapPluginInstance::process(audio::AudioProcessContext& ctx) {
 }
 
 void ClapPluginInstance::reset() {
+    std::pair<clap_id, double> dummy;
+    while (m_paramQueue.try_dequeue(dummy)) {}
+    m_eventBuffer.clear();
     if (m_plugin && !m_faulted.load(std::memory_order_relaxed)) {
         safeCallPlugin([&]() {
             m_plugin->reset(m_plugin);
@@ -215,7 +227,8 @@ PluginParameterDesc ClapPluginInstance::getParameterDesc(size_t index) const {
 }
 
 void ClapPluginInstance::setParameterValue(uint32_t paramId, float value) {
-    // CLAP parameters in realtime are modulated via events or direct call
+    if (m_faulted.load(std::memory_order_relaxed)) return;
+    m_paramQueue.try_enqueue({static_cast<clap_id>(paramId), static_cast<double>(value)});
 }
 
 float ClapPluginInstance::getParameterValue(uint32_t paramId) const {

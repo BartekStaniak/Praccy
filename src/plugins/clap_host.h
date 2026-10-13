@@ -2,11 +2,60 @@
 
 #include "plugin_base.h"
 #include <clap/clap.h>
+#include <clap/events.h>
 #include <memory>
 #include <vector>
 #include <string>
+#include <array>
+#include <utility>
+#include <readerwriterqueue/readerwriterqueue.h>
 
 namespace praccy::plugins {
+
+struct ClapEventBuffer {
+    static constexpr size_t kMaxEvents = 128;
+    std::array<clap_event_param_value_t, kMaxEvents> events{};
+    uint32_t count{0};
+
+    void clear() noexcept { count = 0; }
+
+    bool pushParam(clap_id paramId, double val) noexcept {
+        if (count >= kMaxEvents) return false;
+        auto& ev = events[count++];
+        ev.header.size = sizeof(clap_event_param_value_t);
+        ev.header.time = 0;
+        ev.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+        ev.header.type = CLAP_EVENT_PARAM_VALUE;
+        ev.header.flags = 0;
+        ev.param_id = paramId;
+        ev.cookie = nullptr;
+        ev.note_id = -1;
+        ev.port_index = -1;
+        ev.channel = -1;
+        ev.key = -1;
+        ev.value = val;
+        return true;
+    }
+
+    static uint32_t CLAP_ABI sizeCallback(const clap_input_events_t* list) {
+        auto* self = static_cast<const ClapEventBuffer*>(list->ctx);
+        return self ? self->count : 0;
+    }
+
+    static const clap_event_header_t* CLAP_ABI getCallback(const clap_input_events_t* list, uint32_t index) {
+        auto* self = static_cast<const ClapEventBuffer*>(list->ctx);
+        if (!self || index >= self->count) return nullptr;
+        return &self->events[index].header;
+    }
+
+    clap_input_events_t makeInputEvents() noexcept {
+        clap_input_events_t inEvs{};
+        inEvs.ctx = this;
+        inEvs.size = &sizeCallback;
+        inEvs.get = &getCallback;
+        return inEvs;
+    }
+};
 
 class ClapPluginInstance : public IPluginInstance {
 public:
@@ -62,6 +111,9 @@ private:
 
     HWND m_guiParentHwnd{nullptr};
     bool m_guiCreated{false};
+
+    moodycamel::ReaderWriterQueue<std::pair<clap_id, double>> m_paramQueue{128};
+    ClapEventBuffer m_eventBuffer;
 };
 
 } // namespace praccy::plugins

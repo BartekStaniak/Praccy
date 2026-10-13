@@ -73,6 +73,9 @@ bool AppConfig::load(const std::string& customPath) {
             } else {
                 retroactiveBufferMinutes = 2;
             }
+        } else if (key == "rack_view_mode") {
+            int modeVal = utils::parseInteger<int>(val, 0);
+            rackViewMode = (modeVal == 1) ? RackViewMode::Modular : RackViewMode::Simple;
         } else if (key == "window_x") {
             windowX = utils::parseInteger<int>(val, 100);
         } else if (key == "window_y") {
@@ -101,6 +104,7 @@ bool AppConfig::save(const std::string& customPath) const {
     file << "metronome_bpm=" << metronomeBpm << "\n";
     file << "check_beta_updates=" << (checkBetaUpdates ? "1" : "0") << "\n";
     file << "retroactive_buffer_minutes=" << retroactiveBufferMinutes << "\n";
+    file << "rack_view_mode=" << static_cast<int>(rackViewMode) << "\n";
     file << "window_x=" << windowX << "\n";
     file << "window_y=" << windowY << "\n";
     file << "window_w=" << windowW << "\n";

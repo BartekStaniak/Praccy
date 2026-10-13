@@ -15,11 +15,13 @@
 #include "modals/export_daw_chain_modal.h"
 #include "../state/undo_manager.h"
 #include "../audio/retroactive_buffer.h"
+#include "../state/app_config.h"
 #include <vector>
 #include <string>
 #include <chrono>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <array>
 
 namespace praccy::ui {
@@ -71,6 +73,9 @@ public:
     const audio::RetroactiveRiffBuffer& getRiffBuffer() const noexcept { return m_riffBuffer; }
     void saveLastRiff();
 
+    state::AppConfig::RackViewMode getRackViewMode() const noexcept { return m_rackViewMode; }
+    void setRackViewMode(state::AppConfig::RackViewMode mode) noexcept { m_rackViewMode = mode; }
+
 private:
     void renderPraccyLogo();
     bool renderStatusPill(bool isRunning, const char* statusText);
@@ -87,6 +92,7 @@ private:
     bool renderRotaryKnob(const char* label, float* value, float minVal, float maxVal, float radius, const char* format = "%.1f", float defaultVal = 0.0f);
     void renderUpdateModal();
     void renderFloatingHudToast();
+    void renderPresetBrowserModal();
 
     void cycleAdjacentScenePreset(int delta);
     void initMacrosForSlot(audio::PluginSlot* slot);
@@ -119,6 +125,12 @@ private:
     bool m_showSavePresetModal{false};
     char m_presetNameBuffer[64]{0};
 
+    bool m_showPresetBrowserModal{false};
+    char m_presetSearchFilter[64]{0};
+    int m_selectedCategoryTagIndex{0}; // 0: All, 1: High Gain Metal, 2: Glassy Clean, 3: Ambient FX, 4: Edge of Breakup, 5: Favorites
+    std::unordered_set<std::string> m_favoritePresets;
+    std::string m_auditionedPreset;
+
     std::string m_hudToastText;
     float m_hudToastTimer{0.0f};
     static constexpr float kHudToastDuration = 1.8f;
@@ -137,6 +149,7 @@ private:
     bool m_keyMapMode{false};
     audio::PluginSlot* m_focusedSlot{nullptr};
     int m_focusedSlotIndex{-1};
+    state::AppConfig::RackViewMode m_rackViewMode{state::AppConfig::RackViewMode::Simple};
 };
 
 } // namespace praccy::ui

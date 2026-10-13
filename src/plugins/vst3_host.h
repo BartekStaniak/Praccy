@@ -11,7 +11,11 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <atomic>
 #include <windows.h>
+#include <utility>
+#include "vst3_param_queue.h"
+#include <readerwriterqueue/readerwriterqueue.h>
 
 namespace praccy::plugins {
 
@@ -64,6 +68,10 @@ private:
     HWND m_guiParentHwnd{nullptr};
     double m_sampleRate{48000.0};
     uint32_t m_maxBlockSize{256};
+
+    FastParameterChanges m_inputParamChanges;
+    moodycamel::ReaderWriterQueue<std::pair<Steinberg::Vst::ParamID, double>> m_paramQueue{128};
+    std::atomic<DWORD> m_audioThreadId{0};
 
     struct Impl;
     std::unique_ptr<Impl> m_impl;

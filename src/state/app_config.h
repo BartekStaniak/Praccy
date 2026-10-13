@@ -29,6 +29,12 @@ struct AppConfig {
 
     uint32_t retroactiveBufferMinutes{2};
 
+    enum class RackViewMode {
+        Simple = 0,
+        Modular = 1
+    };
+    RackViewMode rackViewMode{RackViewMode::Simple};
+
     // Window geometry persistence
     int windowX{100};
     int windowY{100};

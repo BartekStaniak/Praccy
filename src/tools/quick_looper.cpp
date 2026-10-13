@@ -50,10 +50,18 @@ void QuickLooper::prepare(double sampleRate, uint32_t maxSeconds, uint32_t maxBl
     try {
         m_loopBufferL.assign(m_maxFrames, 0.0f);
         m_loopBufferR.assign(m_maxFrames, 0.0f);
+        m_undoBufferL.assign(m_maxFrames, 0.0f);
+        m_undoBufferR.assign(m_maxFrames, 0.0f);
+        m_redoBufferL.assign(m_maxFrames, 0.0f);
+        m_redoBufferR.assign(m_maxFrames, 0.0f);
     } catch (const std::bad_alloc&) {
         m_maxFrames = 0;
         m_loopBufferL.clear();
         m_loopBufferR.clear();
+        m_undoBufferL.clear();
+        m_undoBufferR.clear();
+        m_redoBufferL.clear();
+        m_redoBufferR.clear();
     }
     clear();
 }
@@ -68,6 +76,8 @@ void QuickLooper::triggerAction() {
             m_loopLength.store(0, std::memory_order_relaxed);
             std::fill(m_loopBufferL.begin(), m_loopBufferL.end(), 0.0f);
             std::fill(m_loopBufferR.begin(), m_loopBufferR.end(), 0.0f);
+            m_canUndo.store(false, std::memory_order_relaxed);
+            m_canRedo.store(false, std::memory_order_relaxed);
             m_state.store(LooperState::Recording, std::memory_order_relaxed);
             break;
 
@@ -83,7 +93,16 @@ void QuickLooper::triggerAction() {
             break;
 
         case LooperState::Playing:
-            // Switch to Overdubbing
+            // Switch to Overdubbing: snapshot current layer so it can be undone
+            {
+                size_t len = m_loopLength.load(std::memory_order_relaxed);
+                if (len > 0 && len <= m_maxFrames && len <= m_undoBufferL.size()) {
+                    std::memcpy(m_undoBufferL.data(), m_loopBufferL.data(), len * sizeof(float));
+                    std::memcpy(m_undoBufferR.data(), m_loopBufferR.data(), len * sizeof(float));
+                    m_canUndo.store(true, std::memory_order_relaxed);
+                    m_canRedo.store(false, std::memory_order_relaxed);
+                }
+            }
             m_state.store(LooperState::Overdubbing, std::memory_order_relaxed);
             break;
 
@@ -105,8 +124,82 @@ void QuickLooper::clear() {
     m_state.store(LooperState::Empty, std::memory_order_relaxed);
     m_head.store(0, std::memory_order_relaxed);
     m_loopLength.store(0, std::memory_order_relaxed);
+    m_canUndo.store(false, std::memory_order_relaxed);
+    m_canRedo.store(false, std::memory_order_relaxed);
     std::fill(m_loopBufferL.begin(), m_loopBufferL.end(), 0.0f);
     std::fill(m_loopBufferR.begin(), m_loopBufferR.end(), 0.0f);
+}
+
+bool QuickLooper::undo() {
+    if (!m_canUndo.load(std::memory_order_relaxed)) return false;
+    size_t len = m_loopLength.load(std::memory_order_relaxed);
+    if (len == 0 || len > m_maxFrames || len > m_undoBufferL.size() || len > m_redoBufferL.size()) return false;
+
+    // Save current loop state into redo buffer
+    std::memcpy(m_redoBufferL.data(), m_loopBufferL.data(), len * sizeof(float));
+    std::memcpy(m_redoBufferR.data(), m_loopBufferR.data(), len * sizeof(float));
+
+    // Restore undo buffer into loop buffer
+    std::memcpy(m_loopBufferL.data(), m_undoBufferL.data(), len * sizeof(float));
+    std::memcpy(m_loopBufferR.data(), m_undoBufferR.data(), len * sizeof(float));
+
+    m_canUndo.store(false, std::memory_order_relaxed);
+    m_canRedo.store(true, std::memory_order_relaxed);
+    return true;
+}
+
+bool QuickLooper::redo() {
+    if (!m_canRedo.load(std::memory_order_relaxed)) return false;
+    size_t len = m_loopLength.load(std::memory_order_relaxed);
+    if (len == 0 || len > m_maxFrames || len > m_undoBufferL.size() || len > m_redoBufferL.size()) return false;
+
+    // Save current into undo buffer
+    std::memcpy(m_undoBufferL.data(), m_loopBufferL.data(), len * sizeof(float));
+    std::memcpy(m_undoBufferR.data(), m_loopBufferR.data(), len * sizeof(float));
+
+    // Restore redo buffer into loop buffer
+    std::memcpy(m_loopBufferL.data(), m_redoBufferL.data(), len * sizeof(float));
+    std::memcpy(m_loopBufferR.data(), m_redoBufferR.data(), len * sizeof(float));
+
+    m_canUndo.store(true, std::memory_order_relaxed);
+    m_canRedo.store(false, std::memory_order_relaxed);
+    return true;
+}
+
+int QuickLooper::totalBeats() const noexcept {
+    double sec = loopLengthSeconds();
+    if (sec < 0.1) return 0;
+    float bpmVal = m_bpm.load(std::memory_order_relaxed);
+    if (bpmVal <= 0.0f) bpmVal = 120.0f;
+    return std::max(1, static_cast<int>(std::round((sec * bpmVal) / 60.0)));
+}
+
+int QuickLooper::totalBars() const noexcept {
+    int tb = totalBeats();
+    if (tb == 0) return 0;
+    int bpb = m_beatsPerBar.load(std::memory_order_relaxed);
+    if (bpb <= 0) bpb = 4;
+    return std::max(1, (tb + bpb - 1) / bpb);
+}
+
+int QuickLooper::currentBeat() const noexcept {
+    int tb = totalBeats();
+    if (tb == 0) return 1;
+    float norm = playheadNormalized();
+    int beatIdx = static_cast<int>(norm * static_cast<float>(tb));
+    int bpb = m_beatsPerBar.load(std::memory_order_relaxed);
+    if (bpb <= 0) bpb = 4;
+    return (beatIdx % bpb) + 1;
+}
+
+int QuickLooper::currentBar() const noexcept {
+    int tb = totalBeats();
+    if (tb == 0) return 1;
+    float norm = playheadNormalized();
+    int beatIdx = static_cast<int>(norm * static_cast<float>(tb));
+    int bpb = m_beatsPerBar.load(std::memory_order_relaxed);
+    if (bpb <= 0) bpb = 4;
+    return (beatIdx / bpb) + 1;
 }
 
 double QuickLooper::loopLengthSeconds() const noexcept {

@@ -41,9 +41,9 @@ struct EmbeddedResource {
     DWORD       size = 0;
 };
 
-EmbeddedResource loadWin32Resource(HMODULE hModule, int resourceId, LPCSTR resourceType) {
+EmbeddedResource loadWin32Resource(HMODULE hModule, int resourceId, LPCWSTR resourceType = MAKEINTRESOURCEW(10)) {
     EmbeddedResource res{};
-    HRSRC hRsrc = FindResourceA(hModule, MAKEINTRESOURCEA(resourceId), resourceType);
+    HRSRC hRsrc = FindResourceW(hModule, MAKEINTRESOURCEW(resourceId), resourceType);
     if (!hRsrc) return res;
 
     res.size = SizeofResource(hModule, hRsrc);
@@ -227,8 +227,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
 
     ImFontConfig fontConfig;
-    fontConfig.OversampleH = 2;
-    fontConfig.OversampleV = 2;
+    fontConfig.OversampleH = 3; // 3x horizontal oversampling for subpixel crispness
+    fontConfig.OversampleV = 1;
     fontConfig.FontDataOwnedByAtlas = false; // CRITICAL: Prevent free() on read-only PE .rsrc memory
 
     static const ImWchar glyphRanges[] = {
@@ -243,8 +243,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     HMODULE hModule = GetModuleHandleW(nullptr);
 
-    // Load Inter (UI Primary Font)
-    EmbeddedResource resInter = loadWin32Resource(hModule, IDR_FONT_INTER, RT_RCDATA);
+    // Load Inter (UI Primary Font) via Win32 resource (RT_RCDATA / type 10)
+    EmbeddedResource resInter = loadWin32Resource(hModule, IDR_FONT_INTER, MAKEINTRESOURCEW(10));
     if (resInter.data && resInter.size > 0) {
         g_fontUI = io.Fonts->AddFontFromMemoryTTF(
             const_cast<void*>(resInter.data),
@@ -253,6 +253,21 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             &fontConfig,
             glyphRanges
         );
+    } else {
+        // Portable / developer disk fallback
+        const char* fontPaths[] = {
+            "resources/fonts/Inter-Regular.ttf",
+            "fonts/Inter-Regular.ttf",
+            "../resources/fonts/Inter-Regular.ttf"
+        };
+        for (const char* path : fontPaths) {
+            if (std::filesystem::exists(path)) {
+                ImFontConfig diskCfg = fontConfig;
+                diskCfg.FontDataOwnedByAtlas = true;
+                g_fontUI = io.Fonts->AddFontFromFileTTF(path, scaledFontSizeUI, &diskCfg, glyphRanges);
+                if (g_fontUI) break;
+            }
+        }
     }
 
     // Fallback if Inter resource unavailable
@@ -275,7 +290,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
 
     // Load JetBrains Mono (Numeric Parameters & DSP Readouts)
-    EmbeddedResource resMono = loadWin32Resource(hModule, IDR_FONT_JETBRAINS_MONO, RT_RCDATA);
+    EmbeddedResource resMono = loadWin32Resource(hModule, IDR_FONT_JETBRAINS_MONO, MAKEINTRESOURCEW(10));
     if (resMono.data && resMono.size > 0) {
         ImFontConfig monoConfig = fontConfig;
         monoConfig.FontDataOwnedByAtlas = false;
@@ -286,6 +301,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             &monoConfig,
             glyphRanges
         );
+    } else {
+        const char* monoPaths[] = {
+            "resources/fonts/JetBrainsMono-Regular.ttf",
+            "fonts/JetBrainsMono-Regular.ttf",
+            "../resources/fonts/JetBrainsMono-Regular.ttf"
+        };
+        for (const char* path : monoPaths) {
+            if (std::filesystem::exists(path)) {
+                ImFontConfig diskMonoCfg = fontConfig;
+                diskMonoCfg.FontDataOwnedByAtlas = true;
+                g_fontMono = io.Fonts->AddFontFromFileTTF(path, scaledFontSizeMono, &diskMonoCfg, glyphRanges);
+                if (g_fontMono) break;
+            }
+        }
     }
 
     // Fallback if JetBrains Mono unavailable (never leave g_fontMono null)

@@ -33,8 +33,8 @@ void PracticeToolsModal::renderLooperCircularProgressRing() {
     const float progress = std::clamp(m_looper.playheadNormalized(), 0.0f, 1.0f);
     const double loopSec = m_looper.loopLengthSeconds();
 
-    const float widgetSize = 130.0f;
-    const float radius = 50.0f;
+    const float widgetSize = 140.0f;
+    const float radius = 54.0f;
     const float thickness = 6.0f;
 
     const ImVec2 screenPos = ImGui::GetCursorScreenPos();
@@ -42,43 +42,67 @@ void PracticeToolsModal::renderLooperCircularProgressRing() {
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
     // 1. Determine State Colors & Strings
-    ImU32 arcColor = tokens.text.muted;
+    ImU32 arcColor = tokens.text.muted.u32;
     const char* stateText = "READY";
     switch (state) {
         case tools::LooperState::Recording:
-            arcColor = tokens.signal.recording;
+            arcColor = tokens.signal.recording.u32;
             stateText = "REC";
             break;
         case tools::LooperState::Overdubbing:
-            arcColor = tokens.signal.overdubbing;
+            arcColor = tokens.signal.overdubbing.u32;
             stateText = "DUB";
             break;
         case tools::LooperState::Playing:
-            arcColor = tokens.signal.playing;
+            arcColor = tokens.signal.playing.u32;
             stateText = "PLAY";
             break;
         case tools::LooperState::Stopped:
-            arcColor = tokens.signal.stopped;
+            arcColor = tokens.signal.stopped.u32;
             stateText = "STOP";
             break;
         case tools::LooperState::Empty:
         default:
-            arcColor = tokens.borders.subtle;
+            arcColor = tokens.borders.subtle.u32;
             stateText = "READY";
             break;
     }
 
-    // 2. Background Track Ring
-    dl->PathArcTo(center, radius, 0.0f, 2.0f * IM_PI, 64);
-    dl->PathStroke(tokens.borders.subtle, 0, thickness);
+    // 2. Hardware Stompbox Outer Bezel & Illuminated Halo Ring
+    dl->AddCircle(center, radius + 7.0f, tokens.borders.subtle.u32, 64, 1.0f);
 
-    // 3. Active Progress Arc
+    const float curTime = static_cast<float>(ImGui::GetTime());
+    if (state == tools::LooperState::Recording) {
+        // Pulsing red halo
+        float pulse = 0.55f + 0.45f * std::sin(curTime * 8.0f);
+        ColorToken haloInner(tokens.signal.recording.r, tokens.signal.recording.g, tokens.signal.recording.b, pulse * 0.50f);
+        ColorToken haloOuter(tokens.signal.recording.r, tokens.signal.recording.g, tokens.signal.recording.b, pulse * 0.22f);
+        dl->AddCircle(center, radius + 2.0f, haloInner.u32, 64, 4.0f);
+        dl->AddCircle(center, radius + 5.0f, haloOuter.u32, 64, 6.0f);
+    } else if (state == tools::LooperState::Playing) {
+        // Solid green halo
+        ColorToken haloInner(tokens.signal.playing.r, tokens.signal.playing.g, tokens.signal.playing.b, 0.40f);
+        ColorToken haloOuter(tokens.signal.playing.r, tokens.signal.playing.g, tokens.signal.playing.b, 0.18f);
+        dl->AddCircle(center, radius + 2.0f, haloInner.u32, 64, 4.0f);
+        dl->AddCircle(center, radius + 5.0f, haloOuter.u32, 64, 6.0f);
+    } else if (state == tools::LooperState::Overdubbing) {
+        // Warm amber halo
+        ColorToken haloInner(tokens.signal.overdubbing.r, tokens.signal.overdubbing.g, tokens.signal.overdubbing.b, 0.45f);
+        ColorToken haloOuter(tokens.signal.overdubbing.r, tokens.signal.overdubbing.g, tokens.signal.overdubbing.b, 0.20f);
+        dl->AddCircle(center, radius + 2.0f, haloInner.u32, 64, 4.0f);
+        dl->AddCircle(center, radius + 5.0f, haloOuter.u32, 64, 6.0f);
+    }
+
+    // 3. Background Track Ring
+    dl->PathArcTo(center, radius, 0.0f, 2.0f * IM_PI, 64);
+    dl->PathStroke(tokens.borders.subtle.u32, 0, thickness);
+
+    // 4. Active Progress Arc & Playhead
     const float startAngle = -IM_PI * 0.5f; // 12 o'clock
     float endAngle = startAngle;
 
     if (state == tools::LooperState::Recording) {
-        // While recording, show continuous sweep progress
-        float recProgress = static_cast<float>(std::fmod(ImGui::GetTime() * 0.8, 1.0));
+        float recProgress = static_cast<float>(std::fmod(curTime * 0.8, 1.0));
         endAngle = startAngle + (2.0f * IM_PI * recProgress);
     } else if (progress > 0.001f) {
         endAngle = startAngle + (2.0f * IM_PI * progress);
@@ -91,29 +115,47 @@ void PracticeToolsModal::renderLooperCircularProgressRing() {
         // Playhead Indicator Dot
         const float dotX = center.x + radius * std::cos(endAngle);
         const float dotY = center.y + radius * std::sin(endAngle);
-        dl->AddCircleFilled(ImVec2(dotX, dotY), thickness * 0.75f, arcColor, 16);
-        dl->AddCircle(ImVec2(dotX, dotY), thickness * 0.75f, tokens.text.primary, 16, 1.5f);
+        dl->AddCircleFilled(ImVec2(dotX, dotY), thickness * 0.8f, arcColor, 16);
+        dl->AddCircle(ImVec2(dotX, dotY), thickness * 0.8f, tokens.text.primary.u32, 16, 1.5f);
     }
 
-    // 4. Center Typography
+    // 5. Central Footswitch Disc (Body)
+    const float hubR = radius - 13.0f;
+    dl->AddCircleFilled(center, hubR, tokens.surfaces.cardBg.u32, 48);
+    dl->AddCircle(center, hubR, tokens.borders.subtle.u32, 48, 1.5f);
+
+    // 6. Center Typography: State, Bar/Beat, Duration
     const ImVec2 stateSize = ImGui::CalcTextSize(stateText);
-    dl->AddText(ImVec2(center.x - stateSize.x * 0.5f, center.y - stateSize.y - 3.0f), arcColor, stateText);
+    dl->AddText(ImVec2(center.x - stateSize.x * 0.5f, center.y - 22.0f), arcColor, stateText);
+
+    // Bar & Beat Counter
+    char barBeatBuf[32];
+    if (state == tools::LooperState::Recording) {
+        std::snprintf(barBeatBuf, sizeof(barBeatBuf), "REC...");
+    } else if (loopSec > 0.05) {
+        std::snprintf(barBeatBuf, sizeof(barBeatBuf), "BAR %d . %d", m_looper.currentBar(), m_looper.currentBeat());
+    } else {
+        std::snprintf(barBeatBuf, sizeof(barBeatBuf), "BAR -- . -");
+    }
+
+    if (g_fontMono) ImGui::PushFont(g_fontMono);
+    const ImVec2 barBeatSize = ImGui::CalcTextSize(barBeatBuf);
+    dl->AddText(ImVec2(center.x - barBeatSize.x * 0.5f, center.y - 4.0f), tokens.text.primary.u32, barBeatBuf);
 
     char timeBuf[32];
     if (state == tools::LooperState::Recording) {
         std::snprintf(timeBuf, sizeof(timeBuf), "REC");
     } else if (loopSec > 0.05) {
-        std::snprintf(timeBuf, sizeof(timeBuf), "%.1fs", progress * loopSec);
+        std::snprintf(timeBuf, sizeof(timeBuf), "%.1fs / %.1fs", progress * loopSec, loopSec);
     } else {
         std::snprintf(timeBuf, sizeof(timeBuf), "--.-s");
     }
 
-    if (g_fontMono) ImGui::PushFont(g_fontMono);
     const ImVec2 timeSize = ImGui::CalcTextSize(timeBuf);
-    dl->AddText(ImVec2(center.x - timeSize.x * 0.5f, center.y + 4.0f), tokens.text.secondary, timeBuf);
+    dl->AddText(ImVec2(center.x - timeSize.x * 0.5f, center.y + 11.0f), tokens.text.secondary.u32, timeBuf);
     if (g_fontMono) ImGui::PopFont();
 
-    // 5. Reserve Layout Space
+    // 7. Reserve Layout Space
     ImGui::Dummy(ImVec2(widgetSize, widgetSize));
 }
 
@@ -163,6 +205,32 @@ void PracticeToolsModal::renderLooperTab() {
     }
 
     ImGui::Spacing();
+
+    // Undo / Redo Last Layer Controls
+    const bool canUndo = m_looper.canUndo();
+    const bool canRedo = m_looper.canRedo();
+
+    if (!canUndo) ImGui::BeginDisabled();
+    if (CenteredButton("Undo Layer", ImVec2(96, 26))) {
+        m_looper.undo();
+    }
+    if (!canUndo) ImGui::EndDisabled();
+
+    ImGui::SameLine(0, 8);
+    if (!canRedo) ImGui::BeginDisabled();
+    if (CenteredButton("Redo Layer", ImVec2(96, 26))) {
+        m_looper.redo();
+    }
+    if (!canRedo) ImGui::EndDisabled();
+
+    ImGui::SameLine(0, 14);
+    if (g_fontMono) ImGui::PushFont(g_fontMono);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(tokens.text.muted.vec4, "%d Bars (%d Beats) @ %.0f BPM",
+                       m_looper.totalBars(), m_looper.totalBeats(), m_looper.bpm());
+    if (g_fontMono) ImGui::PopFont();
+
+    ImGui::Spacing();
     ImGui::Spacing();
 
     // Volume Slider
@@ -191,7 +259,8 @@ void PracticeToolsModal::renderBackingTrackTab() {
 
     // File path loader
     ImGui::Text("Audio Track File (.wav):");
-    ImGui::SetNextItemWidth(450);
+    const float inputW = std::max(200.0f, ImGui::GetContentRegionAvail().x - 84.0f);
+    ImGui::SetNextItemWidth(inputW);
     ImGui::InputTextWithHint("##AudioTrackPath", "Path to .wav file or drag-and-drop onto Praccy...", m_audioFilePathBuffer, sizeof(m_audioFilePathBuffer));
     ImGui::SameLine(0, 8);
     if (CenteredButton("Load", ImVec2(70, 24))) {
@@ -204,14 +273,30 @@ void PracticeToolsModal::renderBackingTrackTab() {
     ImGui::Separator();
     ImGui::Spacing();
 
-    if (m_player.isLoaded()) {
+    if (m_player.isLoading()) {
+        float prog = m_player.loadProgress();
+        ImVec2 spinnerPos = ImGui::GetCursorScreenPos();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        float spinR = 12.0f;
+        ImVec2 spinCenter(spinnerPos.x + spinR + 4.0f, spinnerPos.y + spinR + 4.0f);
+        float spinAngle = static_cast<float>(ImGui::GetTime() * 7.0);
+        dl->PathArcTo(spinCenter, spinR, spinAngle, spinAngle + 1.4f * IM_PI, 24);
+        dl->PathStroke(tokens.text.accent.u32, 0, 3.0f);
+
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 40.0f);
+        ImGui::TextColored(tokens.text.accent.vec4, "Loading Backing Track in background... (%.0f%%)", prog * 100.0f);
+        ImGui::Spacing();
+        ImGui::ProgressBar(prog, ImVec2(-1.0f, 6.0f), "");
+    } else if (m_player.isLoaded()) {
         ImGui::TextColored(tokens.text.primary.vec4, "Loaded Track: %s", m_player.fileName().c_str());
         double dur = m_player.durationSeconds();
         double pos = m_player.positionSeconds();
+        double rem = std::max(0.0, dur - pos);
 
-        char timeStr[64];
-        std::snprintf(timeStr, sizeof(timeStr), "%02d:%02d / %02d:%02d",
+        char timeStr[96];
+        std::snprintf(timeStr, sizeof(timeStr), "Elapsed: %02d:%02d   |   Remaining: -%02d:%02d   |   Total: %02d:%02d",
             static_cast<int>(pos) / 60, static_cast<int>(pos) % 60,
+            static_cast<int>(rem) / 60, static_cast<int>(rem) % 60,
             static_cast<int>(dur) / 60, static_cast<int>(dur) % 60);
 
         if (g_fontMono) ImGui::PushFont(g_fontMono);
@@ -244,21 +329,36 @@ void PracticeToolsModal::renderBackingTrackTab() {
         }
 
         ImGui::Spacing();
-
         ImGui::Spacing();
 
         if (m_lastLoadedTrack != m_player.filePath()) {
             m_lastLoadedTrack = m_player.filePath();
-            generateWaveform800(m_lastLoadedTrack);
+            const auto& peaks = m_player.waveformPeaks800();
+            if (!peaks.empty()) {
+                m_waveform800.resize(peaks.size());
+                for (size_t i = 0; i < peaks.size(); ++i) {
+                    m_waveform800[i] = WaveformPeak{peaks[i].first, peaks[i].second};
+                }
+            } else {
+                generateWaveform800(m_lastLoadedTrack);
+            }
         }
 
         ImGui::TextColored(tokens.text.secondary.vec4, "Interactive Overview Waveform (800-Point Strip):");
-        renderOverviewWaveformStrip(520.0f, 54.0f);
+        const float stripW = std::max(200.0f, ImGui::GetContentRegionAvail().x);
+        renderOverviewWaveformStrip(stripW, 64.0f);
 
         ImGui::Spacing();
-        ImGui::Text("Loop Region: %.1f%% - %.1f%%", m_loopStart * 100.0f, m_loopEnd * 100.0f);
+        double startSec = m_loopStart * dur;
+        double endSec = m_loopEnd * dur;
+        if (g_fontMono) ImGui::PushFont(g_fontMono);
+        ImGui::TextColored(tokens.text.primary.vec4, "A/B Loop Range: [%02d:%02d (%.1f%%)] -> [%02d:%02d (%.1f%%)]",
+                           static_cast<int>(startSec) / 60, static_cast<int>(startSec) % 60, m_loopStart * 100.0f,
+                           static_cast<int>(endSec) / 60, static_cast<int>(endSec) % 60, m_loopEnd * 100.0f);
+        if (g_fontMono) ImGui::PopFont();
+
         ImGui::SameLine(0, 16);
-        if (CenteredButton("Reset Loop Points", ImVec2(120, 20))) {
+        if (CenteredButton("Reset Loop Points", ImVec2(130, 22))) {
             m_loopStart = 0.0f;
             m_loopEnd = 1.0f;
         }
@@ -447,17 +547,17 @@ void PracticeToolsModal::renderOverviewWaveformStrip(float stripWidth, float str
         }
     }
 
-    // Draggable Loop Start Handle [L
+    // Draggable Loop Start Bracket [A
     dl->AddLine(ImVec2(loopStartX, screenPos.y), ImVec2(loopStartX, stripMax.y), tokens.text.accent.u32, 2.0f);
-    dl->AddRectFilled(ImVec2(loopStartX - 7.0f, screenPos.y), ImVec2(loopStartX + 1.0f, screenPos.y + 14.0f),
+    dl->AddRectFilled(ImVec2(loopStartX - 8.0f, screenPos.y), ImVec2(loopStartX + 1.0f, screenPos.y + 15.0f),
                       tokens.text.accent.u32, 2.0f);
-    dl->AddText(ImVec2(loopStartX - 6.0f, screenPos.y), tokens.surfaces.windowBg.u32, "L");
+    dl->AddText(ImVec2(loopStartX - 7.0f, screenPos.y), tokens.surfaces.windowBg.u32, "A");
 
-    // Draggable Loop End Handle R]
+    // Draggable Loop End Bracket B]
     dl->AddLine(ImVec2(loopEndX, screenPos.y), ImVec2(loopEndX, stripMax.y), tokens.text.accent.u32, 2.0f);
-    dl->AddRectFilled(ImVec2(loopEndX - 1.0f, screenPos.y), ImVec2(loopEndX + 7.0f, screenPos.y + 14.0f),
+    dl->AddRectFilled(ImVec2(loopEndX - 1.0f, screenPos.y), ImVec2(loopEndX + 8.0f, screenPos.y + 15.0f),
                       tokens.text.accent.u32, 2.0f);
-    dl->AddText(ImVec2(loopEndX + 1.0f, screenPos.y), tokens.surfaces.windowBg.u32, "R");
+    dl->AddText(ImVec2(loopEndX + 2.0f, screenPos.y), tokens.surfaces.windowBg.u32, "B");
 
     // Playhead line & needle
     dl->AddLine(ImVec2(playheadX, screenPos.y), ImVec2(playheadX, stripMax.y), tokens.text.primary.u32, 2.0f);
@@ -480,10 +580,10 @@ void PracticeToolsModal::renderOverviewWaveformStrip(float stripWidth, float str
         } else if (m_isDraggingLoopEnd) {
             m_loopEnd = std::clamp(normX, m_loopStart + 0.02f, 1.0f);
         } else {
-            if (std::abs(io.MouseClickedPos[0].x - loopStartX) < 10.0f) {
+            if (std::abs(io.MouseClickedPos[0].x - loopStartX) < 12.0f) {
                 m_isDraggingLoopStart = true;
                 m_loopStart = std::clamp(normX, 0.0f, m_loopEnd - 0.02f);
-            } else if (std::abs(io.MouseClickedPos[0].x - loopEndX) < 10.0f) {
+            } else if (std::abs(io.MouseClickedPos[0].x - loopEndX) < 12.0f) {
                 m_isDraggingLoopEnd = true;
                 m_loopEnd = std::clamp(normX, m_loopStart + 0.02f, 1.0f);
             } else {
@@ -496,7 +596,7 @@ void PracticeToolsModal::renderOverviewWaveformStrip(float stripWidth, float str
     }
 
     if (isHovered) {
-        if (std::abs(io.MousePos.x - loopStartX) < 10.0f || std::abs(io.MousePos.x - loopEndX) < 10.0f) {
+        if (std::abs(io.MousePos.x - loopStartX) < 12.0f || std::abs(io.MousePos.x - loopEndX) < 12.0f) {
             ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
         } else {
             ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
@@ -515,30 +615,36 @@ void PracticeToolsModal::render() {
     if (!m_isOpen) return;
 
     ImGui::OpenPopup("Practice Tools##Modal");
-    ImGui::SetNextWindowSize(ImVec2(680, 480), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(740, 520), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(620, 440), ImVec2(1600, 1000));
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
 
-    if (ImGui::BeginPopupModal("Practice Tools##Modal", &m_isOpen, ImGuiWindowFlags_NoResize)) {
+    if (ImGui::BeginPopupModal("Practice Tools##Modal", &m_isOpen, ImGuiWindowFlags_None)) {
         const auto& tokens = themeTokens();
         ImGui::TextColored(tokens.text.accent.vec4, "PRACTICE SUITE");
         ImGui::Separator();
         ImGui::Spacing();
 
-        if (ImGui::BeginTabBar("PracticeToolsTabs")) {
-            if (ImGui::BeginTabItem("Quick Looper")) {
-                renderLooperTab();
-                ImGui::EndTabItem();
-            }
-            if (ImGui::BeginTabItem("Backing Track Player")) {
-                renderBackingTrackTab();
-                ImGui::EndTabItem();
-            }
-            ImGui::EndTabBar();
-        }
+        const float footerHeight = 44.0f;
+        const float contentHeight = ImGui::GetContentRegionAvail().y - footerHeight;
 
-        float bottomY = std::max(ImGui::GetCursorPosY() + 12.0f, 435.0f);
-        ImGui::SetCursorPosY(bottomY);
+        if (ImGui::BeginChild("PracticeToolsContentRegion", ImVec2(0, contentHeight), false)) {
+            if (ImGui::BeginTabBar("PracticeToolsTabs")) {
+                if (ImGui::BeginTabItem("Quick Looper")) {
+                    renderLooperTab();
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Backing Track Player")) {
+                    renderBackingTrackTab();
+                    ImGui::EndTabItem();
+                }
+                ImGui::EndTabBar();
+            }
+        }
+        ImGui::EndChild();
+
         ImGui::Separator();
+        ImGui::Spacing();
         if (CenteredButton("Close", ImVec2(90, 26))) {
             close();
             ImGui::CloseCurrentPopup();

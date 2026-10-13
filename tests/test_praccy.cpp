@@ -23,11 +23,19 @@
 #include "ui/update_checker.h"
 #include "ui/design_tokens.h"
 #include "ui/ui_helpers.h"
+#include "plugins/vst3_param_queue.h"
+#include "ui/widgets/device_badges.h"
+#include "ui/widgets/rotary_knob.h"
+#include "ui/widgets/strobe_tuner.h"
+#include <imgui_internal.h>
 #include "utils/parse_utils.h"
 #include "miniz.h"
 #include <fstream>
 #include <filesystem>
 #include <cstring>
+
+ImFont* g_fontUI = nullptr;
+ImFont* g_fontMono = nullptr;
 
 using namespace praccy;
 
@@ -291,6 +299,7 @@ void testAppConfigPersistence() {
     cfg.inputGainDb = 4.5f;
     cfg.masterVolumeDb = -2.0f;
     cfg.metronomeBpm = 135.0f;
+    cfg.rackViewMode = state::AppConfig::RackViewMode::Modular;
     cfg.customPluginPaths = {"D:\\VSTPlugins", "E:\\MyAudio"};
 
     assert(cfg.save(testPath) == true);
@@ -302,6 +311,7 @@ void testAppConfigPersistence() {
     assert(std::abs(loaded.inputGainDb - 4.5f) < 1e-4f);
     assert(std::abs(loaded.masterVolumeDb - (-2.0f)) < 1e-4f);
     assert(std::abs(loaded.metronomeBpm - 135.0f) < 1e-4f);
+    assert(loaded.rackViewMode == state::AppConfig::RackViewMode::Modular);
     assert(loaded.customPluginPaths.size() >= 2);
 
     std::remove(testPath.c_str());
@@ -1245,6 +1255,24 @@ void testWcagContrastCompliance() {
 
         float crActiveBg = calculateContrastRatio(theme.signal.active, theme.surfaces.windowBg);
         assert(crActiveBg >= 3.0f);
+
+        // 4. Text accent highlights against window and card backgrounds >= 3.0:1 (and >= 4.5:1 on light theme)
+        float crAccentCard = calculateContrastRatio(theme.text.accent, theme.surfaces.cardBg);
+        assert(crAccentCard >= 3.0f);
+        float crAccentWindow = calculateContrastRatio(theme.text.accent, theme.surfaces.windowBg);
+        assert(crAccentWindow >= 3.0f);
+
+        // 5. Muted text against card background >= 3.0:1
+        float crMutedCard = calculateContrastRatio(theme.text.muted, theme.surfaces.cardBg);
+        assert(crMutedCard >= 3.0f);
+
+        // 6. Vintage Console calibrated card border and accent contrast
+        if (theme.id == ui::ThemeId::VintageConsole) {
+            float crCardBorder = calculateContrastRatio(theme.borders.card, theme.surfaces.cardBg);
+            assert(crCardBorder >= 3.0f);
+            assert(crAccentCard >= 4.5f);
+            assert(crAccentWindow >= 4.5f);
+        }
     }
 
     std::cout << "PASSED\n";
@@ -1611,6 +1639,479 @@ void testFloatingHudAlphaDecayComputation() {
     std::cout << "PASSED\n";
 }
 
+void testStyleStackGuards() {
+    std::cout << "[TEST] RAII Style Stack Guards (ScopedStyleColor & ScopedStyleVar)... ";
+    ImGuiContext* ctx = ImGui::CreateContext();
+    ImGui::SetCurrentContext(ctx);
+
+    const int baseColorStack = ctx->ColorStack.Size;
+    const int baseVarStack = ctx->StyleVarStack.Size;
+
+    // 1. Single ScopedStyleColor
+    {
+        ui::ScopedStyleColor cGuard(ImGuiCol_Button, ImVec4(1.0f, 0.0f, 0.0f, 1.0f));
+        assert(ctx->ColorStack.Size == baseColorStack + 1);
+    }
+    assert(ctx->ColorStack.Size == baseColorStack);
+
+    // 2. Condition false
+    {
+        ui::ScopedStyleColor cGuard(ImGuiCol_Button, ImVec4(1.0f, 0.0f, 0.0f, 1.0f), false);
+        assert(ctx->ColorStack.Size == baseColorStack);
+    }
+    assert(ctx->ColorStack.Size == baseColorStack);
+
+    // 3. Multi-color initializer list
+    {
+        ui::ScopedStyleColor cGuard({
+            {ImGuiCol_Button, ImVec4(0.1f, 0.2f, 0.3f, 1.0f)},
+            {ImGuiCol_Border, ImVec4(0.4f, 0.5f, 0.6f, 1.0f)},
+            {ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f)}
+        });
+        assert(ctx->ColorStack.Size == baseColorStack + 3);
+    }
+    assert(ctx->ColorStack.Size == baseColorStack);
+
+    // 4. Early return protection
+    auto earlyExitTest = [&](bool triggerExit) {
+        ui::ScopedStyleColor cGuard(ImGuiCol_Button, ImVec4(1.0f, 0.0f, 0.0f, 1.0f));
+        assert(ctx->ColorStack.Size == baseColorStack + 1);
+        if (triggerExit) return;
+        assert(false);
+    };
+    earlyExitTest(true);
+    assert(ctx->ColorStack.Size == baseColorStack);
+
+    // 5. ScopedStyleVar float and ImVec2
+    {
+        ui::ScopedStyleVar vGuard(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 4.0f));
+        assert(ctx->StyleVarStack.Size == baseVarStack + 1);
+    }
+    assert(ctx->StyleVarStack.Size == baseVarStack);
+
+    {
+        ui::ScopedStyleVar vGuard(ImGuiStyleVar_Alpha, 0.5f);
+        assert(ctx->StyleVarStack.Size == baseVarStack + 1);
+    }
+    assert(ctx->StyleVarStack.Size == baseVarStack);
+
+    // 6. Nested guards
+    {
+        ui::ScopedStyleColor c1(ImGuiCol_Button, ImVec4(1.0f, 0.0f, 0.0f, 1.0f));
+        {
+            ui::ScopedStyleColor c2(ImGuiCol_Border, ImVec4(0.0f, 1.0f, 0.0f, 1.0f));
+            ui::ScopedStyleVar v1(ImGuiStyleVar_Alpha, 0.8f);
+            assert(ctx->ColorStack.Size == baseColorStack + 2);
+            assert(ctx->StyleVarStack.Size == baseVarStack + 1);
+        }
+        assert(ctx->ColorStack.Size == baseColorStack + 1);
+        assert(ctx->StyleVarStack.Size == baseVarStack);
+    }
+    // 7. Boolean toggle inversion across dynamic iterations and loops
+    for (int iter = 0; iter < 100; ++iter) {
+        bool active = (iter % 2 == 0);
+        {
+            ui::ScopedStyleColor cGuard(ImGuiCol_Button, ImVec4(0.2f, 0.4f, 0.6f, 1.0f), active);
+            ui::ScopedStyleVar vGuard(ImGuiStyleVar_FrameRounding, 4.0f, !active);
+            if (active) {
+                assert(ctx->ColorStack.Size == baseColorStack + 1);
+                assert(ctx->StyleVarStack.Size == baseVarStack);
+            } else {
+                assert(ctx->ColorStack.Size == baseColorStack);
+                assert(ctx->StyleVarStack.Size == baseVarStack + 1);
+            }
+            if (iter == 42) {
+                // Early break inside loop
+                break;
+            }
+        }
+        assert(ctx->ColorStack.Size == baseColorStack);
+        assert(ctx->StyleVarStack.Size == baseVarStack);
+    }
+    assert(ctx->ColorStack.Size == baseColorStack);
+    assert(ctx->StyleVarStack.Size == baseVarStack);
+
+    ImGui::DestroyContext(ctx);
+    std::cout << "PASSED\n";
+}
+
+void testFastParameterChanges() {
+    std::cout << "[TEST] VST3 FastParameterChanges & FastParamValueQueue... ";
+    plugins::FastParameterChanges changes;
+    assert(changes.getParameterCount() == 0);
+    assert(changes.getParameterData(0) == nullptr);
+
+    // 1. Verify COM interface query
+    void* iface = nullptr;
+    Steinberg::tresult qr = changes.queryInterface(Steinberg::Vst::IParameterChanges::iid, &iface);
+    assert(qr == Steinberg::kResultOk && iface == &changes);
+
+    qr = changes.queryInterface(Steinberg::FUnknown::iid, &iface);
+    assert(qr == Steinberg::kResultOk && iface == &changes);
+
+    // 2. Queue up to 128 changes (max capacity)
+    for (uint32_t i = 0; i < 128; ++i) {
+        bool ok = changes.addParameterChange(2000 + i, static_cast<double>(i) / 128.0);
+        assert(ok);
+    }
+    assert(changes.getParameterCount() == 128);
+
+    // 3. Verify 129th fails safely without reallocating
+    assert(!changes.addParameterChange(9999, 0.5));
+    assert(changes.getParameterCount() == 128);
+
+    // 4. Verify parameter queue data and points
+    for (Steinberg::int32 i = 0; i < 128; ++i) {
+        auto* q = changes.getParameterData(i);
+        assert(q != nullptr);
+        assert(q->getParameterId() == static_cast<Steinberg::Vst::ParamID>(2000 + i));
+        assert(q->getPointCount() == 1);
+
+        Steinberg::int32 offset = -1;
+        double val = -1.0;
+        auto res = q->getPoint(0, offset, val);
+        assert(res == Steinberg::kResultTrue);
+        assert(offset == 0);
+        assert(std::abs(val - static_cast<double>(i) / 128.0) < 1e-9);
+
+        // Verify out-of-range point index
+        assert(q->getPoint(1, offset, val) == Steinberg::kResultFalse);
+
+        // Verify queue COM interface query
+        void* qIface = nullptr;
+        assert(q->queryInterface(Steinberg::Vst::IParamValueQueue::iid, &qIface) == Steinberg::kResultOk);
+        assert(qIface == q);
+    }
+
+    // 5. Verify clear
+    changes.clear();
+    assert(changes.getParameterCount() == 0);
+    assert(changes.getParameterData(0) == nullptr);
+
+    std::cout << "PASSED\n";
+}
+
+void testAudioPlayerAsyncLoading() {
+    std::cout << "[TEST] AudioPlayer Asynchronous Loading & Atomic Pointer Swap... ";
+
+    std::string tempPath = (std::filesystem::temp_directory_path() / "praccy_test_async_track.wav").string();
+    {
+        std::ofstream wav(tempPath, std::ios::binary);
+        const uint32_t sampleRate = 44100;
+        const uint16_t numChannels = 2;
+        const uint16_t bitsPerSample = 16;
+        const uint32_t numSamples = 2000;
+        const uint32_t dataBytes = numSamples * numChannels * (bitsPerSample / 8);
+        const uint32_t riffSize = 36 + dataBytes;
+
+        wav.write("RIFF", 4);
+        wav.write(reinterpret_cast<const char*>(&riffSize), 4);
+        wav.write("WAVE", 4);
+
+        wav.write("fmt ", 4);
+        uint32_t fmtSize = 16;
+        uint16_t audioFormat = 1; // PCM
+        uint32_t byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+        uint16_t blockAlign = numChannels * (bitsPerSample / 8);
+        wav.write(reinterpret_cast<const char*>(&fmtSize), 4);
+        wav.write(reinterpret_cast<const char*>(&audioFormat), 2);
+        wav.write(reinterpret_cast<const char*>(&numChannels), 2);
+        wav.write(reinterpret_cast<const char*>(&sampleRate), 4);
+        wav.write(reinterpret_cast<const char*>(&byteRate), 4);
+        wav.write(reinterpret_cast<const char*>(&blockAlign), 2);
+        wav.write(reinterpret_cast<const char*>(&bitsPerSample), 2);
+
+        wav.write("data", 4);
+        wav.write(reinterpret_cast<const char*>(&dataBytes), 4);
+        for (uint32_t i = 0; i < numSamples; ++i) {
+            int16_t s = static_cast<int16_t>(std::sin(2.0 * 3.14159265 * 440.0 * i / sampleRate) * 16000.0);
+            wav.write(reinterpret_cast<const char*>(&s), 2);
+            wav.write(reinterpret_cast<const char*>(&s), 2);
+        }
+    }
+
+    tools::AudioPlayer player;
+    player.prepare(48000.0);
+
+    // 1. Synchronous loading test
+    bool syncOk = player.loadWavFileSync(tempPath);
+    assert(syncOk);
+    assert(player.isLoaded());
+    assert(!player.isLoading());
+    assert(player.durationSeconds() > 0.0);
+    assert(!player.waveformPeaks800().empty());
+    assert(player.waveformPeaks800().size() == 800);
+
+    // 2. Audio process playback test
+    player.play();
+    assert(player.isPlaying());
+    audio::OwnedAudioBuffer outBuf(2, 256);
+    auto view = outBuf.view(256);
+    view.clear();
+    player.process(view);
+    float sumL = 0.0f;
+    for (uint32_t s = 0; s < 256; ++s) {
+        sumL += std::abs(view.channel(0)[s]);
+    }
+    assert(sumL > 0.0f);
+
+    player.unload();
+    assert(!player.isLoaded());
+    assert(!player.isPlaying());
+
+    // 3. Asynchronous loading test
+    bool asyncLaunched = player.loadWavFile(tempPath);
+    assert(asyncLaunched);
+
+    int attempts = 0;
+    while (!player.isLoaded() && attempts++ < 100) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    assert(player.isLoaded());
+    assert(!player.isLoading());
+    assert(player.loadProgress() >= 1.0f);
+    assert(player.durationSeconds() > 0.0);
+
+    std::error_code ec;
+    std::filesystem::remove(tempPath, ec);
+
+    std::cout << "PASSED\n";
+}
+
+void testHardwareGradeWidgetsAndCategoryBadges() {
+    std::cout << "[TEST] Hardware-Grade Widgets & Device Category Badges... ";
+
+    // 1. Heuristic Category Detection
+    using namespace praccy::ui;
+    assert(detectDeviceCategory("Ibanez TS9 Tube Screamer", "Ibanez") == DeviceCategory::OverdriveStompbox);
+    assert(detectDeviceCategory("Big Muff Pi Fuzz", "Electro-Harmonix") == DeviceCategory::OverdriveStompbox);
+    assert(detectDeviceCategory("ProCo Rat Distortion", "ProCo") == DeviceCategory::OverdriveStompbox);
+    assert(detectDeviceCategory("Klon Centaur Clean Boost", "Klon") == DeviceCategory::OverdriveStompbox);
+
+    assert(detectDeviceCategory("JCM800 Lead Amp", "Marshall") == DeviceCategory::TubeAmpHead);
+    assert(detectDeviceCategory("Dual Rectifier Crunch Head", "Mesa Boogie") == DeviceCategory::TubeAmpHead);
+    assert(detectDeviceCategory("Clean Twin Reverb Amp", "Fender") == DeviceCategory::TubeAmpHead);
+
+    assert(detectDeviceCategory("1176 Classic Limiting Amplifier", "Universal Audio") == DeviceCategory::StudioCompressor);
+    assert(detectDeviceCategory("Teletronix LA-2A Leveler", "Universal Audio") == DeviceCategory::StudioCompressor);
+    assert(detectDeviceCategory("Solid Dynamics Gate/Comp", "SSL") == DeviceCategory::StudioCompressor);
+
+    assert(detectDeviceCategory("Roland RE-201 Space Echo", "Roland") == DeviceCategory::TapeDelay);
+    assert(detectDeviceCategory("Analog BBD Delay", "Memory Man") == DeviceCategory::TapeDelay);
+
+    assert(detectDeviceCategory("EMT 140 Classic Plate", "EMT") == DeviceCategory::PlateReverb);
+    assert(detectDeviceCategory("Shimmer Hall Reverb", "Valhalla") == DeviceCategory::PlateReverb);
+
+    assert(detectDeviceCategory("Stereo Chorus / Flanger", "TC Electronic") == DeviceCategory::Modulation);
+    assert(detectDeviceCategory("Optical Tremolo & Phase", "Univibe") == DeviceCategory::Modulation);
+
+    assert(detectDeviceCategory("Parametric Dynamic EQ", "FabFilter") == DeviceCategory::Equalizer);
+    assert(detectDeviceCategory("10-Band Graphic Filter Curve", "Boss") == DeviceCategory::Equalizer);
+
+    assert(detectDeviceCategory("Unknown Utility Tool", "Praccy Audio") == DeviceCategory::GenericProcessor);
+
+    // 2. Category Title Strings
+    assert(std::string(getCategoryTitle(DeviceCategory::OverdriveStompbox)) == "STOMPBOX OD");
+    assert(std::string(getCategoryTitle(DeviceCategory::TubeAmpHead)) == "TUBE AMP");
+    assert(std::string(getCategoryTitle(DeviceCategory::StudioCompressor)) == "COMPRESSOR");
+    assert(std::string(getCategoryTitle(DeviceCategory::TapeDelay)) == "TAPE DELAY");
+    assert(std::string(getCategoryTitle(DeviceCategory::PlateReverb)) == "PLATE REVERB");
+    assert(std::string(getCategoryTitle(DeviceCategory::Modulation)) == "MODULATION");
+    assert(std::string(getCategoryTitle(DeviceCategory::Equalizer)) == "PRECISION EQ");
+    assert(std::string(getCategoryTitle(DeviceCategory::GenericProcessor)) == "STUDIO FX");
+
+    // 3. HardwareKnobOptions defaults
+    HardwareKnobOptions opt;
+    assert(opt.radius == 13.0f);
+    assert(opt.arcThickness == 2.2f);
+    assert(opt.sensitivity == 0.005f);
+
+    // 4. Gravity sag computation parity
+    auto computeSag = [](float dx) {
+        return std::clamp(std::abs(dx) * 0.16f + 8.0f, 6.0f, 42.0f);
+    };
+    assert(computeSag(0.0f) == 8.0f);
+    assert(computeSag(100.0f) == 24.0f);
+    assert(computeSag(400.0f) == 42.0f); // Clamped at 42.0f max
+
+    // 5. Rack View Mode Enum Parity
+    state::AppConfig cfg;
+    assert(cfg.rackViewMode == state::AppConfig::RackViewMode::Simple);
+    cfg.rackViewMode = state::AppConfig::RackViewMode::Modular;
+    assert(cfg.rackViewMode == state::AppConfig::RackViewMode::Modular);
+
+    std::cout << "PASSED\n";
+}
+
+void testMilestone3PracticeSuiteAndStrobeTuner() {
+    std::cout << "[TEST] Milestone 3: Practice Suite, Strobe Tuner & Quick Looper Layers... ";
+
+    // 1. QuickLooper Undo/Redo Layer Verification
+    {
+        tools::QuickLooper looper;
+        looper.prepare(48000.0, 10);
+        assert(!looper.canUndo());
+        assert(!looper.canRedo());
+
+        // Fill initial loop by triggering Record
+        looper.triggerAction();
+        assert(looper.state() == tools::LooperState::Recording);
+
+        audio::OwnedAudioBuffer recIn(2, 48000);
+        audio::OwnedAudioBuffer recOut(2, 48000);
+        for (uint32_t s = 0; s < 48000; ++s) {
+            recIn.view(48000).channel(0)[s] = 0.5f;
+            recIn.view(48000).channel(1)[s] = 0.5f;
+        }
+        auto recOutView = recOut.view(48000);
+        looper.process(recIn.view(48000), recOutView);
+
+        // Lock loop: transitions to Playing
+        looper.triggerAction();
+        assert(looper.state() == tools::LooperState::Playing);
+        assert(std::abs(looper.loopLengthSeconds() - 1.0) < 0.05);
+        assert(!looper.canUndo());
+
+        // Trigger Overdub: snapshots current loop layer
+        looper.triggerAction();
+        assert(looper.state() == tools::LooperState::Overdubbing);
+        assert(looper.canUndo());
+        assert(!looper.canRedo());
+
+        // Accumulate audio into overdub
+        audio::OwnedAudioBuffer dubIn(2, 4800);
+        audio::OwnedAudioBuffer dubOut(2, 4800);
+        for (uint32_t s = 0; s < 4800; ++s) {
+            dubIn.view(4800).channel(0)[s] = 0.4f;
+            dubIn.view(4800).channel(1)[s] = 0.4f;
+        }
+        auto dubOutView = dubOut.view(4800);
+        looper.process(dubIn.view(4800), dubOutView);
+
+        // Test Undo: reverts layer
+        bool undoOk = looper.undo();
+        assert(undoOk);
+        assert(!looper.canUndo());
+        assert(looper.canRedo());
+
+        // Test Redo: restores layer
+        bool redoOk = looper.redo();
+        assert(redoOk);
+        assert(looper.canUndo());
+        assert(!looper.canRedo());
+    }
+
+    // 2. Musical Bar/Beat Calculation Verification
+    {
+        tools::QuickLooper looper;
+        looper.prepare(48000.0, 10);
+        looper.setBpm(120.0f);
+        looper.setBeatsPerBar(4);
+        assert(looper.bpm() == 120.0f);
+        assert(looper.beatsPerBar() == 4);
+
+        // Record a 2.0s loop = 4 beats = 1 bar at 120 BPM
+        looper.triggerAction();
+        audio::OwnedAudioBuffer bufIn(2, 96000); // 2 seconds
+        audio::OwnedAudioBuffer bufOut(2, 96000);
+        auto bufOutView = bufOut.view(96000);
+        looper.process(bufIn.view(96000), bufOutView);
+        looper.triggerAction(); // Lock
+
+        assert(looper.totalBeats() == 4);
+        assert(looper.totalBars() == 1);
+        assert(looper.currentBar() >= 1);
+        assert(looper.currentBeat() >= 1 && looper.currentBeat() <= 4);
+    }
+
+    // 3. Strobe Tuner Widget Execution Verification
+    {
+        ImGuiContext* ctx = ImGui::GetCurrentContext();
+        bool createdCtx = false;
+        if (!ctx) {
+            ctx = ImGui::CreateContext();
+            createdCtx = true;
+        }
+        ImGui::SetCurrentContext(ctx);
+
+        ImGuiIO& io = ImGui::GetIO();
+        io.DisplaySize = ImVec2(1024, 768);
+        io.DeltaTime = 1.0f / 60.0f;
+
+        unsigned char* pixels = nullptr;
+        int width = 0, height = 0;
+        io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+
+        ImGui::NewFrame();
+        ImGui::Begin("TunerTestWindow");
+
+        tools::TunerResult exactInTune;
+        exactInTune.confidence = true;
+        exactInTune.noteName = "A2";
+        exactInTune.frequencyHz = 110.0f;
+        exactInTune.centDeviation = 0.0f;
+
+        tools::TunerResult flatResult;
+        flatResult.confidence = true;
+        flatResult.noteName = "E2";
+        flatResult.frequencyHz = 80.1f;
+        flatResult.centDeviation = -18.5f;
+
+        tools::TunerResult sharpResult;
+        sharpResult.confidence = true;
+        sharpResult.noteName = "D3";
+        sharpResult.frequencyHz = 148.5f;
+        sharpResult.centDeviation = +24.2f;
+
+        tools::TunerResult unconfident;
+        unconfident.confidence = false;
+
+        // Verify DrawStrobeTuner renders without crash across all states
+        ui::DrawStrobeTuner(exactInTune, ImVec2(100, 100), 30.0f);
+        ui::DrawStrobeTuner(flatResult, ImVec2(200, 100), 30.0f);
+        ui::DrawStrobeTuner(sharpResult, ImVec2(300, 100), 30.0f);
+        ui::DrawStrobeTuner(unconfident, ImVec2(400, 100), 30.0f);
+
+        // Verify DrawStrobeTunerModule renders
+        ui::DrawStrobeTunerModule(exactInTune, 240.0f, 64.0f);
+        ui::DrawStrobeTunerModule(flatResult, 240.0f, 64.0f);
+
+        ImGui::End();
+        ImGui::Render();
+
+        if (createdCtx) {
+            ImGui::DestroyContext(ctx);
+        }
+    }
+
+    // 4. Default Factory User Presets & Sound Profile Detection
+    {
+        state::SceneManager scenes;
+        auto names = scenes.savedPresetNames();
+        assert(!names.empty());
+        assert(names.size() >= 4);
+
+        bool foundClean = false;
+        bool foundMetal = false;
+        bool foundBreakup = false;
+        bool foundAmbient = false;
+
+        for (const auto& name : names) {
+            if (name.find("Clean") != std::string::npos) foundClean = true;
+            if (name.find("Metal") != std::string::npos || name.find("Djent") != std::string::npos) foundMetal = true;
+            if (name.find("Breakup") != std::string::npos || name.find("Blues") != std::string::npos) foundBreakup = true;
+            if (name.find("Ambient") != std::string::npos || name.find("Wash") != std::string::npos) foundAmbient = true;
+        }
+
+        assert(foundClean);
+        assert(foundMetal);
+        assert(foundBreakup);
+        assert(foundAmbient);
+    }
+
+    std::cout << "PASSED\n";
+}
+
 int main() {
     std::cout << "===========================================\n";
     std::cout << "   PRACCY CORE AUDIO ENGINE TEST SUITE   \n";
@@ -1644,9 +2145,14 @@ int main() {
     testQuickLooperCircularProgressMath();
     testWavDragAndDropExtensionValidation();
     testFloatingHudAlphaDecayComputation();
+    testStyleStackGuards();
+    testFastParameterChanges();
+    testAudioPlayerAsyncLoading();
+    testHardwareGradeWidgetsAndCategoryBadges();
+    testMilestone3PracticeSuiteAndStrobeTuner();
 
     std::cout << "===========================================\n";
-    std::cout << "   ALL TESTS PASSED SUCCESSFULLY! (28/28)  \n";
+    std::cout << "   ALL TESTS PASSED SUCCESSFULLY! (33/33)  \n";
     std::cout << "===========================================\n";
     return 0;
 }

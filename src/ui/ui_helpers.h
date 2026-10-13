@@ -7,7 +7,65 @@
 #include <cmath>
 #include <algorithm>
 
+#include <initializer_list>
+#include <utility>
+
 namespace praccy::ui {
+
+class ScopedStyleColor {
+public:
+    ScopedStyleColor(ImGuiCol idx, const ImVec4& col, bool condition = true)
+        : m_count(condition ? 1 : 0) {
+        if (condition) ImGui::PushStyleColor(idx, col);
+    }
+
+    ScopedStyleColor(ImGuiCol idx, ImU32 col, bool condition = true)
+        : m_count(condition ? 1 : 0) {
+        if (condition) ImGui::PushStyleColor(idx, col);
+    }
+
+    ScopedStyleColor(std::initializer_list<std::pair<ImGuiCol, ImVec4>> styles, bool condition = true)
+        : m_count(condition ? static_cast<int>(styles.size()) : 0) {
+        if (condition) {
+            for (const auto& [idx, col] : styles) {
+                ImGui::PushStyleColor(idx, col);
+            }
+        }
+    }
+
+    ~ScopedStyleColor() {
+        if (m_count > 0) ImGui::PopStyleColor(m_count);
+    }
+
+    ScopedStyleColor(const ScopedStyleColor&) = delete;
+    ScopedStyleColor& operator=(const ScopedStyleColor&) = delete;
+
+private:
+    int m_count{0};
+};
+
+class ScopedStyleVar {
+public:
+    ScopedStyleVar(ImGuiStyleVar idx, float val, bool condition = true)
+        : m_count(condition ? 1 : 0) {
+        if (condition) ImGui::PushStyleVar(idx, val);
+    }
+
+    ScopedStyleVar(ImGuiStyleVar idx, const ImVec2& val, bool condition = true)
+        : m_count(condition ? 1 : 0) {
+        if (condition) ImGui::PushStyleVar(idx, val);
+    }
+
+    ~ScopedStyleVar() {
+        if (m_count > 0) ImGui::PopStyleVar(m_count);
+    }
+
+    ScopedStyleVar(const ScopedStyleVar&) = delete;
+    ScopedStyleVar& operator=(const ScopedStyleVar&) = delete;
+
+private:
+    int m_count{0};
+};
 
 // State tracking for double-click resets to suppress subsequent mouse-drag overrides
 inline ImGuiID s_suppressResetId = 0;

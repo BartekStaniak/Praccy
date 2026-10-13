@@ -377,13 +377,6 @@ void AsioManager::packSamples(ASIOSampleType type, const float* src, void* dst, 
 void AsioManager::processAudio(int32_t doubleBufferIndex) {
     if (!m_isRunning.load(std::memory_order_relaxed)) return;
 
-    // Optional thread-local MMCSS registration on driver streaming thread (no cross-thread handle sharing)
-    thread_local HANDLE tl_driverMmcss = nullptr;
-    thread_local DWORD tl_driverTaskIdx = 0;
-    if (!tl_driverMmcss) {
-        tl_driverMmcss = AvSetMmThreadCharacteristicsW(L"Pro Audio", &tl_driverTaskIdx);
-    }
-
     const uint32_t bufferSize = static_cast<uint32_t>(m_info.currentBufferSize);
     const int32_t inCh = m_info.numInputChannels;
     const int32_t outCh = m_info.numOutputChannels;

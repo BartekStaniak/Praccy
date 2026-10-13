@@ -18,6 +18,8 @@ DEF_CLASS_IID (IEditController)
 DEF_CLASS_IID (IComponentHandler)
 DEF_CLASS_IID (IConnectionPoint)
 DEF_CLASS_IID (IMessage)
+DEF_CLASS_IID (IParameterChanges)
+DEF_CLASS_IID (IParamValueQueue)
 }
 }
 
@@ -350,6 +352,14 @@ void Vst3PluginInstance::process(audio::AudioProcessContext& ctx) {
         return;
     }
 
+    m_audioThreadId.store(GetCurrentThreadId(), std::memory_order_relaxed);
+
+    m_inputParamChanges.clear();
+    std::pair<Steinberg::Vst::ParamID, double> paramChange;
+    while (m_paramQueue.try_dequeue(paramChange)) {
+        m_inputParamChanges.addParameterChange(paramChange.first, paramChange.second);
+    }
+
     const uint32_t numSamples = ctx.numSamples;
     Steinberg::Vst::ProcessData data{};
     data.processMode = Steinberg::Vst::kRealtime;
@@ -369,10 +379,18 @@ void Vst3PluginInstance::process(audio::AudioProcessContext& ctx) {
     data.numOutputs = 1;
     data.outputs = &outBus;
 
+    if (m_inputParamChanges.getParameterCount() > 0) {
+        data.inputParameterChanges = &m_inputParamChanges;
+    } else {
+        data.inputParameterChanges = nullptr;
+    }
+
     DWORD exCode = 0;
     bool ok = safeCallPluginAudio([&]() {
         m_processor->process(data);
     }, &exCode);
+
+    m_inputParamChanges.clear();
 
     if (!ok) {
         m_faulted.store(true, std::memory_order_release);
@@ -382,6 +400,9 @@ void Vst3PluginInstance::process(audio::AudioProcessContext& ctx) {
 }
 
 void Vst3PluginInstance::reset() {
+    std::pair<Steinberg::Vst::ParamID, double> dummy;
+    while (m_paramQueue.try_dequeue(dummy)) {}
+    m_inputParamChanges.clear();
     if (m_processor) {
         m_processor->setProcessing(false);
         m_processor->setProcessing(true);
@@ -416,9 +437,17 @@ PluginParameterDesc Vst3PluginInstance::getParameterDesc(size_t index) const {
 }
 
 void Vst3PluginInstance::setParameterValue(uint32_t paramId, float value) {
-    if (m_controller && !m_faulted.load(std::memory_order_relaxed)) {
+    if (m_faulted.load(std::memory_order_relaxed)) return;
+
+    const float normVal = std::clamp(value, 0.0f, 1.0f);
+
+    // Queue parameter change into real-time buffer for audio-thread process()
+    m_paramQueue.try_enqueue({static_cast<Steinberg::Vst::ParamID>(paramId), static_cast<double>(normVal)});
+
+    // Only invoke IEditController on GUI/message thread, NEVER from the high-priority ASIO audio thread!
+    if (m_controller && GetCurrentThreadId() != m_audioThreadId.load(std::memory_order_relaxed)) {
         safeCallPlugin([&]() {
-            m_controller->setParamNormalized(paramId, std::clamp(value, 0.0f, 1.0f));
+            m_controller->setParamNormalized(paramId, normVal);
         });
     }
 }

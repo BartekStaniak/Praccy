@@ -10,6 +10,9 @@
 #include "../plugins/plugin_window.h"
 #include "../state/app_config.h"
 #include "../utils/wav_writer.h"
+#include "widgets/rotary_knob.h"
+#include "widgets/device_badges.h"
+#include "widgets/strobe_tuner.h"
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <cmath>
@@ -45,10 +48,13 @@ static void drawCubicHermiteCable(ImDrawList* dl, ImVec2 p0, ImVec2 p1,
         tMag = std::min(tMag, std::max(12.0f, dx * 1.2f));
     }
 
-    // Hermite to Cubic Bezier control points
+    // Simulated gravity sag
+    const float sag = std::clamp(std::abs(dx) * 0.16f + 8.0f, 6.0f, 42.0f);
+
+    // Hermite to Cubic Bezier control points draped under gravity
     const float inv3 = 1.0f / 3.0f;
-    const ImVec2 c0(p0.x + tMag * inv3, p0.y);
-    const ImVec2 c1(p1.x - tMag * inv3, p1.y);
+    const ImVec2 c0(p0.x + tMag * inv3, p0.y + sag);
+    const ImVec2 c1(p1.x - tMag * inv3, p1.y + sag);
 
     const auto& tokens = themeTokens();
     const ImU32 shadowCol = isBypassed ? static_cast<ImU32>(ColorToken(0, 0, 0, 15)) : static_cast<ImU32>(ColorToken(0, 0, 0, 48));
@@ -57,6 +63,25 @@ static void drawCubicHermiteCable(ImDrawList* dl, ImVec2 p0, ImVec2 p1,
     const ImU32 socketCol = static_cast<ImU32>(tokens.cables.socketRing);
     const ImU32 pinCol    = static_cast<ImU32>(tokens.cables.socketPin);
 
+    const float safePeak = (!std::isfinite(signalPeak) || signalPeak < 0.0f) ? 0.0f : std::clamp(signalPeak, 0.0f, 1.0f);
+    const float normPeak = safePeak;
+
+    // Modulate sleeve and core thickness by live audio peak level
+    const float sleeveThickness = isBypassed ? 3.0f : (3.5f + 1.5f * normPeak);
+    const float coreThickness   = isBypassed ? 1.5f : (1.8f + 1.2f * normPeak);
+
+    // Outer reactive glow for active cables
+    if (!isBypassed && normPeak > 0.02f) {
+        const float glowAlpha = std::clamp(normPeak * 80.0f, 0.0f, 110.0f);
+        const ImU32 glowCol = ColorToken(
+            static_cast<uint8_t>(tokens.signal.active.r * 255.0f),
+            static_cast<uint8_t>(tokens.signal.active.g * 255.0f),
+            static_cast<uint8_t>(tokens.signal.active.b * 255.0f),
+            static_cast<uint8_t>(glowAlpha)
+        ).u32;
+        dl->AddBezierCubic(p0, c0, c1, p1, glowCol, sleeveThickness + 4.5f, 24);
+    }
+
     // 1. Layer 1: Drop Shadow (+2.5px Y offset, alpha 48)
     const ImVec2 shOffset(0.0f, 2.5f);
     dl->AddBezierCubic(
@@ -64,14 +89,14 @@ static void drawCubicHermiteCable(ImDrawList* dl, ImVec2 p0, ImVec2 p1,
         ImVec2(c0.x + shOffset.x, c0.y + shOffset.y),
         ImVec2(c1.x + shOffset.x, c1.y + shOffset.y),
         ImVec2(p1.x + shOffset.x, p1.y + shOffset.y),
-        shadowCol, 5.5f, 24
+        shadowCol, sleeveThickness + 2.0f, 24
     );
 
     // 2. Layer 2: Outer Sleeve (~3.5px gauge)
-    dl->AddBezierCubic(p0, c0, c1, p1, sleeveCol, 3.5f, 24);
+    dl->AddBezierCubic(p0, c0, c1, p1, sleeveCol, sleeveThickness, 24);
 
     // 3. Layer 3: Core Wire (~1.8px)
-    dl->AddBezierCubic(p0, c0, c1, p1, coreCol, 1.8f, 24);
+    dl->AddBezierCubic(p0, c0, c1, p1, coreCol, coreThickness, 24);
 
     // 4. Layer 4: Socket Endpoint Pins
     dl->AddCircleFilled(p0, 4.5f, socketCol);
@@ -184,7 +209,9 @@ RackView::RackView(audio::GraphEngine& graph,
       m_settingsModal(std::make_unique<SettingsModal>(asio, scanner, [this]() { m_pluginBrowserModal->open(); })),
       m_practiceToolsModal(std::make_unique<PracticeToolsModal>(looper, player)) {
     state::AppConfig cfg;
-    cfg.load();
+    if (cfg.load()) {
+        m_rackViewMode = cfg.rackViewMode;
+    }
     m_riffBuffer.prepare(48000.0, static_cast<int>(cfg.retroactiveBufferMinutes));
     m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Initial Scene"),
                                "Initial Scene",
@@ -340,6 +367,7 @@ void RackView::render() {
         m_settingsModal->render();
         m_practiceToolsModal->render();
         m_exportDawModal.render(m_scenes, m_graph);
+        renderPresetBrowserModal();
         renderFloatingHudToast();
     }
     ImGui::End();
@@ -530,42 +558,8 @@ void RackView::renderPracticeRibbon() {
         ImGui::BeginChild("Mod_Tuner", ImVec2(0, modH), true, ImGuiWindowFlags_NoScrollbar);
         {
             auto result = m_tuner.currentResult();
-            ImGui::TextColored(tokens.text.muted.vec4, "TUNER");
-            ImGui::SameLine();
-            if (result.confidence) {
-                bool inTune = std::abs(result.centDeviation) <= 3.0f;
-                ImVec4 noteColor = inTune ? tokens.signal.tunerInTune.vec4 : tokens.signal.tunerFlat.vec4;
-                ImGui::TextColored(noteColor, "%s (%.1f Hz)", result.noteName.c_str(), result.frequencyHz);
-            } else {
-                ImGui::TextDisabled("(Listening)");
-            }
-
-            ImGui::SetCursorPosY(38.0f);
-            const ImVec2 pos = ImGui::GetCursorScreenPos();
-            const float gaugeW = std::max(60.0f, ImGui::GetContentRegionAvail().x - 4.0f);
-            const float gaugeH = 22.0f;
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-
-            const auto& tokens = themeTokens();
-            dl->AddRectFilled(pos, ImVec2(pos.x + gaugeW, pos.y + gaugeH), tokens.surfaces.frameBg, 4.0f);
-            dl->AddRect(pos, ImVec2(pos.x + gaugeW, pos.y + gaugeH), tokens.borders.subtle, 4.0f);
-
-            const float midX = pos.x + (gaugeW * 0.5f);
-            dl->AddLine(ImVec2(midX, pos.y + 2), ImVec2(midX, pos.y + gaugeH - 2), tokens.signal.tunerInTune, 2.0f);
-            dl->AddLine(ImVec2(pos.x + gaugeW * 0.25f, pos.y + 4), ImVec2(pos.x + gaugeW * 0.25f, pos.y + gaugeH - 4), tokens.borders.separator, 1.0f);
-            dl->AddLine(ImVec2(pos.x + gaugeW * 0.75f, pos.y + 4), ImVec2(pos.x + gaugeW * 0.75f, pos.y + gaugeH - 4), tokens.borders.separator, 1.0f);
-
-            if (result.confidence) {
-                bool inTune = std::abs(result.centDeviation) <= 3.0f;
-                float norm = (result.centDeviation + 50.0f) / 100.0f;
-                norm = std::clamp(norm, 0.0f, 1.0f);
-                float needleX = pos.x + (norm * gaugeW);
-                ImU32 needleColor = inTune ? static_cast<ImU32>(tokens.signal.tunerInTune) : static_cast<ImU32>(tokens.signal.tunerSharp);
-                dl->AddRectFilled(ImVec2(needleX - 2.0f, pos.y + 1), ImVec2(needleX + 2.0f, pos.y + gaugeH - 1), needleColor, 2.0f);
-            } else {
-                dl->AddCircleFilled(ImVec2(midX, pos.y + gaugeH * 0.5f), 3.0f, tokens.text.muted);
-            }
-            ImGui::Dummy(ImVec2(gaugeW, gaugeH));
+            const float availW = ImGui::GetContentRegionAvail().x;
+            DrawStrobeTunerModule(result, availW, modH - 12.0f);
         }
         ImGui::EndChild();
 
@@ -629,35 +623,34 @@ void RackView::renderPracticeRibbon() {
 
             auto now = std::chrono::steady_clock::now();
             bool tapFlash = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastTapFlash).count() < 120;
-            if (tapFlash) {
-                ImGui::PushStyleColor(ImGuiCol_Button, tokens.text.accent.vec4);
-                ImGui::PushStyleColor(ImGuiCol_Text, tokens.text.inverse.vec4);
-            }
-            if (CenteredButton("TAP", ImVec2(sigW, 24.0f))) {
-                m_lastTapFlash = now;
-                // Remove tap times older than 2.5 seconds
-                while (!m_tapTimes.empty() && std::chrono::duration<double>(now - m_tapTimes.front()).count() > 2.5) {
-                    m_tapTimes.erase(m_tapTimes.begin());
-                }
-                if (!m_tapTimes.empty() && std::chrono::duration<double>(now - m_tapTimes.back()).count() > 2.5) {
-                    m_tapTimes.clear();
-                }
-                m_tapTimes.push_back(now);
-                if (m_tapTimes.size() > 6) {
-                    m_tapTimes.erase(m_tapTimes.begin());
-                }
-                if (m_tapTimes.size() >= 2) {
-                    double totalDurationSec = std::chrono::duration<double>(m_tapTimes.back() - m_tapTimes.front()).count();
-                    double avgIntervalSec = totalDurationSec / static_cast<double>(m_tapTimes.size() - 1);
-                    if (avgIntervalSec > 0.05) {
-                        float computedBpm = static_cast<float>(60.0 / avgIntervalSec);
-                        computedBpm = std::clamp(std::round(computedBpm), 40.0f, 260.0f);
-                        m_metronome.setBpm(computedBpm);
+            {
+                ScopedStyleColor tapGuard({
+                    {ImGuiCol_Button, tokens.text.accent.vec4},
+                    {ImGuiCol_Text, tokens.text.inverse.vec4}
+                }, tapFlash);
+                if (CenteredButton("TAP", ImVec2(sigW, 24.0f))) {
+                    m_lastTapFlash = now;
+                    // Remove tap times older than 2.5 seconds
+                    while (!m_tapTimes.empty() && std::chrono::duration<double>(now - m_tapTimes.front()).count() > 2.5) {
+                        m_tapTimes.erase(m_tapTimes.begin());
+                    }
+                    if (!m_tapTimes.empty() && std::chrono::duration<double>(now - m_tapTimes.back()).count() > 2.5) {
+                        m_tapTimes.clear();
+                    }
+                    m_tapTimes.push_back(now);
+                    if (m_tapTimes.size() > 6) {
+                        m_tapTimes.erase(m_tapTimes.begin());
+                    }
+                    if (m_tapTimes.size() >= 2) {
+                        double totalDurationSec = std::chrono::duration<double>(m_tapTimes.back() - m_tapTimes.front()).count();
+                        double avgIntervalSec = totalDurationSec / static_cast<double>(m_tapTimes.size() - 1);
+                        if (avgIntervalSec > 0.05) {
+                            float computedBpm = static_cast<float>(60.0 / avgIntervalSec);
+                            computedBpm = std::clamp(std::round(computedBpm), 40.0f, 260.0f);
+                            m_metronome.setBpm(computedBpm);
+                        }
                     }
                 }
-            }
-            if (tapFlash) {
-                ImGui::PopStyleColor(2);
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tap Tempo (Tap repeatedly to set BPM)");
 
@@ -665,17 +658,16 @@ void RackView::renderPracticeRibbon() {
             float bpmW = std::max(60.0f, comboStartX - gap - (ImGui::GetStyle().WindowPadding.x + playW + gap));
 
             // Push FramePadding so PLAY, Tempo button/input, and TimeSig Combo share exact 24px height
-            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 3.5f));
+            ScopedStyleVar framePadGuard(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 3.5f));
 
-            if (metroPlaying) {
-                ImGui::PushStyleColor(ImGuiCol_Button, tokens.signal.faulted.vec4);
-                ImGui::PushStyleColor(ImGuiCol_Text, tokens.text.primary.vec4);
-            }
-            if (CenteredButton(metroPlaying ? "STOP##M" : "PLAY##M", ImVec2(playW, 24.0f))) {
-                m_metronome.setPlaying(!metroPlaying);
-            }
-            if (metroPlaying) {
-                ImGui::PopStyleColor(2);
+            {
+                ScopedStyleColor metroGuard({
+                    {ImGuiCol_Button, tokens.signal.faulted.vec4},
+                    {ImGuiCol_Text, tokens.text.primary.vec4}
+                }, metroPlaying);
+                if (CenteredButton(metroPlaying ? "STOP##M" : "PLAY##M", ImVec2(playW, 24.0f))) {
+                    m_metronome.setPlaying(!metroPlaying);
+                }
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip(metroPlaying ? "Stop Metronome" : "Start Metronome");
 
@@ -729,8 +721,6 @@ void RackView::renderPracticeRibbon() {
                 m_metronome.setBeatsPerBar(timeSigBeats[currentSigIdx]);
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Time Signature");
-
-            ImGui::PopStyleVar();
         }
         ImGui::EndChild();
 
@@ -824,22 +814,20 @@ void RackView::renderSceneBar() {
         if (!sc) continue;
 
         bool isActive = (static_cast<int>(s) == m_scenes.activeSceneIndex());
-        if (isActive) {
-            ImGui::PushStyleColor(ImGuiCol_Button, tokens.surfaces.sceneActiveEmerald.vec4);
-            ImGui::PushStyleColor(ImGuiCol_Border, tokens.borders.focus.vec4);
-            ImGui::PushStyleColor(ImGuiCol_Text, tokens.text.primary.vec4);
-        }
+        {
+            ScopedStyleColor sceneGuard({
+                {ImGuiCol_Button, tokens.surfaces.sceneActiveEmerald.vec4},
+                {ImGuiCol_Border, tokens.borders.focus.vec4},
+                {ImGuiCol_Text, tokens.text.primary.vec4}
+            }, isActive);
 
-        if (CenteredButton(sc->name.c_str())) {
-            m_scenes.applyScene(static_cast<int>(s), m_graph);
-            triggerHudToast("Loaded " + sc->name);
-            m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, sc->name),
-                                       sc->name,
-                                       state::UndoActionType::SceneSwitch);
-        }
-
-        if (isActive) {
-            ImGui::PopStyleColor(3);
+            if (CenteredButton(sc->name.c_str())) {
+                m_scenes.applyScene(static_cast<int>(s), m_graph);
+                triggerHudToast("Loaded " + sc->name);
+                m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, sc->name),
+                                           sc->name,
+                                           state::UndoActionType::SceneSwitch);
+            }
         }
         ImGui::SameLine(0, 8);
     }
@@ -854,52 +842,50 @@ void RackView::renderSceneBar() {
     const bool isToneAActive = (m_scenes.activeToneSnapshot() == state::SceneManager::ToneSnapshotSlot::A);
     const bool isToneBActive = (m_scenes.activeToneSnapshot() == state::SceneManager::ToneSnapshotSlot::B);
 
-    if (isToneAActive) {
-        ImGui::PushStyleColor(ImGuiCol_Button, tokens.surfaces.sceneActiveEmerald.vec4);
-        ImGui::PushStyleColor(ImGuiCol_Border, tokens.borders.focus.vec4);
-    }
-    if (CenteredButton(" A ##ToneA", ImVec2(28, 22))) {
-        if (!isToneAActive) {
-            if (isToneBActive) {
-                m_scenes.captureToneSnapshotB(m_graph);
-            }
-            if (m_scenes.hasToneSnapshotA()) {
-                m_scenes.applyToneSnapshotA(m_graph);
-                triggerHudToast("A/B: SWITCHED TO TONE A");
-            } else {
-                m_scenes.captureToneSnapshotA(m_graph);
-                m_scenes.setActiveToneSnapshot(state::SceneManager::ToneSnapshotSlot::A);
-                triggerHudToast("A/B: STORED TO TONE A");
+    {
+        ScopedStyleColor toneAGuard({
+            {ImGuiCol_Button, tokens.surfaces.sceneActiveEmerald.vec4},
+            {ImGuiCol_Border, tokens.borders.focus.vec4}
+        }, isToneAActive);
+        if (CenteredButton(" A ##ToneA", ImVec2(28, 22))) {
+            if (!isToneAActive) {
+                if (isToneBActive) {
+                    m_scenes.captureToneSnapshotB(m_graph);
+                }
+                if (m_scenes.hasToneSnapshotA()) {
+                    m_scenes.applyToneSnapshotA(m_graph);
+                    triggerHudToast("A/B: SWITCHED TO TONE A");
+                } else {
+                    m_scenes.captureToneSnapshotA(m_graph);
+                    m_scenes.setActiveToneSnapshot(state::SceneManager::ToneSnapshotSlot::A);
+                    triggerHudToast("A/B: STORED TO TONE A");
+                }
             }
         }
-    }
-    if (isToneAActive) {
-        ImGui::PopStyleColor(2);
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Instant A/B Tone Memory A (Click to compare with 10ms crossfade)");
 
     ImGui::SameLine(0, 4);
-    if (isToneBActive) {
-        ImGui::PushStyleColor(ImGuiCol_Button, tokens.surfaces.sceneActiveEmerald.vec4);
-        ImGui::PushStyleColor(ImGuiCol_Border, tokens.borders.focus.vec4);
-    }
-    if (CenteredButton(" B ##ToneB", ImVec2(28, 22))) {
-        if (!isToneBActive) {
-            if (isToneAActive || m_scenes.activeToneSnapshot() == state::SceneManager::ToneSnapshotSlot::None) {
-                m_scenes.captureToneSnapshotA(m_graph);
-            }
-            if (m_scenes.hasToneSnapshotB()) {
-                m_scenes.applyToneSnapshotB(m_graph);
-                triggerHudToast("A/B: SWITCHED TO TONE B");
-            } else {
-                m_scenes.copyToneSnapshotAToB();
-                m_scenes.setActiveToneSnapshot(state::SceneManager::ToneSnapshotSlot::B);
-                triggerHudToast("A/B: INITIALIZED TONE B FROM TONE A");
+    {
+        ScopedStyleColor toneBGuard({
+            {ImGuiCol_Button, tokens.surfaces.sceneActiveEmerald.vec4},
+            {ImGuiCol_Border, tokens.borders.focus.vec4}
+        }, isToneBActive);
+        if (CenteredButton(" B ##ToneB", ImVec2(28, 22))) {
+            if (!isToneBActive) {
+                if (isToneAActive || m_scenes.activeToneSnapshot() == state::SceneManager::ToneSnapshotSlot::None) {
+                    m_scenes.captureToneSnapshotA(m_graph);
+                }
+                if (m_scenes.hasToneSnapshotB()) {
+                    m_scenes.applyToneSnapshotB(m_graph);
+                    triggerHudToast("A/B: SWITCHED TO TONE B");
+                } else {
+                    m_scenes.copyToneSnapshotAToB();
+                    m_scenes.setActiveToneSnapshot(state::SceneManager::ToneSnapshotSlot::B);
+                    triggerHudToast("A/B: INITIALIZED TONE B FROM TONE A");
+                }
             }
         }
-    }
-    if (isToneBActive) {
-        ImGui::PopStyleColor(2);
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Instant A/B Tone Memory B (Click to compare with 10ms crossfade)");
 
@@ -962,14 +948,28 @@ void RackView::renderSceneBar() {
         ImGui::SetTooltip("Export chain to Reaper (.RfxChain), Ableton (.adg), DAWproject (.dawproject), or VST3 (.vstpreset)");
     }
 
+    ImGui::SameLine(0, 8);
+    if (CenteredButton("Preset Browser...")) {
+        m_showPresetBrowserModal = true;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Open categorized preset chain browser with sound profiles, search, and favorites");
+    }
+
     auto userPresets = m_scenes.savedPresetNames();
     if (!userPresets.empty()) {
         ImGui::SameLine(0, 8);
-        ImGui::SetNextItemWidth(140);
-        if (ImGui::BeginCombo("##UserPresetsCombo", "Load Preset...")) {
+        ImGui::SetNextItemWidth(130);
+        if (ImGui::BeginCombo("##UserPresetsCombo", "Quick Load...")) {
             for (const auto& pName : userPresets) {
                 if (ImGui::Selectable(pName.c_str())) {
+                    m_undoManager.pushSnapshot(
+                        state::SceneManager::captureGraphSnapshot(m_graph, "Preset: " + pName),
+                        "Preset: " + pName,
+                        state::UndoActionType::SceneSwitch
+                    );
                     m_scenes.loadPresetChain(pName, m_graph);
+                    m_auditionedPreset = pName;
                     triggerHudToast("Loaded preset: " + pName);
                 }
             }
@@ -1008,6 +1008,26 @@ void RackView::renderSignalRack() {
 
     const auto& tokens = themeTokens();
     ImGui::TextColored(tokens.text.muted.vec4, "SIGNAL CHAIN (RACK):");
+    ImGui::SameLine();
+    const float availW = ImGui::GetContentRegionAvail().x;
+    if (availW > 180.0f) {
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + availW - 170.0f);
+    }
+    const bool isSimpleView = (m_rackViewMode == state::AppConfig::RackViewMode::Simple);
+    const char* modeLabel = isSimpleView ? "MODE: SIMPLE [≡]" : "MODE: MODULAR [☷]";
+    if (ImGui::SmallButton(modeLabel)) {
+        m_rackViewMode = isSimpleView
+            ? state::AppConfig::RackViewMode::Modular
+            : state::AppConfig::RackViewMode::Simple;
+        state::AppConfig cfg;
+        if (cfg.load()) {
+            cfg.rackViewMode = m_rackViewMode;
+            cfg.save();
+        }
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Switch between Simple (flush rack chain) and Modular (patch cables) view");
+    }
 
     ImGui::BeginChild("RackScrollArea", ImVec2(0, -38), true, ImGuiWindowFlags_HorizontalScrollbar);
 
@@ -1023,7 +1043,7 @@ void RackView::renderSignalRack() {
 
     const float cardW = 240.0f;
     const float cardH = 224.0f;
-    const float wireW = 32.0f;
+    const float wireW = isSimpleView ? 12.0f : 36.0f;
     const float insertCardW = 80.0f;
     const float outputCardW = 100.0f;
     const float inputCardW = 180.0f;
@@ -1264,6 +1284,33 @@ void RackView::renderInputCard(float cardY) {
     ImGui::EndGroup();
 }
 
+static inline std::string formatMacroLabel(const std::string& rawLabel, int macroIndex) {
+    if (rawLabel.empty()) {
+        return (macroIndex == 0 ? "GAIN" : (macroIndex == 1 ? "TONE" : (macroIndex == 2 ? "VOL" : "MIX")));
+    }
+    std::string s = rawLabel;
+    std::string lower = s;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    if (lower == "volume" || lower == "master volume") return "VOL";
+    if (lower == "input gain" || lower == "preamp") return "GAIN";
+    if (lower == "dry/wet" || lower == "dry wet" || lower == "mix level") return "MIX";
+    if (lower == "threshold") return "THRESH";
+    if (lower == "frequency") return "FREQ";
+    if (lower == "resonance") return "RESON";
+    if (lower == "overdrive") return "DRIVE";
+    if (lower == "feedback") return "F.BACK";
+    if (lower == "presence") return "PRES";
+
+    if (s.size() <= 6) {
+        std::string upper = s;
+        std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+        return upper;
+    }
+
+    return s.substr(0, 5) + "...";
+}
+
 void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int blockIndex, int branchIndex) {
     if (!slot) return;
 
@@ -1323,15 +1370,16 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                         isMissing ? tokens.borders.cardFaulted : tokens.borders.focus, badgeTextCol, 18.0f);
         ImGui::SameLine(0, 6.0f);
 
-        // Truncated title with ellipsis
+        // Flex title with ellipsis
         std::string rawName = slot->name();
-        float availTitleW = 100.0f; // Leaves room for right action buttons & pill toggle
+        const float rightEdge = cardWidth - 8.0f - 38.0f - (branchIndex == -1 ? 46.0f : 24.0f);
+        const float availTitleW = std::max(60.0f, rightEdge - ImGui::GetCursorPosX() - 6.0f);
         std::string displayTitle = rawName;
         if (ImGui::CalcTextSize(displayTitle.c_str()).x > availTitleW) {
-            while (!displayTitle.empty() && ImGui::CalcTextSize((displayTitle + "..").c_str()).x > availTitleW) {
+            while (!displayTitle.empty() && ImGui::CalcTextSize((displayTitle + "...").c_str()).x > availTitleW) {
                 displayTitle.pop_back();
             }
-            displayTitle += "..";
+            displayTitle += "...";
         }
 
         ImGui::AlignTextToFramePadding();
@@ -1423,7 +1471,6 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         const float previewH = 56.0f;
         ImDrawList* dl = ImGui::GetWindowDrawList();
 
-        Thumbnail* thumb = ThumbnailManager::instance().getThumbnail(slot->name());
 
         // Multi-layer Frame Glow Border
         ImU32 frameBg = isFaulted ? static_cast<ImU32>(tokens.surfaces.cardBgFaulted) :
@@ -1487,68 +1534,18 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             if (ImGui::Button(reloadBtnId, ImVec2(130.0f, 20.0f))) {
                 pluginInst->resetFault();
             }
-        } else if (thumb && thumb->srv) {
-            float maxW = previewW - 4.0f;
-            float maxH = previewH - 4.0f;
-            float aspect = (thumb->height > 0) ? (static_cast<float>(thumb->width) / static_cast<float>(thumb->height)) : 1.0f;
-            float drawW = maxW;
-            float drawH = maxW / aspect;
-            if (drawH > maxH) {
-                drawH = maxH;
-                drawW = maxH * aspect;
-            }
-            ImVec2 imgMin(std::floor(previewPos.x + (previewW - drawW) * 0.5f),
-                          std::floor(previewPos.y + (previewH - drawH) * 0.5f));
-            ImVec2 imgMax(imgMin.x + drawW, imgMin.y + drawH);
-
-            ImU32 tintCol = bypassed ? ColorToken(tokens.text.primary.r, tokens.text.primary.g, tokens.text.primary.b, 0.65f).u32 : tokens.text.primary.u32;
-            dl->AddImageRounded((ImTextureID)thumb->srv, imgMin, imgMax, ImVec2(0, 0), ImVec2(1, 1), tintCol, 4.0f);
-
-            if (isWindowOpen) {
-                const char* openTag = "● OPEN";
-                ImVec2 oSz = ImGui::CalcTextSize(openTag);
-                ImVec2 oPos(previewPos.x + previewW - oSz.x - 8.0f, previewPos.y + 6.0f);
-                dl->AddRectFilled(ImVec2(oPos.x - 3.0f, oPos.y - 1.0f),
-                                  ImVec2(oPos.x + oSz.x + 3.0f, oPos.y + oSz.y + 1.0f),
-                                  ColorToken(tokens.signal.active.r, tokens.signal.active.g, tokens.signal.active.b, 0.25f), 3.0f);
-                dl->AddText(oPos, tokens.signal.active, openTag);
-            }
-
-            if (isPreviewHovered) {
-                dl->AddRectFilled(previewPos, ImVec2(previewPos.x + previewW, previewPos.y + previewH), tokens.surfaces.modalOverlay, 5.0f);
-                const char* expandPrompt = isWindowOpen ? "FOCUS WINDOW ↗" : "EXPAND GUI ↗";
-                ImVec2 pSz = ImGui::CalcTextSize(expandPrompt);
-                ImVec2 pPos(previewPos.x + (previewW - pSz.x) * 0.5f, previewPos.y + (previewH - pSz.y) * 0.5f);
-                dl->AddRectFilled(ImVec2(pPos.x - 8.0f, pPos.y - 3.0f), ImVec2(pPos.x + pSz.x + 8.0f, pPos.y + pSz.y + 3.0f), tokens.surfaces.popupBg, 4.0f);
-                dl->AddText(pPos, tokens.text.primary, expandPrompt);
-            }
         } else {
-            // High-Tech Procedural Vector Waveform Faceplate
-            float midY = previewPos.y + previewH * 0.5f;
-            float leftX = previewPos.x + 16.0f;
-            float rightX = previewPos.x + previewW - 16.0f;
-
-            ImVec2 wavePts[16];
-            for (int w = 0; w < 16; ++w) {
-                float frac = w / 15.0f;
-                float x = leftX + frac * (rightX - leftX);
-                float y = midY - std::sin(frac * 6.2831853f * 2.0f) * 12.0f * (bypassed ? 0.3f : 1.0f);
-                wavePts[w] = ImVec2(x, y);
-            }
-            ImU32 waveCol = bypassed ? static_cast<ImU32>(tokens.text.muted) :
-                            (isPreviewHovered ? static_cast<ImU32>(tokens.text.accent) : static_cast<ImU32>(tokens.signal.active));
-            dl->AddPolyline(wavePts, 16, waveCol, 0, 1.8f);
-
-            const char* promptText = isWindowOpen ? "PARAMETERS OPEN" : "CLICK TO TWEAK DSP";
-            ImVec2 pSz = ImGui::CalcTextSize(promptText);
-            dl->AddText(ImVec2(previewPos.x + (previewW - pSz.x) * 0.5f, previewPos.y + 38.0f),
-                        isPreviewHovered ? tokens.text.primary.u32 : tokens.text.secondary.u32, promptText);
+            // Stylized vector hardware faceplate badge
+            std::string vendor = pluginInst ? pluginInst->vendor() : "Praccy Audio";
+            DeviceCategory cat = detectDeviceCategory(slot->name(), vendor);
+            DrawDeviceFaceplateBadge(dl, previewPos, ImVec2(previewW, previewH), cat, slot->name(), vendor, bypassed, isPreviewHovered, isWindowOpen);
         }
 
         // Crisp inner border stroke
         ImU32 frameBorder = (isFaulted || isMissing) ? static_cast<ImU32>(tokens.borders.cardFaulted) :
                             (isWindowOpen ? static_cast<ImU32>(tokens.borders.cardGlowOpen) :
-                            (bypassed ? static_cast<ImU32>(tokens.borders.subtle) : static_cast<ImU32>(tokens.signal.active)));
+                            (isPreviewHovered ? static_cast<ImU32>(tokens.borders.cardHovered) :
+                            (bypassed ? static_cast<ImU32>(tokens.borders.cardBypassed) : static_cast<ImU32>(tokens.borders.card))));
         dl->AddRect(previewPos, ImVec2(previewPos.x + previewW, previewPos.y + previewH), frameBorder, 5.0f, 0, 1.5f);
 
         if (previewClicked && !isFaulted && !isMissing) {
@@ -1556,11 +1553,6 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             m_focusedSlotIndex = slotIndex;
             if (hasGui) {
                 plugins::PluginWindowManager::instance().openPluginWindow(pluginInst);
-                HWND hw = plugins::PluginWindowManager::instance().getWindow(pluginInst);
-                if (hw) {
-                    ThumbnailManager::instance().captureWindow(slot->name(), hw);
-                    ThumbnailManager::instance().requestCapture(slot->name(), hw, 15);
-                }
             } else {
                 m_dspTweakSlot = (m_dspTweakSlot == slot) ? nullptr : slot;
             }
@@ -1595,8 +1587,16 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             char knobId[64];
             std::snprintf(knobId, sizeof(knobId), "##MacroKnob_%d_%d_%d_%d", slotIndex, blockIndex, branchIndex, m);
 
-            bool changed = renderRotaryKnob(knobId, &macro.currentValue, macro.minValue, macro.maxValue,
-                                           knobR, "%.1f", macro.defaultValue);
+            HardwareKnobOptions opt;
+            opt.radius = knobR;
+            opt.arcThickness = 2.0f;
+            opt.showValue = false;
+            opt.showLabel = false;
+            opt.unit = macro.isSlotTrim ? "dB" : (macro.isSlotMix ? "%" : "");
+
+            bool changed = DrawHardwareKnob(knobId, macro.label.c_str(), &macro.currentValue,
+                                            macro.minValue, macro.maxValue, macro.defaultValue,
+                                            "%.1f", opt);
 
             if (changed) {
                 if (macro.bound) {
@@ -1667,18 +1667,31 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                 ImGui::EndPopup();
             }
 
-            // Micro-label centered beneath knob
-            std::string dLabel = (m == 0 ? "GAIN" : (m == 1 ? "TONE" : (m == 2 ? "VOL" : "MIX")));
-            if (!macro.label.empty()) {
-                if (macro.label.size() <= 5) {
-                    dLabel = macro.label;
-                } else {
-                    dLabel = macro.label.substr(0, 4) + ".";
-                }
+            // Two-tier typography:
+            // Tier 1: Monospace value readout in g_fontMono
+            char valBuf[32];
+            const char* unitStr = macro.isSlotTrim ? "dB" : (macro.isSlotMix ? "%" : "");
+            if (unitStr[0] != '\0') {
+                char nBuf[24];
+                std::snprintf(nBuf, sizeof(nBuf), "%.1f", macro.currentValue);
+                std::snprintf(valBuf, sizeof(valBuf), "%s%s", nBuf, unitStr);
+            } else {
+                std::snprintf(valBuf, sizeof(valBuf), "%.1f", macro.currentValue);
             }
+            if (g_fontMono) ImGui::PushFont(g_fontMono);
+            ImVec2 vSz = ImGui::CalcTextSize(valBuf);
+            ImGui::SetCursorPos(ImVec2(colX + (colW - vSz.x) * 0.5f, 122.0f));
+            ImGui::TextColored(tokens.text.primary.vec4, "%s", valBuf);
+            if (g_fontMono) ImGui::PopFont();
+
+            // Tier 2: Pro-audio parameter label centered beneath value
+            std::string dLabel = formatMacroLabel(macro.label, m);
             ImVec2 lSz = ImGui::CalcTextSize(dLabel.c_str());
-            ImGui::SetCursorPos(ImVec2(colX + (colW - lSz.x) * 0.5f, 132.0f));
+            ImGui::SetCursorPos(ImVec2(colX + (colW - lSz.x) * 0.5f, 134.0f));
             ImGui::TextColored(tokens.text.secondary.vec4, "%s", dLabel.c_str());
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s (Macro %d)", macro.label.c_str(), m + 1);
+            }
         }
     }
 
@@ -1920,27 +1933,30 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
 
             // Mute Button
             bool m0 = br0->isMuted();
-            if (m0) ImGui::PushStyleColor(ImGuiCol_Button, tokens.signal.faulted.vec4);
-            if (CenteredButton("M##br0", ImVec2(24, 24))) { br0->setMuted(!m0); }
-            if (m0) ImGui::PopStyleColor();
+            {
+                ScopedStyleColor muteGuard(ImGuiCol_Button, tokens.signal.faulted.vec4, m0);
+                if (CenteredButton("M##br0", ImVec2(24, 24))) { br0->setMuted(!m0); }
+            }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip(m0 ? "Unmute Branch A" : "Mute Branch A");
 
             ImGui::SameLine(0, 4);
 
             // Solo Button
             bool s0 = br0->isSolo();
-            if (s0) ImGui::PushStyleColor(ImGuiCol_Button, tokens.signal.active.vec4);
-            if (CenteredButton("S##br0", ImVec2(24, 24))) { br0->setSolo(!s0); }
-            if (s0) ImGui::PopStyleColor();
+            {
+                ScopedStyleColor soloGuard(ImGuiCol_Button, tokens.signal.active.vec4, s0);
+                if (CenteredButton("S##br0", ImVec2(24, 24))) { br0->setSolo(!s0); }
+            }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip(s0 ? "Unsolo Branch A" : "Solo Branch A");
 
             ImGui::SameLine(0, 4);
 
             // Phase Invert Button
             bool p0 = br0->isPhaseInvert();
-            if (p0) ImGui::PushStyleColor(ImGuiCol_Button, tokens.text.accent.vec4);
-            if (CenteredButton("\xC3\x98##br0", ImVec2(24, 24))) { br0->setPhaseInvert(!p0); }
-            if (p0) ImGui::PopStyleColor();
+            {
+                ScopedStyleColor phaseGuard(ImGuiCol_Button, tokens.text.accent.vec4, p0);
+                if (CenteredButton("\xC3\x98##br0", ImVec2(24, 24))) { br0->setPhaseInvert(!p0); }
+            }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Phase Invert (180° Polarity Flip)");
 
             ImGui::SameLine(0, 8);
@@ -2076,27 +2092,30 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
 
             // Mute Button
             bool m1 = br1->isMuted();
-            if (m1) ImGui::PushStyleColor(ImGuiCol_Button, tokens.signal.faulted.vec4);
-            if (CenteredButton("M##br1", ImVec2(24, 24))) { br1->setMuted(!m1); }
-            if (m1) ImGui::PopStyleColor();
+            {
+                ScopedStyleColor muteGuard(ImGuiCol_Button, tokens.signal.faulted.vec4, m1);
+                if (CenteredButton("M##br1", ImVec2(24, 24))) { br1->setMuted(!m1); }
+            }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip(m1 ? "Unmute Branch B" : "Mute Branch B");
 
             ImGui::SameLine(0, 4);
 
             // Solo Button
             bool s1 = br1->isSolo();
-            if (s1) ImGui::PushStyleColor(ImGuiCol_Button, tokens.signal.active.vec4);
-            if (CenteredButton("S##br1", ImVec2(24, 24))) { br1->setSolo(!s1); }
-            if (s1) ImGui::PopStyleColor();
+            {
+                ScopedStyleColor soloGuard(ImGuiCol_Button, tokens.signal.active.vec4, s1);
+                if (CenteredButton("S##br1", ImVec2(24, 24))) { br1->setSolo(!s1); }
+            }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip(s1 ? "Unsolo Branch B" : "Solo Branch B");
 
             ImGui::SameLine(0, 4);
 
             // Phase Invert Button
             bool p1 = br1->isPhaseInvert();
-            if (p1) ImGui::PushStyleColor(ImGuiCol_Button, tokens.text.accent.vec4);
-            if (CenteredButton("\xC3\x98##br1", ImVec2(24, 24))) { br1->setPhaseInvert(!p1); }
-            if (p1) ImGui::PopStyleColor();
+            {
+                ScopedStyleColor phaseGuard(ImGuiCol_Button, tokens.text.accent.vec4, p1);
+                if (CenteredButton("\xC3\x98##br1", ImVec2(24, 24))) { br1->setPhaseInvert(!p1); }
+            }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Phase Invert (180° Polarity Flip)");
 
             ImGui::SameLine(0, 8);
@@ -2268,83 +2287,12 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
 }
 
 bool RackView::renderRotaryKnob(const char* label, float* value, float minVal, float maxVal, float radius, const char* format, float defaultVal) {
-    ImVec2 pos = ImGui::GetCursorScreenPos();
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImGuiIO& io = ImGui::GetIO();
-    const auto& tokens = themeTokens();
-
-    float diameter = radius * 2.0f;
-    ImVec2 center(pos.x + radius + 4.0f, pos.y + radius + 4.0f);
-
-    // Invisible button to capture drag & clicks
-    ImGui::InvisibleButton(label, ImVec2(diameter + 8.0f, diameter + 8.0f));
-    bool isHovered = ImGui::IsItemHovered();
-    bool isActive = ImGui::IsItemActive();
-
-    bool valueChanged = false;
-    ImGuiID knobId = ImGui::GetItemID();
-
-    if (s_suppressResetId == knobId) {
-        if (!io.MouseDown[0]) {
-            s_suppressResetId = 0;
-        } else {
-            *value = std::clamp(defaultVal, minVal, maxVal);
-        }
-    } else if (isActive) {
-        float speed = 0.005f * (maxVal - minVal);
-        float delta = -io.MouseDelta.y * speed;
-        if (delta != 0.0f) {
-            *value = std::clamp(*value + delta, minVal, maxVal);
-            valueChanged = true;
-        }
-    }
-
-    if (isHovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-        *value = std::clamp(defaultVal, minVal, maxVal);
-        s_suppressResetId = knobId;
-        ImGui::ClearActiveID();
-        valueChanged = true;
-    }
-
-    if (isHovered) {
-        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
-        char tip[64];
-        std::snprintf(tip, sizeof(tip), format, *value);
-        ImGui::SetTooltip("%s (Double-click to reset)", tip);
-    }
-
-    // Normalized value (0.0 to 1.0)
-    float norm = (*value - minVal) / (maxVal - minVal);
-    norm = std::clamp(norm, 0.0f, 1.0f);
-
-    // Knob Outer Shadow / Ring
-    dl->AddCircleFilled(center, radius + 2.0f, tokens.borders.shadow);
-    dl->AddCircle(center, radius + 2.0f, isActive ? tokens.borders.focus.u32 : (isHovered ? tokens.borders.cardHovered.u32 : tokens.borders.subtle.u32), 0, 1.5f);
-
-    // Dark brushed aluminum knob cap
-    dl->AddCircleFilled(center, radius, tokens.surfaces.cardBg);
-
-    // Outer Indicator Arc (135° to 405° = 270° sweep)
-    const float startAngle = 2.35619449f; // 135 deg in radians (3*pi/4)
-    const int arcSegments = 16;
-    for (int s = 0; s < arcSegments; ++s) {
-        float f1 = s / static_cast<float>(arcSegments);
-        float f2 = (s + 1) / static_cast<float>(arcSegments);
-        if (f1 > norm) break;
-        float a1 = startAngle + f1 * 4.71238898f;
-        float a2 = startAngle + std::min(norm, f2) * 4.71238898f;
-        dl->PathLineTo(ImVec2(center.x + std::cos(a1) * (radius - 1.0f), center.y + std::sin(a1) * (radius - 1.0f)));
-        dl->PathLineTo(ImVec2(center.x + std::cos(a2) * (radius - 1.0f), center.y + std::sin(a2) * (radius - 1.0f)));
-        dl->PathStroke(isActive ? tokens.text.accent.u32 : tokens.signal.active.u32, 0, 2.0f);
-    }
-
-    // Pointer notch / needle on the knob
-    float needleAngle = startAngle + norm * 4.71238898f;
-    ImVec2 needleInner(center.x + std::cos(needleAngle) * (radius * 0.35f), center.y + std::sin(needleAngle) * (radius * 0.35f));
-    ImVec2 needleOuter(center.x + std::cos(needleAngle) * (radius - 2.0f), center.y + std::sin(needleAngle) * (radius - 2.0f));
-    dl->AddLine(needleInner, needleOuter, tokens.text.primary, 2.0f);
-
-    return valueChanged;
+    HardwareKnobOptions opt;
+    opt.radius = radius;
+    opt.arcThickness = 2.0f;
+    opt.showValue = false;
+    opt.showLabel = false;
+    return DrawHardwareKnob(label, label, value, minVal, maxVal, defaultVal, format, opt);
 }
 
 void RackView::renderBottomBar() {
@@ -2352,13 +2300,16 @@ void RackView::renderBottomBar() {
     const auto& tokens = themeTokens();
 
     // Left side: Settings button (clean name without brackets)
-    ImGui::PushStyleColor(ImGuiCol_Button, tokens.surfaces.buttonBg.vec4);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, tokens.surfaces.buttonBgHovered.vec4);
-    ImGui::PushStyleColor(ImGuiCol_Text, tokens.text.primary.vec4);
-    if (CenteredButton("Settings", ImVec2(80.0f, 26.0f))) {
-        m_settingsModal->open();
+    {
+        ScopedStyleColor settingsGuard({
+            {ImGuiCol_Button, tokens.surfaces.buttonBg.vec4},
+            {ImGuiCol_ButtonHovered, tokens.surfaces.buttonBgHovered.vec4},
+            {ImGuiCol_Text, tokens.text.primary.vec4}
+        });
+        if (CenteredButton("Settings", ImVec2(80.0f, 26.0f))) {
+            m_settingsModal->open();
+        }
     }
-    ImGui::PopStyleColor(3);
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Open Audio, Plugin, and Host Settings");
     }
@@ -2366,60 +2317,60 @@ void RackView::renderBottomBar() {
     ImGui::SameLine(0, 8);
     // Practice Tools (Looper & Backing Track Player) toggle button
     bool toolsActive = m_practiceToolsModal && m_practiceToolsModal->isOpen();
-    if (toolsActive) {
-        ImGui::PushStyleColor(ImGuiCol_Button, tokens.surfaces.buttonBgActive.vec4);
-    }
-    if (CenteredButton("Practice Tools", ImVec2(105.0f, 26.0f))) {
-        m_practiceToolsModal->toggle();
-    }
-    if (toolsActive) {
-        ImGui::PopStyleColor();
+    {
+        ScopedStyleColor toolsGuard(ImGuiCol_Button, tokens.surfaces.buttonBgActive.vec4, toolsActive);
+        if (CenteredButton("Practice Tools", ImVec2(105.0f, 26.0f))) {
+            m_practiceToolsModal->toggle();
+        }
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Open Practice Tools (Riff Looper & WAV Backing Track Player)");
     }
 
     ImGui::SameLine(0, 8);
-    ImGui::PushStyleColor(ImGuiCol_Button, tokens.surfaces.buttonBg.vec4);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, tokens.surfaces.buttonBgHovered.vec4);
-    ImGui::PushStyleColor(ImGuiCol_Text, tokens.text.accent.vec4);
-    if (CenteredButton("★ Save Last Riff", ImVec2(125.0f, 26.0f))) {
-        saveLastRiff();
+    {
+        ScopedStyleColor saveRiffGuard({
+            {ImGuiCol_Button, tokens.surfaces.buttonBg.vec4},
+            {ImGuiCol_ButtonHovered, tokens.surfaces.buttonBgHovered.vec4},
+            {ImGuiCol_Text, tokens.text.accent.vec4}
+        });
+        if (CenteredButton("★ Save Last Riff", ImVec2(125.0f, 26.0f))) {
+            saveLastRiff();
+        }
     }
-    ImGui::PopStyleColor(3);
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("%s", "Export circular audio buffer to %USERPROFILE%\\Documents\\Praccy\\Riffs\\ (Ctrl+Shift+R)");
     }
 
     ImGui::SameLine(0, 8);
-    if (m_midiMapMode) {
-        ImGui::PushStyleColor(ImGuiCol_Button, tokens.surfaces.buttonBgActive.vec4);
-        ImGui::PushStyleColor(ImGuiCol_Border, tokens.borders.mapModeViolet.vec4);
-    }
-    if (CenteredButton("MIDI Map", ImVec2(75.0f, 26.0f))) {
-        m_midiMapMode = !m_midiMapMode;
-        if (m_midiMapMode) m_keyMapMode = false;
-        triggerHudToast(m_midiMapMode ? "MIDI MAP MODE: ACTIVE" : "MIDI MAP MODE: OFF");
-    }
-    if (m_midiMapMode) {
-        ImGui::PopStyleColor(2);
+    {
+        ScopedStyleColor mapColorGuard({
+            {ImGuiCol_Button, tokens.surfaces.buttonBgActive.vec4},
+            {ImGuiCol_Border, tokens.borders.mapModeViolet.vec4}
+        }, m_midiMapMode);
+
+        if (CenteredButton("MIDI Map", ImVec2(75.0f, 26.0f))) {
+            m_midiMapMode = !m_midiMapMode;
+            if (m_midiMapMode) m_keyMapMode = false;
+            triggerHudToast(m_midiMapMode ? "MIDI MAP MODE: ACTIVE" : "MIDI MAP MODE: OFF");
+        }
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Toggle MIDI Map Mode (Ctrl+M)");
     }
 
     ImGui::SameLine(0, 6);
-    if (m_keyMapMode) {
-        ImGui::PushStyleColor(ImGuiCol_Button, tokens.surfaces.buttonBgActive.vec4);
-        ImGui::PushStyleColor(ImGuiCol_Border, tokens.borders.mapModeViolet.vec4);
-    }
-    if (CenteredButton("Key Map", ImVec2(75.0f, 26.0f))) {
-        m_keyMapMode = !m_keyMapMode;
-        if (m_keyMapMode) m_midiMapMode = false;
-        triggerHudToast(m_keyMapMode ? "KEY MAP MODE: ACTIVE" : "KEY MAP MODE: OFF");
-    }
-    if (m_keyMapMode) {
-        ImGui::PopStyleColor(2);
+    {
+        ScopedStyleColor keyColorGuard({
+            {ImGuiCol_Button, tokens.surfaces.buttonBgActive.vec4},
+            {ImGuiCol_Border, tokens.borders.mapModeViolet.vec4}
+        }, m_keyMapMode);
+
+        if (CenteredButton("Key Map", ImVec2(75.0f, 26.0f))) {
+            m_keyMapMode = !m_keyMapMode;
+            if (m_keyMapMode) m_midiMapMode = false;
+            triggerHudToast(m_keyMapMode ? "KEY MAP MODE: ACTIVE" : "KEY MAP MODE: OFF");
+        }
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Toggle Key Map Mode (Ctrl+K)");
@@ -2704,6 +2655,213 @@ void RackView::renderUpdateModal() {
         }
         if (CenteredButton("Close", ImVec2(90, 26))) {
             m_showUpdateModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::EndPopup();
+    }
+}
+
+static std::string detectPresetSoundProfile(const std::string& name) {
+    std::string lower;
+    lower.resize(name.size());
+    std::transform(name.begin(), name.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    if (lower.find("metal") != std::string::npos || lower.find("djent") != std::string::npos ||
+        lower.find("lead") != std::string::npos || lower.find("high gain") != std::string::npos ||
+        lower.find("heavy") != std::string::npos || lower.find("shred") != std::string::npos ||
+        lower.find("5150") != std::string::npos) {
+        return "High Gain Metal";
+    }
+    if (lower.find("clean") != std::string::npos || lower.find("glassy") != std::string::npos ||
+        lower.find("chime") != std::string::npos || lower.find("chorus") != std::string::npos ||
+        lower.find("acoustic") != std::string::npos || lower.find("jazz") != std::string::npos) {
+        return "Glassy Clean";
+    }
+    if (lower.find("ambient") != std::string::npos || lower.find("shimmer") != std::string::npos ||
+        lower.find("space") != std::string::npos || lower.find("delay") != std::string::npos ||
+        lower.find("wash") != std::string::npos || lower.find("reverb") != std::string::npos ||
+        lower.find("ethereal") != std::string::npos) {
+        return "Ambient FX";
+    }
+    if (lower.find("breakup") != std::string::npos || lower.find("crunch") != std::string::npos ||
+        lower.find("blues") != std::string::npos || lower.find("drive") != std::string::npos ||
+        lower.find("boost") != std::string::npos || lower.find("overdrive") != std::string::npos ||
+        lower.find("plexi") != std::string::npos) {
+        return "Edge of Breakup";
+    }
+    return "Edge of Breakup";
+}
+
+void RackView::renderPresetBrowserModal() {
+    if (!m_showPresetBrowserModal) return;
+    const auto& tokens = themeTokens();
+
+    ImGui::OpenPopup("Preset Chain Browser##Modal");
+    ImGui::SetNextWindowSize(ImVec2(720, 500), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(600, 400), ImVec2(1400, 900));
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+
+    if (ImGui::BeginPopupModal("Preset Chain Browser##Modal", &m_showPresetBrowserModal, ImGuiWindowFlags_None)) {
+        ImGui::TextColored(tokens.text.accent.vec4, "PRESET CHAIN BROWSER");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Search-as-you-type fuzzy filter
+        ImGui::TextColored(tokens.text.muted.vec4, "SEARCH:");
+        ImGui::SameLine();
+        const float searchW = std::max(180.0f, ImGui::GetContentRegionAvail().x - 100.0f);
+        ImGui::SetNextItemWidth(searchW);
+        ImGui::InputTextWithHint("##PresetSearchInput", "Search presets by name or tone profile...", m_presetSearchFilter, sizeof(m_presetSearchFilter));
+
+        ImGui::SameLine();
+        if (CenteredButton("Clear##ClearFilter", ImVec2(70, 24))) {
+            m_presetSearchFilter[0] = '\0';
+        }
+
+        ImGui::Spacing();
+
+        // Sound Profile Filter Tags
+        const char* categories[] = {
+            "ALL",
+            "HIGH GAIN METAL",
+            "GLASSY CLEAN",
+            "AMBIENT FX",
+            "EDGE OF BREAKUP",
+            "FAVORITES *"
+        };
+        const int numCategories = sizeof(categories) / sizeof(categories[0]);
+
+        for (int c = 0; c < numCategories; ++c) {
+            bool isSelected = (m_selectedCategoryTagIndex == c);
+            ScopedStyleColor btnGuard(ImGuiCol_Button, isSelected ? tokens.surfaces.buttonBgActive.vec4 : tokens.surfaces.buttonBg.vec4);
+            ScopedStyleColor borderGuard(ImGuiCol_Border, isSelected ? tokens.borders.focus.vec4 : tokens.borders.subtle.vec4);
+
+            if (CenteredButton(categories[c])) {
+                m_selectedCategoryTagIndex = c;
+            }
+
+            if (c < numCategories - 1) {
+                ImGui::SameLine(0, 6);
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Preset Table inside scrollable child
+        const float footerHeight = 44.0f;
+        const float tableHeight = ImGui::GetContentRegionAvail().y - footerHeight;
+
+        if (ImGui::BeginChild("PresetListChild", ImVec2(0, tableHeight), true)) {
+            auto presetNames = m_scenes.savedPresetNames();
+
+            // Prepare lowercase filter string
+            std::string filterLower = m_presetSearchFilter;
+            std::transform(filterLower.begin(), filterLower.end(), filterLower.begin(),
+                           [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+
+            int displayedCount = 0;
+
+            if (ImGui::BeginTable("PresetTable", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+                ImGui::TableSetupColumn("Fav", ImGuiTableColumnFlags_WidthFixed, 38.0f);
+                ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 0.42f);
+                ImGui::TableSetupColumn("Category", ImGuiTableColumnFlags_WidthStretch, 0.32f);
+                ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+                ImGui::TableHeadersRow();
+
+                for (const auto& pName : presetNames) {
+                    std::string category = detectPresetSoundProfile(pName);
+                    bool isFav = m_favoritePresets.contains(pName);
+
+                    // Category Filter Check
+                    if (m_selectedCategoryTagIndex == 1 && category != "High Gain Metal") continue;
+                    if (m_selectedCategoryTagIndex == 2 && category != "Glassy Clean") continue;
+                    if (m_selectedCategoryTagIndex == 3 && category != "Ambient FX") continue;
+                    if (m_selectedCategoryTagIndex == 4 && category != "Edge of Breakup") continue;
+                    if (m_selectedCategoryTagIndex == 5 && !isFav) continue;
+
+                    // Text Search Check
+                    if (!filterLower.empty()) {
+                        std::string nameLower = pName;
+                        std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(),
+                                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+                        std::string catLower = category;
+                        std::transform(catLower.begin(), catLower.end(), catLower.begin(),
+                                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+
+                        if (nameLower.find(filterLower) == std::string::npos &&
+                            catLower.find(filterLower) == std::string::npos) {
+                            continue;
+                        }
+                    }
+
+                    displayedCount++;
+                    ImGui::TableNextRow();
+
+                    // Column 0: Favorite Star
+                    ImGui::TableNextColumn();
+                    const char* starStr = isFav ? "[*]##Fav_" : "[ ]##Fav_";
+                    std::string starId = std::string(starStr) + pName;
+                    {
+                        ScopedStyleColor starGuard(ImGuiCol_Text, isFav ? tokens.signal.active.vec4 : tokens.text.muted.vec4);
+                        if (ImGui::SmallButton(starId.c_str())) {
+                            if (isFav) m_favoritePresets.erase(pName);
+                            else m_favoritePresets.insert(pName);
+                        }
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(isFav ? "Remove from Favorites" : "Add to Favorites");
+                    }
+
+                    // Column 1: Preset Name
+                    ImGui::TableNextColumn();
+                    bool isAuditioned = (m_auditionedPreset == pName);
+                    if (isAuditioned) {
+                        ImGui::TextColored(tokens.signal.active.vec4, "> %s", pName.c_str());
+                    } else {
+                        ImGui::TextColored(tokens.text.primary.vec4, "%s", pName.c_str());
+                    }
+
+                    // Column 2: Category Badge
+                    ImGui::TableNextColumn();
+                    ImVec4 badgeCol = tokens.text.secondary.vec4;
+                    if (category == "High Gain Metal") badgeCol = tokens.signal.recording.vec4;
+                    else if (category == "Glassy Clean") badgeCol = tokens.text.accent.vec4;
+                    else if (category == "Ambient FX") badgeCol = tokens.signal.tunerFlat.vec4;
+                    else if (category == "Edge of Breakup") badgeCol = tokens.signal.overdubbing.vec4;
+
+                    ImGui::TextColored(badgeCol, "[%s]", category.c_str());
+
+                    // Column 3: One-Click Audition / Load
+                    ImGui::TableNextColumn();
+                    std::string btnId = "Audition##" + pName;
+                    if (CenteredButton(btnId.c_str(), ImVec2(90, 22))) {
+                        m_undoManager.pushSnapshot(
+                            state::SceneManager::captureGraphSnapshot(m_graph, "Preset: " + pName),
+                            "Preset: " + pName,
+                            state::UndoActionType::SceneSwitch
+                        );
+                        m_scenes.loadPresetChain(pName, m_graph);
+                        m_auditionedPreset = pName;
+                        triggerHudToast("Loaded preset: " + pName);
+                    }
+                }
+                ImGui::EndTable();
+            }
+
+            if (displayedCount == 0) {
+                ImGui::Spacing();
+                ImGui::TextDisabled("  No matching presets found.");
+            }
+        }
+        ImGui::EndChild();
+
+        ImGui::Separator();
+        ImGui::Spacing();
+        if (CenteredButton("Close", ImVec2(90, 26))) {
+            m_showPresetBrowserModal = false;
             ImGui::CloseCurrentPopup();
         }
 

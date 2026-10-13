@@ -67,6 +67,7 @@ public:
     SceneManager();
 
     void initializeDefaultScenes();
+    void initializeDefaultUserPresets();
 
     bool loadFromFile(const std::string& filePath = "");
     bool saveToFile(const std::string& filePath = "") const;
@@ -77,6 +78,7 @@ public:
     void savePresetChain(const std::string& name, audio::GraphEngine& graph);
     bool loadPresetChain(const std::string& name, audio::GraphEngine& graph);
     [[nodiscard]] std::vector<std::string> savedPresetNames() const;
+    [[nodiscard]] const ScenePreset* findUserPreset(const std::string& name) const;
 
     [[nodiscard]] int activeSceneIndex() const noexcept { return m_activeSceneIndex; }
     void setActiveSceneIndex(int idx) noexcept { m_activeSceneIndex = idx; }

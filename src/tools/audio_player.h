@@ -5,16 +5,30 @@
 #include <vector>
 #include <atomic>
 #include <mutex>
+#include <thread>
+#include <memory>
 #include <algorithm>
+#include <utility>
 
 namespace praccy::tools {
 
+struct AudioTrackBuffer {
+    std::vector<float> samplesL;
+    std::vector<float> samplesR;
+    std::string filePath;
+    std::string fileName;
+    size_t numFrames{0};
+    std::vector<std::pair<float, float>> waveformPeaks800;
+};
+
 class AudioPlayer {
 public:
-    AudioPlayer() = default;
+    AudioPlayer();
+    ~AudioPlayer();
 
     void prepare(double sampleRate);
     bool loadWavFile(const std::string& filePath);
+    bool loadWavFileSync(const std::string& filePath);
     void unload();
 
     void play();
@@ -30,29 +44,38 @@ public:
 
     [[nodiscard]] bool isPlaying() const noexcept { return m_isPlaying.load(std::memory_order_relaxed); }
     [[nodiscard]] bool isLoaded() const noexcept { return m_isLoaded.load(std::memory_order_relaxed); }
-    [[nodiscard]] const std::string& filePath() const noexcept { return m_filePath; }
-    [[nodiscard]] const std::string& fileName() const noexcept { return m_fileName; }
+    [[nodiscard]] bool isLoading() const noexcept { return m_isLoading.load(std::memory_order_relaxed); }
+    [[nodiscard]] float loadProgress() const noexcept { return m_loadProgress.load(std::memory_order_relaxed); }
+
+    [[nodiscard]] std::string filePath() const;
+    [[nodiscard]] std::string fileName() const;
     [[nodiscard]] double durationSeconds() const noexcept;
     [[nodiscard]] double positionSeconds() const noexcept;
     [[nodiscard]] float positionNormalized() const noexcept;
+    [[nodiscard]] std::vector<std::pair<float, float>> waveformPeaks800() const;
 
     void process(audio::AudioBufferView& output);
 
 private:
-    double m_sampleRate{48000.0};
-    std::string m_filePath;
-    std::string m_fileName;
+    bool executeLoad(const std::string& filePath, std::stop_token stopToken);
 
-    std::vector<float> m_samplesL;
-    std::vector<float> m_samplesR;
+    double m_sampleRate{48000.0};
     std::atomic<size_t> m_playhead{0};
 
     std::atomic<bool> m_isPlaying{false};
     std::atomic<bool> m_isLoaded{false};
+    std::atomic<bool> m_isLoading{false};
+    std::atomic<float> m_loadProgress{0.0f};
     std::atomic<bool> m_looping{true};
     std::atomic<float> m_volume{1.0f};
 
-    std::mutex m_loadMutex;
+    std::atomic<AudioTrackBuffer*> m_activeBuffer{nullptr};
+    mutable std::mutex m_metadataMutex;
+    std::string m_cachedFilePath;
+    std::string m_cachedFileName;
+    std::vector<std::pair<float, float>> m_cachedPeaks800;
+
+    std::jthread m_workerThread;
 };
 
 } // namespace praccy::tools

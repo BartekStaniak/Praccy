@@ -385,6 +385,160 @@ std::vector<std::string> SceneManager::savedPresetNames() const {
     return names;
 }
 
+const ScenePreset* SceneManager::findUserPreset(const std::string& name) const {
+    for (const auto& p : m_userPresets) {
+        if (p.name == name) return &p;
+    }
+    return nullptr;
+}
+
+void SceneManager::initializeDefaultUserPresets() {
+    // Purge obsolete raw test presets ("ss", "aa", "b") from prior iterations
+    m_userPresets.erase(std::remove_if(m_userPresets.begin(), m_userPresets.end(), [](const ScenePreset& p) {
+        return p.name == "ss" || p.name == "aa" || p.name == "b";
+    }), m_userPresets.end());
+
+    auto hasPreset = [this](const std::string& name) {
+        for (const auto& p : m_userPresets) {
+            if (p.name == name) return true;
+        }
+        return false;
+    };
+
+    auto addIfMissing = [this, &hasPreset](ScenePreset p) {
+        if (!hasPreset(p.name)) {
+            m_userPresets.push_back(std::move(p));
+        }
+    };
+
+    // 1. High Gain Metal: Djent Rig
+    {
+        ScenePreset p;
+        p.name = "Modern High Gain Djent";
+        p.nodes.push_back(NodePreset{
+            .kind = NodePreset::Kind::Plugin,
+            .slot = PluginSlotPreset{.name = "Praccy Drive", .path = "builtin://drive", .type = "BuiltIn", .dryWet = 1.0f}
+        });
+        p.nodes.push_back(NodePreset{
+            .kind = NodePreset::Kind::Plugin,
+            .slot = PluginSlotPreset{.name = "Praccy Amp Sim", .path = "builtin://amp", .type = "BuiltIn", .dryWet = 1.0f}
+        });
+        addIfMissing(std::move(p));
+    }
+
+    // 2. Glassy Clean: Studio Clean
+    {
+        ScenePreset p;
+        p.name = "California Glassy Clean";
+        p.nodes.push_back(NodePreset{
+            .kind = NodePreset::Kind::Plugin,
+            .slot = PluginSlotPreset{.name = "Praccy Amp Sim", .path = "builtin://amp", .type = "BuiltIn", .dryWet = 1.0f}
+        });
+        p.nodes.push_back(NodePreset{
+            .kind = NodePreset::Kind::Plugin,
+            .slot = PluginSlotPreset{.name = "Praccy Stereo Delay", .path = "builtin://delay", .type = "BuiltIn", .dryWet = 0.20f}
+        });
+        addIfMissing(std::move(p));
+    }
+
+    // 3. Edge of Breakup: Dynamic Crunch
+    {
+        ScenePreset p;
+        p.name = "Edge of Breakup Crunch";
+        p.nodes.push_back(NodePreset{
+            .kind = NodePreset::Kind::Plugin,
+            .slot = PluginSlotPreset{.name = "Praccy Drive", .path = "builtin://drive", .type = "BuiltIn", .dryWet = 0.60f}
+        });
+        p.nodes.push_back(NodePreset{
+            .kind = NodePreset::Kind::Plugin,
+            .slot = PluginSlotPreset{.name = "Praccy Amp Sim", .path = "builtin://amp", .type = "BuiltIn", .dryWet = 1.0f}
+        });
+        addIfMissing(std::move(p));
+    }
+
+    // 4. Ambient FX: Space Wash (Parallel Split)
+    {
+        ScenePreset p;
+        p.name = "Post-Rock Ambient FX";
+        NodePreset split;
+        split.kind = NodePreset::Kind::ParallelBlock;
+        BranchPreset bA;
+        bA.name = "Branch A (Dry Amp)";
+        bA.slots.push_back(PluginSlotPreset{.name = "Praccy Amp Sim", .path = "builtin://amp", .type = "BuiltIn"});
+        BranchPreset bB;
+        bB.name = "Branch B (Ambient Delay)";
+        bB.slots.push_back(PluginSlotPreset{.name = "Praccy Stereo Delay", .path = "builtin://delay", .type = "BuiltIn", .dryWet = 0.85f});
+        split.branches.push_back(std::move(bA));
+        split.branches.push_back(std::move(bB));
+        p.nodes.push_back(std::move(split));
+        addIfMissing(std::move(p));
+    }
+
+    // 5. High Gain Metal: Shred Solo
+    {
+        ScenePreset p;
+        p.name = "Heavy Metal Shred Lead";
+        p.nodes.push_back(NodePreset{
+            .kind = NodePreset::Kind::Plugin,
+            .slot = PluginSlotPreset{.name = "Praccy Drive", .path = "builtin://drive", .type = "BuiltIn", .dryWet = 0.90f}
+        });
+        p.nodes.push_back(NodePreset{
+            .kind = NodePreset::Kind::Plugin,
+            .slot = PluginSlotPreset{.name = "Praccy Amp Sim", .path = "builtin://amp", .type = "BuiltIn", .dryWet = 1.0f}
+        });
+        p.nodes.push_back(NodePreset{
+            .kind = NodePreset::Kind::Plugin,
+            .slot = PluginSlotPreset{.name = "Praccy Stereo Delay", .path = "builtin://delay", .type = "BuiltIn", .dryWet = 0.40f}
+        });
+        addIfMissing(std::move(p));
+    }
+
+    // 6. Glassy Clean: Liquid Chime
+    {
+        ScenePreset p;
+        p.name = "Liquid Chime Clean";
+        p.nodes.push_back(NodePreset{
+            .kind = NodePreset::Kind::Plugin,
+            .slot = PluginSlotPreset{.name = "Praccy Amp Sim", .path = "builtin://amp", .type = "BuiltIn", .dryWet = 1.0f}
+        });
+        p.nodes.push_back(NodePreset{
+            .kind = NodePreset::Kind::Plugin,
+            .slot = PluginSlotPreset{.name = "Praccy Stereo Delay", .path = "builtin://delay", .type = "BuiltIn", .dryWet = 0.35f}
+        });
+        addIfMissing(std::move(p));
+    }
+
+    // 7. Edge of Breakup: Texas Blues
+    {
+        ScenePreset p;
+        p.name = "Texas Blues Overdrive";
+        p.nodes.push_back(NodePreset{
+            .kind = NodePreset::Kind::Plugin,
+            .slot = PluginSlotPreset{.name = "Praccy Drive", .path = "builtin://drive", .type = "BuiltIn", .dryWet = 0.45f}
+        });
+        p.nodes.push_back(NodePreset{
+            .kind = NodePreset::Kind::Plugin,
+            .slot = PluginSlotPreset{.name = "Praccy Amp Sim", .path = "builtin://amp", .type = "BuiltIn", .dryWet = 1.0f}
+        });
+        addIfMissing(std::move(p));
+    }
+
+    // 8. Ambient FX: Cosmic Wash
+    {
+        ScenePreset p;
+        p.name = "Cosmic Wash Shimmer";
+        p.nodes.push_back(NodePreset{
+            .kind = NodePreset::Kind::Plugin,
+            .slot = PluginSlotPreset{.name = "Praccy Amp Sim", .path = "builtin://amp", .type = "BuiltIn", .dryWet = 1.0f}
+        });
+        p.nodes.push_back(NodePreset{
+            .kind = NodePreset::Kind::Plugin,
+            .slot = PluginSlotPreset{.name = "Praccy Stereo Delay", .path = "builtin://delay", .type = "BuiltIn", .dryWet = 0.90f}
+        });
+        addIfMissing(std::move(p));
+    }
+}
+
 static void serializePreset(std::ostream& os, const ScenePreset& p, const std::string& sectionPrefix) {
     os << "[" << sectionPrefix << "]\n";
     os << "name=" << p.name << "\n";
@@ -553,6 +707,7 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
         if (!sections.count(sec)) break;
         m_userPresets.push_back(parsePreset(sections[sec]));
     }
+    initializeDefaultUserPresets();
 
     return true;
 }

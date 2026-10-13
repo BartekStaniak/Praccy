@@ -30,3 +30,9 @@ Thumbs.db
 imgui.ini
 third_party/pluginterfaces
 dist/
+
+# Python cache & test temp artifacts
+__pycache__/
+*.pyc
+test_extract_temp/
+test_archive_temp.zip
