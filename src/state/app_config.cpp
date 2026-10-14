@@ -89,6 +89,7 @@ bool AppConfig::load(const std::string& customPath) {
             themeId = std::clamp(utils::parseInteger<int>(val, 0), 0, 3);
         } else if (key == "window_x") {
             windowX = utils::parseInteger<int>(val, 100);
+        } else if (key == "window_y") {
             windowY = utils::parseInteger<int>(val, 100);
         } else if (key == "window_w") {
             windowW = utils::parseInteger<int>(val, 1280);

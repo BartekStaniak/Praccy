@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 if(WIN32)
-    find_program(RC_EXE NAMES windres.exe x86_64-w64-mingw32-windres.exe HINTS "C:/Users/Bartek/w64devkit/bin")
+    find_program(RC_EXE NAMES windres.exe x86_64-w64-mingw32-windres.exe)
     if(RC_EXE)
         set(CMAKE_RC_COMPILER "${RC_EXE}" CACHE FILEPATH "Resource compiler" FORCE)
     endif()
@@ -197,7 +197,7 @@ target_link_libraries(test_asio_driver PRIVATE ole32 uuid user32 gdi32 winmm avr
 if(MSVC)
     target_compile_options(test_asio_driver PRIVATE /O2 /W4 /WX /permissive-)
 else()
-    target_compile_options(test_asio_driver PRIVATE -O3 -Wall -Wextra -Wno-unused-parameter -Wno-mismatched-new-delete)
+    target_compile_options(test_asio_driver PRIVATE -O3 -Wall -Wextra -Werror -Wno-unused-parameter)
 endif()
 
 add_executable(test_challenger_m1
@@ -332,6 +332,27 @@ else()
     target_compile_options(test_challenger_m2_1 PRIVATE -O3 -Wall -Wextra -Werror -Wno-unused-parameter)
 endif()
 add_test(NAME test_challenger_m2_1 COMMAND test_challenger_m2_1)
+
+add_executable(test_challenger_m2_2
+    tests/test_challenger_m2_2.cpp
+    src/audio/graph_engine.cpp
+    src/state/app_config.cpp
+)
+target_include_directories(test_challenger_m2_2 PRIVATE
+    src
+    tests
+)
+target_include_directories(test_challenger_m2_2 SYSTEM PRIVATE
+    third_party
+    third_party/readerwriterqueue
+)
+target_link_libraries(test_challenger_m2_2 PRIVATE ole32 uuid user32 gdi32 winmm avrt)
+if(MSVC)
+    target_compile_options(test_challenger_m2_2 PRIVATE /O2 /W4 /WX /permissive-)
+else()
+    target_compile_options(test_challenger_m2_2 PRIVATE -O3 -Wall -Wextra -Werror -Wno-unused-parameter)
+endif()
+add_test(NAME test_challenger_m2_2 COMMAND test_challenger_m2_2)
 
 add_executable(test_challenger_m3_1
     tests/test_challenger_m3_1.cpp
@@ -472,7 +493,7 @@ target_link_libraries(test_praccy_v2_1 PRIVATE ole32 uuid user32 gdi32 winmm avr
 if(MSVC)
     target_compile_options(test_praccy_v2_1 PRIVATE /O2 /W4 /WX /permissive-)
 else()
-    target_compile_options(test_praccy_v2_1 PRIVATE -O3 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-missing-field-initializers $<$<COMPILE_LANGUAGE:CXX>:-Wno-mismatched-new-delete>)
+    target_compile_options(test_praccy_v2_1 PRIVATE -O3 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-missing-field-initializers)
 endif()
 add_test(NAME test_praccy_v2_1 COMMAND test_praccy_v2_1)
 
@@ -544,9 +565,58 @@ target_link_libraries(test_interop_roundtrip PRIVATE ole32 uuid user32 gdi32 win
 if(MSVC)
     target_compile_options(test_interop_roundtrip PRIVATE /O2 /W4 /WX /permissive-)
 else()
-    target_compile_options(test_interop_roundtrip PRIVATE -O3 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-missing-field-initializers $<$<COMPILE_LANGUAGE:CXX>:-Wno-mismatched-new-delete>)
+    target_compile_options(test_interop_roundtrip PRIVATE -O3 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-missing-field-initializers)
 endif()
 add_test(NAME test_interop_roundtrip COMMAND test_interop_roundtrip --all)
+
+add_executable(test_challenger_stage1_2
+    tests/test_challenger_stage1_2.cpp
+    src/utils/archive_utils.cpp
+    src/state/undo_manager.cpp
+    third_party/miniz/miniz.c
+    third_party/imgui/imgui.cpp
+    third_party/imgui/imgui_draw.cpp
+    third_party/imgui/imgui_tables.cpp
+    third_party/imgui/imgui_widgets.cpp
+)
+target_include_directories(test_challenger_stage1_2 PRIVATE
+    src
+    tests
+)
+target_include_directories(test_challenger_stage1_2 SYSTEM PRIVATE
+    third_party
+    third_party/miniz
+    third_party/imgui
+)
+target_link_libraries(test_challenger_stage1_2 PRIVATE ole32 uuid user32 gdi32 winmm avrt)
+if(MSVC)
+    target_compile_options(test_challenger_stage1_2 PRIVATE /O2 /W4 /WX /permissive-)
+else()
+    target_compile_options(test_challenger_stage1_2 PRIVATE -O3 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-missing-field-initializers)
+endif()
+add_test(NAME test_challenger_stage1_2 COMMAND test_challenger_stage1_2)
+
+add_executable(test_challenger_stage1_audio
+    tests/test_challenger_stage1_audio.cpp
+    src/audio/graph_engine.cpp
+    src/state/app_config.cpp
+)
+target_include_directories(test_challenger_stage1_audio PRIVATE
+    src
+    tests
+)
+target_include_directories(test_challenger_stage1_audio SYSTEM PRIVATE
+    third_party
+    third_party/readerwriterqueue
+)
+target_link_libraries(test_challenger_stage1_audio PRIVATE ole32 uuid user32 gdi32 winmm avrt)
+if(MSVC)
+    target_compile_options(test_challenger_stage1_audio PRIVATE /O2 /W4 /WX /permissive-)
+else()
+    target_compile_options(test_challenger_stage1_audio PRIVATE -O3 -Wall -Wextra -Werror -Wno-unused-parameter)
+endif()
+add_test(NAME test_challenger_stage1_audio COMMAND test_challenger_stage1_audio)
+
 
 
 

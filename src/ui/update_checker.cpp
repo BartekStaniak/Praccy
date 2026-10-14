@@ -31,7 +31,7 @@ bool extractZipArchive(const std::filesystem::path& zipPath,
     guards.maxArchiveTotalSize = 500ULL * 1024 * 1024;
     guards.maxFileCount = 10000;
     guards.maxXmlSize = 30ULL * 1024 * 1024;
-    guards.maxCompressionRatio = 0; // Disabled for large binary update packages
+    guards.maxCompressionRatio = 100; // 100:1 ratio guard
     return praccy::utils::extractZipArchive(zipPath, destDir, outError, guards);
 }
 
@@ -139,7 +139,7 @@ void UpdateChecker::checkForUpdates(bool includeBeta) {
 
 void UpdateChecker::runCheck(bool includeBeta) {
     UpdateInfo result;
-    result.currentVersion = "v2.5-beta1";
+    result.currentVersion = "v2.5-beta2";
     result.isBeta = includeBeta;
 
     // Helper lambda to parse release asset from a release JSON snippet
@@ -265,7 +265,9 @@ void UpdateChecker::runDownload() {
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         downloadUrl = m_info.assetUrl;
-        assetName = m_info.assetName.empty() ? "Praccy-update.zip" : m_info.assetName;
+        std::string rawName = m_info.assetName.empty() ? "Praccy-update.zip" : m_info.assetName;
+        assetName = std::filesystem::path(rawName).filename().string();
+        if (assetName.empty()) assetName = "Praccy-update.zip";
         expectedSize = m_info.totalBytes;
     }
 
@@ -300,6 +302,20 @@ void UpdateChecker::runDownload() {
         m_info.status = UpdateStatus::Error;
         m_info.errorMessage = "Failed to connect to asset download server.";
         return;
+    }
+
+    // Verify HTTP 200 status code
+    DWORD statusCode = 0;
+    DWORD statusSize = sizeof(statusCode);
+    if (HttpQueryInfoA(hUrl, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &statusCode, &statusSize, nullptr)) {
+        if (statusCode != 200) {
+            InternetCloseHandle(hUrl);
+            InternetCloseHandle(hInternet);
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_info.status = UpdateStatus::Error;
+            m_info.errorMessage = "Download server returned HTTP status " + std::to_string(statusCode);
+            return;
+        }
     }
 
     // Try to get total content length if not known
@@ -423,8 +439,15 @@ bool UpdateChecker::applyUpdateAndRestart() {
     if (ok) {
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
-        // Cleanly exit current application process
-        ExitProcess(0);
+        // Post WM_CLOSE to main application window rather than abrupt ExitProcess while audio may be streaming
+        HWND hMain = GetActiveWindow();
+        if (!hMain) hMain = FindWindowW(nullptr, L"Praccy");
+        if (hMain) {
+            PostMessageW(hMain, WM_CLOSE, 0, 0);
+        } else {
+            ExitProcess(0);
+        }
+        return true;
     }
 
     return false;

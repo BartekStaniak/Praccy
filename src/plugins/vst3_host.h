@@ -34,10 +34,13 @@ public:
     [[nodiscard]] const std::string& vendor() const noexcept override { return m_vendor; }
     [[nodiscard]] const std::string& version() const noexcept override { return m_version; }
     [[nodiscard]] const std::string& path() const noexcept override { return m_path; }
+    [[nodiscard]] const std::string& bundleFileName() const noexcept override { return m_bundleFileName; }
+    [[nodiscard]] const std::string& classGuid() const noexcept override { return m_classGuid; }
 
     [[nodiscard]] size_t numParameters() const noexcept override;
     [[nodiscard]] PluginParameterDesc getParameterDesc(size_t index) const override;
     void setParameterValue(uint32_t paramId, float value) override;
+    void setParameterFromAudioThread(uint32_t paramId, float value) noexcept override;
     [[nodiscard]] float getParameterValue(uint32_t paramId) const override;
 
     [[nodiscard]] bool hasCustomGui() const noexcept override;
@@ -61,6 +64,8 @@ private:
     Steinberg::IPlugView* m_plugView{nullptr};
 
     std::string m_path;
+    std::string m_bundleFileName;
+    std::string m_classGuid;
     std::string m_name{"VST3 Plugin"};
     std::string m_vendor{"Steinberg VST3"};
     std::string m_version{"1.0.0"};

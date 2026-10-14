@@ -138,11 +138,27 @@ std::optional<ScenePreset> DawprojectAdapter::parseToScene(const std::filesystem
         }
 
         if (!stateRelPath.empty()) {
-            auto fullStatePath = tempDir / stateRelPath;
-            if (std::filesystem::exists(fullStatePath)) {
-                std::ifstream sf(fullStatePath, std::ios::binary);
-                if (sf.is_open()) {
-                    slot.state.assign((std::istreambuf_iterator<char>(sf)), std::istreambuf_iterator<char>());
+            std::filesystem::path safeRel;
+            if (utils::sanitizeZipPath(stateRelPath, safeRel)) {
+                std::error_code ec1, ec2;
+                auto canTemp = std::filesystem::weakly_canonical(tempDir, ec1);
+                auto canTarget = std::filesystem::weakly_canonical(tempDir / safeRel, ec2);
+                if (!ec1 && !ec2) {
+                    auto tempIt = canTemp.begin();
+                    auto targetIt = canTarget.begin();
+                    bool isSubpath = true;
+                    for (; tempIt != canTemp.end(); ++tempIt, ++targetIt) {
+                        if (targetIt == canTarget.end() || *tempIt != *targetIt) {
+                            isSubpath = false;
+                            break;
+                        }
+                    }
+                    if (isSubpath && std::filesystem::exists(canTarget)) {
+                        std::ifstream sf(canTarget, std::ios::binary);
+                        if (sf.is_open()) {
+                            slot.state.assign((std::istreambuf_iterator<char>(sf)), std::istreambuf_iterator<char>());
+                        }
+                    }
                 }
             }
         }
@@ -226,28 +242,31 @@ bool DawprojectAdapter::exportFromScene(const ScenePreset& scene, const std::fil
 
     int plugIdx = 0;
     auto writePluginXml = [&](const PluginSlotPreset& slot) {
-        std::string uuidStr = utils::GuidUtils::toDawprojectUuidString(slot.classGuid);
-        if (uuidStr.empty()) {
-            // Generate deterministic mock UUID if classGuid is empty
+        std::string classUuidStr = utils::GuidUtils::toDawprojectUuidString(slot.classGuid);
+        if (classUuidStr.empty()) {
             char buf[64];
-            std::snprintf(buf, sizeof(buf), "00000000-0000-0000-0000-%012d", ++plugIdx);
-            uuidStr = buf;
+            std::snprintf(buf, sizeof(buf), "00000000-0000-0000-0000-%012d", plugIdx + 1);
+            classUuidStr = buf;
         }
 
-        px << "          <plugin id=\"" << uuidStr << "\" name=\""
+        const int currentIdx = ++plugIdx;
+        std::string instanceId = "slot_" + std::to_string(currentIdx) + "_" + classUuidStr;
+        std::string stateDirRel = "plugins/" + instanceId;
+
+        px << "          <plugin id=\"" << instanceId << "\" name=\""
            << utils::XmlParser::encodeEntities(slot.name) << "\" deviceRole=\"audioEffect\">\n";
         px << "            <pluginFormat>" << (slot.type == "CLAP" ? "clap" : "vst3") << "</pluginFormat>\n";
-        px << "            <identifier>" << uuidStr << "</identifier>\n";
+        px << "            <identifier>" << classUuidStr << "</identifier>\n";
 
         if (!slot.state.empty()) {
-            auto slotPlugDir = pluginsDir / uuidStr;
+            auto slotPlugDir = tempDir / stateDirRel;
             std::filesystem::create_directories(slotPlugDir, ec);
             auto stateFilePath = slotPlugDir / "state.bin";
             std::ofstream sf(stateFilePath, std::ios::binary | std::ios::trunc);
             if (sf.is_open()) {
                 sf.write(reinterpret_cast<const char*>(slot.state.data()), slot.state.size());
             }
-            px << "            <stateFile>plugins/" << uuidStr << "/state.bin</stateFile>\n";
+            px << "            <stateFile>" << stateDirRel << "/state.bin</stateFile>\n";
         }
         px << "          </plugin>\n";
     };

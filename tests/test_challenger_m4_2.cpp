@@ -3,6 +3,7 @@
 #include <vector>
 #include <string>
 #include <cstring>
+#undef NDEBUG
 #include <cassert>
 #include <cmath>
 #include <algorithm>

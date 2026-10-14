@@ -175,7 +175,7 @@ inline void DrawDeviceFaceplateBadge(
                 ImVec2 tBot(tx, artY + 8.0f);
                 dl->AddLine(tTop, tBot, isBypassed ? tokens.text.muted.u32 : tokens.text.accent.u32, 2.2f);
                 if (!isBypassed) {
-                    dl->AddCircleFilled(ImVec2(tx, artY), 3.5f, ColorToken(tokens.text.accent.r, tokens.text.accent.g, tokens.text.accent.b, 0.35f).u32);
+                    dl->AddCircleFilled(ImVec2(tx, artY), 3.5f, tokens.text.accent.withAlpha(0.35f).u32);
                 }
             }
             break;
@@ -232,8 +232,8 @@ inline void DrawDeviceFaceplateBadge(
 
             // Ripple arcs
             if (!isBypassed) {
-                dl->AddCircle(pCenter, 8.0f, ColorToken(tokens.signal.active.r, tokens.signal.active.g, tokens.signal.active.b, 0.45f).u32, 0, 1.0f);
-                dl->AddCircle(pCenter, 13.0f, ColorToken(tokens.signal.active.r, tokens.signal.active.g, tokens.signal.active.b, 0.25f).u32, 0, 1.0f);
+                dl->AddCircle(pCenter, 8.0f, tokens.signal.active.withAlpha(0.45f).u32, 0, 1.0f);
+                dl->AddCircle(pCenter, 13.0f, tokens.signal.active.withAlpha(0.25f).u32, 0, 1.0f);
             }
             break;
         }
@@ -300,7 +300,7 @@ inline void DrawDeviceFaceplateBadge(
         ImVec2 oPos(pos.x + W - oSz.x - 8.0f, pos.y + 6.0f);
         dl->AddRectFilled(ImVec2(oPos.x - 3.0f, oPos.y - 1.0f),
                           ImVec2(oPos.x + oSz.x + 3.0f, oPos.y + oSz.y + 1.0f),
-                          ColorToken(tokens.signal.active.r, tokens.signal.active.g, tokens.signal.active.b, 0.25f).u32, 3.0f);
+                          tokens.signal.active.withAlpha(0.25f).u32, 3.0f);
         dl->AddText(oPos, tokens.signal.active.u32, openTag);
     }
 

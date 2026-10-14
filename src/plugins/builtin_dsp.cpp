@@ -1,5 +1,6 @@
 #include "builtin_dsp.h"
 #include <algorithm>
+#include <cstring>
 
 namespace praccy::plugins {
 
@@ -68,6 +69,23 @@ void OverdriveEffect::process(audio::AudioProcessContext& ctx) {
         }
         m_filterState[ch % 2] = state;
     }
+}
+
+std::vector<uint8_t> OverdriveEffect::saveState() const {
+    std::vector<uint8_t> data(3 * sizeof(float));
+    float vals[3] = {m_drive, m_tone, m_level};
+    std::memcpy(data.data(), vals, sizeof(vals));
+    return data;
+}
+
+bool OverdriveEffect::loadState(const std::vector<uint8_t>& state) {
+    if (state.size() < 3 * sizeof(float)) return false;
+    float vals[3];
+    std::memcpy(vals, state.data(), sizeof(vals));
+    setParameterValue(0, vals[0]);
+    setParameterValue(1, vals[1]);
+    setParameterValue(2, vals[2]);
+    return true;
 }
 
 // ==========================================
@@ -139,6 +157,24 @@ void TubeAmpEffect::process(audio::AudioProcessContext& ctx) {
             out[s] = cab * master;
         }
     }
+}
+
+std::vector<uint8_t> TubeAmpEffect::saveState() const {
+    std::vector<uint8_t> data(4 * sizeof(float));
+    float vals[4] = {m_gain, m_bass, m_treble, m_master};
+    std::memcpy(data.data(), vals, sizeof(vals));
+    return data;
+}
+
+bool TubeAmpEffect::loadState(const std::vector<uint8_t>& state) {
+    if (state.size() < 4 * sizeof(float)) return false;
+    float vals[4];
+    std::memcpy(vals, state.data(), sizeof(vals));
+    setParameterValue(0, vals[0]);
+    setParameterValue(1, vals[1]);
+    setParameterValue(2, vals[2]);
+    setParameterValue(3, vals[3]);
+    return true;
 }
 
 // ==========================================
@@ -224,6 +260,23 @@ void StereoDelayEffect::process(audio::AudioProcessContext& ctx) {
 
         m_writePos = (m_writePos + 1) % bufSize;
     }
+}
+
+std::vector<uint8_t> StereoDelayEffect::saveState() const {
+    std::vector<uint8_t> data(3 * sizeof(float));
+    float vals[3] = {m_timeMs, m_feedback, m_mix};
+    std::memcpy(data.data(), vals, sizeof(vals));
+    return data;
+}
+
+bool StereoDelayEffect::loadState(const std::vector<uint8_t>& state) {
+    if (state.size() < 3 * sizeof(float)) return false;
+    float vals[3];
+    std::memcpy(vals, state.data(), sizeof(vals));
+    setParameterValue(0, vals[0]);
+    setParameterValue(1, vals[1]);
+    setParameterValue(2, vals[2]);
+    return true;
 }
 
 } // namespace praccy::plugins

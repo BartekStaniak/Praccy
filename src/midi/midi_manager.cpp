@@ -6,7 +6,11 @@
 namespace praccy::midi {
 
 MidiManager::MidiManager() {
-    std::memset(m_ccTable, 0, sizeof(m_ccTable));
+    for (auto& row : m_ccTable) {
+        for (auto& slot : row) {
+            slot = FlatCcBinding{};
+        }
+    }
 }
 
 MidiManager::~MidiManager() {
@@ -65,9 +69,9 @@ void MidiManager::addBinding(const MidiBinding& binding) {
             slot.paramId = static_cast<uint32_t>(binding.targetSlotIndex >= 0 ? binding.targetSlotIndex : 0);
             slot.minVal = 0.0f;
             slot.maxVal = 1.0f;
-            slot.binding = binding;
+            slot.binding.fromMidiBinding(binding);
             if (slot.count < MAX_BINDINGS_PER_CC) {
-                slot.bindings[slot.count++] = binding;
+                slot.bindings[slot.count++].fromMidiBinding(binding);
             }
         }
     }
@@ -82,11 +86,13 @@ void MidiManager::addCcBinding(uint8_t channel, uint8_t cc, uint32_t paramId, fl
     slot.paramId = paramId;
     slot.minVal = minVal;
     slot.maxVal = maxVal;
-    slot.binding.id = "cc_" + std::to_string(channel) + "_" + std::to_string(cc);
-    slot.binding.targetType = BindingTargetType::SlotOutputGain;
-    slot.binding.midiChannel = channel;
-    slot.binding.triggerType = MidiMessageType::ControlChange;
-    slot.binding.triggerNumber = cc;
+    MidiBinding tempB;
+    tempB.id = "cc_" + std::to_string(channel) + "_" + std::to_string(cc);
+    tempB.targetType = BindingTargetType::SlotOutputGain;
+    tempB.midiChannel = channel;
+    tempB.triggerType = MidiMessageType::ControlChange;
+    tempB.triggerNumber = cc;
+    slot.binding.fromMidiBinding(tempB);
     if (slot.count == 0) {
         slot.bindings[0] = slot.binding;
         slot.count = 1;
@@ -94,7 +100,11 @@ void MidiManager::addCcBinding(uint8_t channel, uint8_t cc, uint32_t paramId, fl
 }
 
 void MidiManager::rebuildCcTable() {
-    std::memset(m_ccTable, 0, sizeof(m_ccTable));
+    for (auto& row : m_ccTable) {
+        for (auto& slot : row) {
+            slot = FlatCcBinding{};
+        }
+    }
     for (const auto& binding : m_bindings) {
         if (binding.triggerType == MidiMessageType::ControlChange) {
             const uint8_t ch = (binding.midiChannel <= 16) ? binding.midiChannel : 0;
@@ -105,9 +115,9 @@ void MidiManager::rebuildCcTable() {
                 slot.paramId = static_cast<uint32_t>(binding.targetSlotIndex >= 0 ? binding.targetSlotIndex : 0);
                 slot.minVal = 0.0f;
                 slot.maxVal = 1.0f;
-                slot.binding = binding;
+                slot.binding.fromMidiBinding(binding);
                 if (slot.count < MAX_BINDINGS_PER_CC) {
-                    slot.bindings[slot.count++] = binding;
+                    slot.bindings[slot.count++].fromMidiBinding(binding);
                 }
             }
         }
@@ -123,7 +133,11 @@ void MidiManager::removeBinding(const std::string& id) {
 void MidiManager::clearBindings() {
     std::lock_guard<std::mutex> lock(m_bindingsMutex);
     m_bindings.clear();
-    std::memset(m_ccTable, 0, sizeof(m_ccTable));
+    for (auto& row : m_ccTable) {
+        for (auto& slot : row) {
+            slot = FlatCcBinding{};
+        }
+    }
 }
 
 const FlatCcBinding& MidiManager::getCcBinding(uint8_t channel, uint8_t cc) const noexcept {
@@ -173,10 +187,10 @@ void MidiManager::handleControlChange(uint8_t channel, uint8_t cc, uint8_t val) 
         if (slot.active && m_bindingCallback) {
             if (slot.count > 0) {
                 for (uint8_t i = 0; i < slot.count; ++i) {
-                    m_bindingCallback(slot.bindings[i], norm);
+                    m_bindingCallback(slot.bindings[i].toMidiBinding(), norm);
                 }
             } else {
-                m_bindingCallback(slot.binding, norm);
+                m_bindingCallback(slot.binding.toMidiBinding(), norm);
             }
         }
     }
@@ -186,10 +200,10 @@ void MidiManager::handleControlChange(uint8_t channel, uint8_t cc, uint8_t val) 
     if (omniSlot.active && m_bindingCallback) {
         if (omniSlot.count > 0) {
             for (uint8_t i = 0; i < omniSlot.count; ++i) {
-                m_bindingCallback(omniSlot.bindings[i], norm);
+                m_bindingCallback(omniSlot.bindings[i].toMidiBinding(), norm);
             }
         } else {
-            m_bindingCallback(omniSlot.binding, norm);
+            m_bindingCallback(omniSlot.binding.toMidiBinding(), norm);
         }
     }
 }

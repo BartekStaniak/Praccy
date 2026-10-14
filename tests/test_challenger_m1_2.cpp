@@ -1,6 +1,7 @@
 #include <iostream>
 #include <vector>
 #include <cmath>
+#undef NDEBUG
 #include <cassert>
 #include <cstring>
 #include <numbers>

@@ -25,15 +25,9 @@ public:
 
     void setPlaying(bool playing) noexcept {
         if (playing) {
-            m_currentBeatSample = 0;
-            m_clickSamplePosition = 0; // Trigger downbeat click immediately
-            m_currentBeat.store(0, std::memory_order_relaxed);
-            m_isAccent = true;
-        } else {
-            m_currentBeatSample = 0;
-            m_clickSamplePosition = m_clickLengthSamples;
+            m_resetRequested.store(true, std::memory_order_release);
         }
-        m_playing.store(playing, std::memory_order_relaxed);
+        m_playing.store(playing, std::memory_order_release);
     }
     [[nodiscard]] bool isPlaying() const noexcept { return m_playing.load(std::memory_order_relaxed); }
 
@@ -47,6 +41,7 @@ private:
     std::atomic<float> m_bpm{120.0f};
     std::atomic<int> m_beatsPerBar{4};
     std::atomic<bool> m_playing{false};
+    std::atomic<bool> m_resetRequested{false};
     std::atomic<float> m_volumeDb{-6.0f};
     std::atomic<int> m_currentBeat{0};
 

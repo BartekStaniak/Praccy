@@ -10,7 +10,11 @@ namespace praccy::audio {
 // ==========================================
 
 PluginSlot::PluginSlot(std::unique_ptr<AudioNode> innerNode)
-    : m_innerNode(std::move(innerNode)) {}
+    : m_innerNode(std::move(innerNode)) {
+    if (m_innerNode) {
+        m_pluginPtr = dynamic_cast<plugins::IPluginInstance*>(m_innerNode.get());
+    }
+}
 
 void PluginSlot::prepare(double sampleRate, uint32_t maxBlockSize) {
     if (m_innerNode) {
@@ -52,10 +56,8 @@ void PluginSlot::process(AudioProcessContext& ctx) {
 
     // 1. Drain pending parameter automation wait-free at block boundary
     m_automationRegister.drainDirty([&](uint32_t paramId, float value) {
-        if (m_innerNode) {
-            if (auto* p = dynamic_cast<plugins::IPluginInstance*>(m_innerNode.get())) {
-                p->setParameterValue(paramId, value);
-            }
+        if (m_pluginPtr) {
+            m_pluginPtr->setParameterFromAudioThread(paramId, value);
         }
     });
 
@@ -105,21 +107,22 @@ void PluginSlot::process(AudioProcessContext& ctx) {
     DspUtils::calculateEqualPowerCrossfade(mix, dryGain, wetGain);
 
     const uint32_t numCh = ctx.output.numChannels();
-    for (uint32_t ch = 0; ch < numCh; ++ch) {
-        float* out = ctx.output.channel(ch);
-        const float* dry = dryView.channel(ch);
-        const float* wet = procView.channel(ch);
+    for (uint32_t s = 0; s < numSamples; ++s) {
+        float rampOld = 0.0f, rampNew = 0.0f;
+        if (transitioning) {
+            m_bypassRamp.getNextGains(rampOld, rampNew);
+        }
 
-        for (uint32_t s = 0; s < numSamples; ++s) {
+        for (uint32_t ch = 0; ch < numCh; ++ch) {
+            float* out = ctx.output.channel(ch);
+            const float* dry = dryView.channel(ch);
+            const float* wet = procView.channel(ch);
+
             float blended = (dry[s] * dryGain) + (wet[s] * wetGain);
-
             if (transitioning) {
-                float rampOld = 0.0f, rampNew = 0.0f;
-                m_bypassRamp.getNextGains(rampOld, rampNew);
                 // When activating: rampNew is active plugin, rampOld is dry bypass
                 blended = (dry[s] * rampOld) + (blended * rampNew);
             }
-
             out[s] = blended;
         }
     }
@@ -294,6 +297,9 @@ void ParallelBranch::reorderSlots(size_t fromIndex, size_t toIndex) {
 }
 
 std::unique_ptr<PluginSlot> ParallelBranch::takeSlot(size_t index) {
+    if (m_isAudioRunning.load(std::memory_order_acquire)) {
+        return nullptr;
+    }
     collectReclaimedSlots();
 
     // 1. If command queue has unconsumed commands, drain them into active slots
@@ -379,6 +385,7 @@ void ParallelBranch::flushStashedReclamations() noexcept {
 }
 
 void ParallelBranch::process(AudioProcessContext& ctx) {
+    m_isAudioRunning.store(true, std::memory_order_release);
     const uint32_t numSamples = ctx.numSamples;
     if (numSamples == 0) return;
 
@@ -856,6 +863,49 @@ void GraphEngine::drainCommandQueueIntoActive() {
                 }
                 break;
             }
+            case GraphCommandType::SplitToParallel: {
+                if (cmd.indexA < m_activeNodes.size() && cmd.node) {
+                    auto originalNode = std::move(m_activeNodes[cmd.indexA]);
+                    auto* parallelBlock = dynamic_cast<ParallelSplitMergeBlock*>(cmd.node.get());
+                    if (parallelBlock && parallelBlock->numBranches() > 0) {
+                        auto* branchA = parallelBlock->getBranch(0);
+                        auto* slotA = dynamic_cast<PluginSlot*>(originalNode.get());
+                        if (slotA && branchA) {
+                            originalNode.release();
+                            branchA->activeSlots().push_back(std::unique_ptr<PluginSlot>(slotA));
+                        } else {
+                            stashForReclamation(std::move(originalNode));
+                        }
+                    } else {
+                        stashForReclamation(std::move(originalNode));
+                    }
+                    m_activeNodes[cmd.indexA] = std::move(cmd.node);
+                }
+                break;
+            }
+            case GraphCommandType::DissolveParallel: {
+                if (cmd.indexA < m_activeNodes.size()) {
+                    auto blockNode = std::move(m_activeNodes[cmd.indexA]);
+                    m_activeNodes.erase(m_activeNodes.begin() + cmd.indexA);
+                    auto* block = dynamic_cast<ParallelSplitMergeBlock*>(blockNode.get());
+                    if (block && cmd.indexB < block->numBranches()) {
+                        auto* br = block->getBranch(cmd.indexB);
+                        if (br) {
+                            auto& actSlots = br->activeSlots();
+                            size_t insertPos = cmd.indexA;
+                            for (auto& s : actSlots) {
+                                if (s) {
+                                    m_activeNodes.insert(m_activeNodes.begin() + insertPos, std::move(s));
+                                    ++insertPos;
+                                }
+                            }
+                            actSlots.clear();
+                        }
+                    }
+                    stashForReclamation(std::move(blockNode));
+                }
+                break;
+            }
         }
     }
 }
@@ -956,6 +1006,9 @@ void GraphEngine::removeSerialNode(size_t index) {
 }
 
 std::unique_ptr<AudioNode> GraphEngine::takeSerialNode(size_t index) {
+    if (m_isAudioRunning.load(std::memory_order_acquire)) {
+        return nullptr;
+    }
     processReclamation();
     std::lock_guard<std::mutex> lock(m_uiMutex);
 
@@ -1010,8 +1063,13 @@ void GraphEngine::reorderNodes(size_t fromIndex, size_t toIndex) {
 }
 
 void GraphEngine::splitSerialNodeIntoParallel(size_t index) {
-    auto originalNode = takeSerialNode(index);
-    if (!originalNode) return;
+    processReclamation();
+    std::lock_guard<std::mutex> lock(m_uiMutex);
+    if (index >= m_uiNodes.size()) return;
+
+    if (!m_isAudioRunning.load(std::memory_order_acquire)) {
+        drainCommandQueueIntoActive();
+    }
 
     auto parallelBlock = std::make_unique<ParallelSplitMergeBlock>("Parallel Split/Merge");
     parallelBlock->prepare(m_sampleRate, m_maxBlockSize);
@@ -1020,44 +1078,51 @@ void GraphEngine::splitSerialNodeIntoParallel(size_t index) {
     branchA->prepare(m_sampleRate, m_maxBlockSize);
     branchA->setPan(-0.5f);
 
-    auto* slotA = dynamic_cast<PluginSlot*>(originalNode.get());
-    if (slotA) {
-        originalNode.release();
-        branchA->addSlot(std::unique_ptr<PluginSlot>(slotA));
-    }
-
     auto* branchB = parallelBlock->addBranch("Branch B");
     branchB->prepare(m_sampleRate, m_maxBlockSize);
     branchB->setPan(+0.5f);
 
-    insertSerialNode(index, std::move(parallelBlock));
+    auto* origNode = m_uiNodes[index];
+    auto* origSlot = dynamic_cast<PluginSlot*>(origNode);
+    if (origSlot) {
+        branchA->addSlotToUiShadow(origSlot);
+    }
+    m_uiNodes[index] = parallelBlock.get();
+    GraphCommand cmd = GraphCommand::makeSplitToParallel(index, std::move(parallelBlock));
+    m_commandQueue.try_enqueue(std::move(cmd));
+
+    if (!m_isAudioRunning.load(std::memory_order_acquire)) {
+        drainCommandQueueIntoActive();
+    }
 }
 
 void GraphEngine::dissolveParallelBlock(size_t blockIndex, int branchToKeep) {
-    auto blockNode = takeSerialNode(blockIndex);
-    if (!blockNode) return;
+    processReclamation();
+    std::lock_guard<std::mutex> lock(m_uiMutex);
+    if (blockIndex >= m_uiNodes.size()) return;
 
-    auto* block = dynamic_cast<ParallelSplitMergeBlock*>(blockNode.get());
-    if (!block) {
-        insertSerialNode(blockIndex, std::move(blockNode));
-        return;
+    if (!m_isAudioRunning.load(std::memory_order_acquire)) {
+        drainCommandQueueIntoActive();
     }
 
-    // Collect preserved slots from the branch to keep
-    std::vector<std::unique_ptr<PluginSlot>> preservedSlots;
+    auto* block = dynamic_cast<ParallelSplitMergeBlock*>(m_uiNodes[blockIndex]);
+    if (!block) return;
+    std::vector<AudioNode*> preservedUiSlots;
     if (branchToKeep >= 0 && static_cast<size_t>(branchToKeep) < block->numBranches()) {
         auto* br = block->getBranch(branchToKeep);
         if (br) {
-            while (br->numSlots() > 0) {
-                auto slotPtr = br->takeSlot(0);
-                if (slotPtr) preservedSlots.push_back(std::move(slotPtr));
+            for (size_t s = 0; s < br->numSlots(); ++s) {
+                preservedUiSlots.push_back(br->getSlot(s));
             }
         }
     }
+    m_uiNodes.erase(m_uiNodes.begin() + blockIndex);
+    m_uiNodes.insert(m_uiNodes.begin() + blockIndex, preservedUiSlots.begin(), preservedUiSlots.end());
+    GraphCommand cmd = GraphCommand::makeDissolveParallel(blockIndex, branchToKeep);
+    m_commandQueue.try_enqueue(std::move(cmd));
 
-    // Splice preserved slots into the serial chain at blockIndex
-    for (size_t i = 0; i < preservedSlots.size(); ++i) {
-        insertSerialNode(blockIndex + i, std::move(preservedSlots[i]));
+    if (!m_isAudioRunning.load(std::memory_order_acquire)) {
+        drainCommandQueueIntoActive();
     }
 }
 
@@ -1120,15 +1185,18 @@ void GraphEngine::processReclamation() noexcept {
 }
 
 size_t GraphEngine::numNodes() const noexcept {
+    std::lock_guard<std::mutex> lock(m_uiMutex);
     return m_uiNodes.size();
 }
 
 AudioNode* GraphEngine::getNode(size_t index) noexcept {
+    std::lock_guard<std::mutex> lock(m_uiMutex);
     if (index < m_uiNodes.size()) return m_uiNodes[index];
     return nullptr;
 }
 
 void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& hardwareOut) {
+    m_isAudioRunning.store(true, std::memory_order_release);
     const uint32_t numSamples = hardwareIn.numSamples();
     if (numSamples == 0) return;
 
@@ -1259,6 +1327,57 @@ void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& ha
                 m_sceneCrossfadeRamp.reset(std::max(1u, rampSamples));
                 m_sceneCrossfadeRamp.startTransition(true);
                 m_isSceneCrossfading.store(true, std::memory_order_release);
+                break;
+            }
+            case GraphCommandType::SplitToParallel: {
+                if (cmd.indexA < m_activeNodes.size() && cmd.node) {
+                    auto originalNode = std::move(m_activeNodes[cmd.indexA]);
+                    auto* parallelBlock = dynamic_cast<ParallelSplitMergeBlock*>(cmd.node.get());
+                    if (parallelBlock && parallelBlock->numBranches() > 0) {
+                        auto* branchA = parallelBlock->getBranch(0);
+                        auto* slotA = dynamic_cast<PluginSlot*>(originalNode.get());
+                        if (slotA && branchA) {
+                            originalNode.release();
+                            branchA->addSlot(std::unique_ptr<PluginSlot>(slotA));
+                        } else {
+                            if (!m_reclaimQueue.try_enqueue(std::move(originalNode))) {
+                                stashForReclamation(std::move(originalNode));
+                            }
+                        }
+                    } else {
+                        if (!m_reclaimQueue.try_enqueue(std::move(originalNode))) {
+                            stashForReclamation(std::move(originalNode));
+                        }
+                    }
+                    m_activeNodes[cmd.indexA] = std::move(cmd.node);
+                    if (m_hasProcessedAudio) hadStructuralMutation = true;
+                }
+                break;
+            }
+            case GraphCommandType::DissolveParallel: {
+                if (cmd.indexA < m_activeNodes.size()) {
+                    auto blockNode = std::move(m_activeNodes[cmd.indexA]);
+                    m_activeNodes.erase(m_activeNodes.begin() + cmd.indexA);
+                    auto* block = dynamic_cast<ParallelSplitMergeBlock*>(blockNode.get());
+                    if (block && cmd.indexB < block->numBranches()) {
+                        auto* br = block->getBranch(cmd.indexB);
+                        if (br) {
+                            auto& actSlots = br->activeSlots();
+                            size_t insertPos = cmd.indexA;
+                            for (auto& s : actSlots) {
+                                if (s) {
+                                    m_activeNodes.insert(m_activeNodes.begin() + insertPos, std::move(s));
+                                    ++insertPos;
+                                }
+                            }
+                            actSlots.clear();
+                        }
+                    }
+                    if (!m_reclaimQueue.try_enqueue(std::move(blockNode))) {
+                        stashForReclamation(std::move(blockNode));
+                    }
+                    if (m_hasProcessedAudio) hadStructuralMutation = true;
+                }
                 break;
             }
         }
@@ -1428,7 +1547,9 @@ void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& ha
         float* data = mainView.channel(ch);
         for (uint32_t s = 0; s < numSamples; ++s) {
             float x = data[s];
-            if (x > 0.95f) {
+            if (!std::isfinite(x)) {
+                x = 0.0f;
+            } else if (x > 0.95f) {
                 x = 0.95f + (1.0f - 0.95f) * std::tanh((x - 0.95f) / (1.0f - 0.95f));
             } else if (x < -0.95f) {
                 x = -0.95f + (1.0f - 0.95f) * std::tanh((x + 0.95f) / (1.0f - 0.95f));

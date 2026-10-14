@@ -10,6 +10,7 @@
 #include <atomic>
 #include <array>
 #include <cstdint>
+#include <cstring>
 
 namespace praccy::midi {
 
@@ -22,15 +23,54 @@ static constexpr size_t MAX_BINDINGS_PER_CC = 4;
 static constexpr size_t NUM_MIDI_CHANNELS = 17; // 0 = Omni, 1..16 = Ch 1..16
 static constexpr size_t NUM_CC_NUMBERS = 128;   // CC 0..127
 
+struct PodCcBinding {
+    char id[32]{};
+    BindingTargetType targetType{BindingTargetType::SlotBypass};
+    int targetSlotIndex{-1};
+    int targetBranchIndex{-1};
+    int targetSceneIndex{-1};
+    uint8_t midiChannel{0};
+    MidiMessageType triggerType{MidiMessageType::ControlChange};
+    uint8_t triggerNumber{0};
+
+    [[nodiscard]] MidiBinding toMidiBinding() const {
+        return MidiBinding{
+            .id = id,
+            .targetType = targetType,
+            .targetSlotIndex = targetSlotIndex,
+            .targetBranchIndex = targetBranchIndex,
+            .targetSceneIndex = targetSceneIndex,
+            .midiChannel = midiChannel,
+            .triggerType = triggerType,
+            .triggerNumber = triggerNumber
+        };
+    }
+
+    void fromMidiBinding(const MidiBinding& b) {
+        std::memset(id, 0, sizeof(id));
+        if (!b.id.empty()) {
+            std::strncpy(id, b.id.c_str(), sizeof(id) - 1);
+        }
+        targetType = b.targetType;
+        targetSlotIndex = b.targetSlotIndex;
+        targetBranchIndex = b.targetBranchIndex;
+        targetSceneIndex = b.targetSceneIndex;
+        midiChannel = b.midiChannel;
+        triggerType = b.triggerType;
+        triggerNumber = b.triggerNumber;
+    }
+};
+
 struct FlatCcBinding {
     uint32_t paramId{0};
     float minVal{0.0f};
     float maxVal{1.0f};
     bool active{false};
     uint8_t count{0};
-    MidiBinding bindings[MAX_BINDINGS_PER_CC]{};
-    MidiBinding binding{};
+    PodCcBinding bindings[MAX_BINDINGS_PER_CC]{};
+    PodCcBinding binding{};
 };
+static_assert(std::is_trivially_copyable_v<FlatCcBinding>, "FlatCcBinding must be 100% trivially copyable");
 
 using MidiBindingCallback = std::function<void(const MidiBinding& binding, float normalizedValue)>;
 

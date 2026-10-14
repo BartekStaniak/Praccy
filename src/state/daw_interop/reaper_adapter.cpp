@@ -58,14 +58,14 @@ bool ReaperAdapter::unpackVst3ChunkEnvelope(
         uint32_t compLen = 0;
         std::memcpy(&compLen, rawChunk.data() + 4, 4);
 
-        if (8 + compLen <= rawChunk.size()) {
+        if (rawChunk.size() >= 8 && static_cast<size_t>(compLen) <= rawChunk.size() - 8) {
             outCompState.assign(rawChunk.begin() + 8, rawChunk.begin() + 8 + compLen);
 
             size_t ctrlOffset = 8 + compLen;
-            if (ctrlOffset + 4 <= rawChunk.size()) {
+            if (rawChunk.size() >= ctrlOffset && rawChunk.size() - ctrlOffset >= 4) {
                 uint32_t ctrlLen = 0;
                 std::memcpy(&ctrlLen, rawChunk.data() + ctrlOffset, 4);
-                if (ctrlOffset + 4 + ctrlLen <= rawChunk.size()) {
+                if (rawChunk.size() - ctrlOffset - 4 >= static_cast<size_t>(ctrlLen)) {
                     outCtrlState.assign(rawChunk.begin() + ctrlOffset + 4, rawChunk.begin() + ctrlOffset + 4 + ctrlLen);
                 }
             }

@@ -27,6 +27,9 @@ public:
     [[nodiscard]] virtual size_t numParameters() const noexcept = 0;
     [[nodiscard]] virtual PluginParameterDesc getParameterDesc(size_t index) const = 0;
     virtual void setParameterValue(uint32_t paramId, float value) = 0;
+    virtual void setParameterFromAudioThread(uint32_t paramId, float value) noexcept {
+        setParameterValue(paramId, value);
+    }
     [[nodiscard]] virtual float getParameterValue(uint32_t paramId) const = 0;
 
     [[nodiscard]] virtual bool hasCustomGui() const noexcept = 0;
@@ -38,6 +41,21 @@ public:
     }
 
     [[nodiscard]] virtual const std::string& path() const noexcept {
+        static const std::string s_empty;
+        return s_empty;
+    }
+
+    [[nodiscard]] virtual const std::string& bundleFileName() const noexcept {
+        static const std::string s_empty;
+        return s_empty;
+    }
+
+    [[nodiscard]] virtual const std::string& classGuid() const noexcept {
+        static const std::string s_empty;
+        return s_empty;
+    }
+
+    [[nodiscard]] virtual const std::string& clapId() const noexcept {
         static const std::string s_empty;
         return s_empty;
     }

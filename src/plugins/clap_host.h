@@ -72,10 +72,13 @@ public:
     [[nodiscard]] const std::string& vendor() const noexcept override { return m_vendor; }
     [[nodiscard]] const std::string& version() const noexcept override { return m_version; }
     [[nodiscard]] const std::string& path() const noexcept override { return m_path; }
+    [[nodiscard]] const std::string& bundleFileName() const noexcept override { return m_bundleFileName; }
+    [[nodiscard]] const std::string& clapId() const noexcept override { return m_clapId; }
 
     [[nodiscard]] size_t numParameters() const noexcept override;
     [[nodiscard]] PluginParameterDesc getParameterDesc(size_t index) const override;
     void setParameterValue(uint32_t paramId, float value) override;
+    void setParameterFromAudioThread(uint32_t paramId, float value) noexcept override;
     [[nodiscard]] float getParameterValue(uint32_t paramId) const override;
 
     [[nodiscard]] bool hasCustomGui() const noexcept override;
@@ -105,6 +108,8 @@ private:
     const clap_plugin_latency* m_latencyExt{nullptr};
 
     std::string m_path;
+    std::string m_bundleFileName;
+    std::string m_clapId;
     std::string m_name{"CLAP Plugin"};
     std::string m_vendor{"Unknown"};
     std::string m_version{"1.0.0"};
@@ -114,6 +119,8 @@ private:
 
     moodycamel::ReaderWriterQueue<std::pair<clap_id, double>> m_paramQueue{128};
     ClapEventBuffer m_eventBuffer;
+    bool m_isActivated{false};
+    bool m_isProcessing{false};
 };
 
 } // namespace praccy::plugins

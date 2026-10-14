@@ -47,7 +47,7 @@ struct NodePreset {
     Kind kind{Kind::Plugin};
     PluginSlotPreset slot;
     std::vector<BranchPreset> branches; // If ParallelBlock: index 0 = Branch A, 1 = Branch B
-    float branchBlend{0.5f};            // Cross-branch balance
+    float branchBlend{0.0f};            // Cross-branch balance (-1.0 to 1.0, 0.0 = center)
 };
 
 struct ScenePreset {

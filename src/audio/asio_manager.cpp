@@ -135,12 +135,6 @@ bool AsioManager::start(int32_t bufferSize) {
     if (!m_driver) return false;
     if (m_isRunning.load()) return true;
 
-    // Register MMCSS "Pro Audio" priority for calling control thread up front
-    if (!m_mmcssHandle) {
-        m_mmcssTaskIndex = 0;
-        m_mmcssHandle = AvSetMmThreadCharacteristicsW(L"Pro Audio", &m_mmcssTaskIndex);
-    }
-
     if (bufferSize <= 0) {
         bufferSize = m_info.preferredBufferSize;
     }
@@ -347,19 +341,28 @@ void AsioManager::packSamples(ASIOSampleType type, const float* src, void* dst, 
         case ASIOSTInt32LSB: {
             auto* d = static_cast<int32_t*>(dst);
             for (uint32_t i = 0; i < numSamples; ++i) {
-                float sample = std::clamp(src[i], -1.0f, 1.0f);
+                float sample = src[i];
+                if (std::isnan(sample)) sample = 0.0f;
+                sample = std::clamp(sample, -1.0f, 1.0f);
                 d[i] = static_cast<int32_t>(sample * 2147483647.0f);
             }
             break;
         }
         case ASIOSTFloat32LSB: {
-            std::memcpy(dst, src, numSamples * sizeof(float));
+            auto* d = static_cast<float*>(dst);
+            for (uint32_t i = 0; i < numSamples; ++i) {
+                float sample = src[i];
+                if (std::isnan(sample)) sample = 0.0f;
+                d[i] = sample;
+            }
             break;
         }
         case ASIOSTInt16LSB: {
             auto* d = static_cast<int16_t*>(dst);
             for (uint32_t i = 0; i < numSamples; ++i) {
-                float sample = std::clamp(src[i], -1.0f, 1.0f);
+                float sample = src[i];
+                if (std::isnan(sample)) sample = 0.0f;
+                sample = std::clamp(sample, -1.0f, 1.0f);
                 d[i] = static_cast<int16_t>(sample * 32767.0f);
             }
             break;
@@ -379,6 +382,11 @@ void AsioManager::packSamples(ASIOSampleType type, const float* src, void* dst, 
 
 void AsioManager::processAudio(int32_t doubleBufferIndex) {
     if (!m_isRunning.load(std::memory_order_relaxed)) return;
+
+    if (!m_mmcssHandle) {
+        m_mmcssTaskIndex = 0;
+        m_mmcssHandle = AvSetMmThreadCharacteristicsW(L"Pro Audio", &m_mmcssTaskIndex);
+    }
 
 #if defined(_M_X64) || defined(__x86_64__)
     // Denormal Prevention: FTZ (Flush-to-Zero) & DAZ (Denormals-Are-Zero)

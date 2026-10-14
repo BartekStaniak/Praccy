@@ -210,6 +210,7 @@ RackView::RackView(audio::GraphEngine& graph,
       m_practiceToolsModal(std::make_unique<PracticeToolsModal>(looper, player)) {
     state::AppConfig cfg;
     cfg.load();
+    m_cachedConfig = cfg;
     m_favoritePresets = cfg.favoritePresets;
     if (m_favoritePresets.empty()) {
         auto avail = m_scenes.savedPresetNames();
@@ -231,6 +232,16 @@ RackView::RackView(audio::GraphEngine& graph,
     m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Initial Scene"),
                                "Initial Scene",
                                state::UndoActionType::SceneSwitch);
+
+    m_settingsModal->setOnDriverChanged([this](double sRate, uint32_t bufSize) {
+        m_graph.prepare(sRate, bufSize);
+        m_tuner.prepare(sRate, 4096);
+        m_metronome.prepare(sRate);
+        m_player.prepare(sRate);
+        m_looper.prepare(sRate);
+        m_riffBuffer.prepare(sRate, static_cast<int>(m_cachedConfig.retroactiveBufferMinutes));
+        m_asio.start();
+    });
 }
 
 bool RackView::isPresetFavorite(const std::string& name) const {
@@ -324,7 +335,12 @@ void RackView::render() {
                 m_pluginBrowserModal->open();
             }
 
-            // 5. Presets 1-8
+            // 5. Export DAW Chain: Ctrl+E
+            if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_E, false)) {
+                m_exportDawModal.open();
+            }
+
+            // 6. Presets 1-8
             for (int k = 0; k < 8 && k < static_cast<int>(m_scenes.numScenes()); ++k) {
                 if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_1 + k), false)) {
                     if (m_scenes.applyScene(k, m_graph)) {
@@ -377,10 +393,7 @@ void RackView::render() {
             if (vp) {
                 float t = static_cast<float>(ImGui::GetTime());
                 float alpha = 0.45f + 0.45f * std::sin(4.0f * t);
-                ImU32 violet = ColorToken(tokens.borders.mapModeViolet.r,
-                                          tokens.borders.mapModeViolet.g,
-                                          tokens.borders.mapModeViolet.b,
-                                          alpha);
+                ImU32 violet = static_cast<ImU32>(tokens.borders.mapModeViolet.withAlpha(alpha));
 
                 ImDrawList* fg = ImGui::GetForegroundDrawList();
                 fg->AddRect(vp->Pos, ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y), violet, 0.0f, 0, 4.0f);
@@ -408,70 +421,6 @@ void RackView::render() {
     }
     ImGui::End();
     ImGui::PopStyleVar();
-}
-
-void RackView::renderPraccyLogo() {
-    Thumbnail* logoThumb = ThumbnailManager::instance().getThumbnail("__praccy_logo__");
-    if (!logoThumb || !logoThumb->srv) {
-        // Resolve paths relative to the executable so we find the file
-        // regardless of what working directory the app was launched from.
-        wchar_t exePathW[MAX_PATH] = {};
-        GetModuleFileNameW(nullptr, exePathW, MAX_PATH);
-        std::filesystem::path exeDir = std::filesystem::path(exePathW).parent_path();
-
-        std::vector<std::filesystem::path> searchPaths = {
-            exeDir / "resources" / "icon_512.png",
-            std::filesystem::path("resources") / "icon_512.png",
-        };
-
-        for (const auto& p : searchPaths) {
-            if (std::filesystem::exists(p)) {
-                ThumbnailManager::instance().loadFromFile("__praccy_logo__", p.string().c_str());
-                logoThumb = ThumbnailManager::instance().getThumbnail("__praccy_logo__");
-                if (logoThumb && logoThumb->srv) break;
-            }
-        }
-    }
-
-    ImVec2 pos = ImGui::GetCursorScreenPos();
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    const auto& tokens = themeTokens();
-
-    // Square card to match the square icon aspect ratio
-    const float boxW = 74.0f;
-    const float boxH = 74.0f;
-
-    // Stylized logo card
-    dl->AddRectFilled(pos, ImVec2(pos.x + boxW, pos.y + boxH), tokens.surfaces.headerBg, 6.0f);
-    dl->AddRect(pos, ImVec2(pos.x + boxW, pos.y + boxH), tokens.borders.subtle, 6.0f);
-
-    if (logoThumb && logoThumb->srv) {
-        // Fill the full card area with the icon
-        dl->AddImage((ImTextureID)logoThumb->srv, pos, ImVec2(pos.x + boxW, pos.y + boxH),
-                     ImVec2(0, 0), ImVec2(1, 1));
-    } else {
-        // Fallback procedural medallion
-        const float cx = pos.x + 24.0f;
-        const float cy = pos.y + (boxH * 0.5f);
-
-        dl->AddCircleFilled(ImVec2(cx, cy), 16.0f, static_cast<ImU32>(ColorToken(
-            static_cast<uint8_t>(tokens.signal.active.r * 255.0f),
-            static_cast<uint8_t>(tokens.signal.active.g * 255.0f),
-            static_cast<uint8_t>(tokens.signal.active.b * 255.0f),
-            35
-        )));
-        dl->AddCircleFilled(ImVec2(cx, cy), 12.0f, tokens.surfaces.cardBg);
-        dl->AddCircle(ImVec2(cx, cy), 12.0f, tokens.text.accent, 0, 1.5f);
-
-        dl->AddLine(ImVec2(cx - 5.0f, cy - 4.0f), ImVec2(cx - 5.0f, cy + 4.0f), tokens.text.accent, 1.5f);
-        dl->AddLine(ImVec2(cx - 1.5f, cy - 8.0f), ImVec2(cx - 1.5f, cy + 8.0f), tokens.text.primary, 2.0f);
-        dl->AddLine(ImVec2(cx + 2.0f, cy - 6.0f), ImVec2(cx + 2.0f, cy + 6.0f), tokens.text.accent, 1.8f);
-        dl->AddLine(ImVec2(cx + 5.5f, cy - 3.0f), ImVec2(cx + 5.5f, cy + 3.0f), tokens.text.accent, 1.5f);
-
-        // No logo fallback - nothing displayed
-    }
-
-    ImGui::Dummy(ImVec2(boxW, boxH));
 }
 
 bool RackView::renderStatusPill(bool isRunning, const char* statusText) {
@@ -531,20 +480,10 @@ bool RackView::renderStatusPill(bool isRunning, const char* statusText) {
     ImVec2 dotCenter(pos.x + 12.0f, pos.y + (pillH * 0.5f));
     if (isRunning) {
         if (drops > 0) {
-            dl->AddCircleFilled(dotCenter, 6.0f, static_cast<ImU32>(ColorToken(
-                static_cast<uint8_t>(tokens.signal.meterWarning.r * 255.0f),
-                static_cast<uint8_t>(tokens.signal.meterWarning.g * 255.0f),
-                static_cast<uint8_t>(tokens.signal.meterWarning.b * 255.0f),
-                80
-            )));
+            dl->AddCircleFilled(dotCenter, 6.0f, static_cast<ImU32>(tokens.signal.meterWarning.withAlpha(80.0f / 255.0f)));
             dl->AddCircleFilled(dotCenter, 3.5f, tokens.signal.meterWarning);
         } else {
-            dl->AddCircleFilled(dotCenter, 6.0f, static_cast<ImU32>(ColorToken(
-                static_cast<uint8_t>(tokens.signal.active.r * 255.0f),
-                static_cast<uint8_t>(tokens.signal.active.g * 255.0f),
-                static_cast<uint8_t>(tokens.signal.active.b * 255.0f),
-                80
-            )));
+            dl->AddCircleFilled(dotCenter, 6.0f, static_cast<ImU32>(tokens.signal.active.withAlpha(80.0f / 255.0f)));
             dl->AddCircleFilled(dotCenter, 3.5f, tokens.signal.active);
         }
     } else {
@@ -626,16 +565,8 @@ void RackView::renderPracticeRibbon() {
                     bool active = metroPlaying && (b == currentBeat);
                     if (active) {
                         ImU32 haloColor = (b == 0) ?
-                            static_cast<ImU32>(ColorToken(
-                                static_cast<uint8_t>(tokens.signal.faulted.r * 255.0f),
-                                static_cast<uint8_t>(tokens.signal.faulted.g * 255.0f),
-                                static_cast<uint8_t>(tokens.signal.faulted.b * 255.0f),
-                                80)) :
-                            static_cast<ImU32>(ColorToken(
-                                static_cast<uint8_t>(tokens.signal.meterWarning.r * 255.0f),
-                                static_cast<uint8_t>(tokens.signal.meterWarning.g * 255.0f),
-                                static_cast<uint8_t>(tokens.signal.meterWarning.b * 255.0f),
-                                80));
+                            static_cast<ImU32>(tokens.signal.faulted.withAlpha(80.0f / 255.0f)) :
+                            static_cast<ImU32>(tokens.signal.meterWarning.withAlpha(80.0f / 255.0f));
                         dl->AddCircleFilled(ImVec2(cx, cy), dotRadius + 2.5f, haloColor);
                         ImU32 ledColor = (b == 0) ? static_cast<ImU32>(tokens.signal.faulted) : static_cast<ImU32>(tokens.signal.meterWarning);
                         dl->AddCircleFilled(ImVec2(cx, cy), dotRadius, ledColor);
@@ -934,15 +865,20 @@ void RackView::renderSceneBar() {
 
                 std::string btnLabel = favName + "##FavBtn_" + std::to_string(i);
                 if (CenteredButton(btnLabel.c_str(), ImVec2(0, barBtnH))) {
-                    m_undoManager.pushSnapshot(
-                        state::SceneManager::captureGraphSnapshot(m_graph, "Preset: " + favName),
-                        "Preset: " + favName,
-                        state::UndoActionType::SceneSwitch
-                    );
-                    m_scenes.loadPresetChain(favName, m_graph);
-                    m_auditionedPreset = favName;
-                    syncMacrosFromGraph();
-                    triggerHudToast("Loaded " + favName);
+                    if (m_midiMapMode) {
+                        m_midi.startLearning(midi::BindingTargetType::SceneSelect, -1, -1, static_cast<int>(i));
+                        triggerHudToast("MIDI LEARN: SCENE " + std::to_string(i + 1));
+                    } else {
+                        m_undoManager.pushSnapshot(
+                            state::SceneManager::captureGraphSnapshot(m_graph, "Preset: " + favName),
+                            "Preset: " + favName,
+                            state::UndoActionType::SceneSwitch
+                        );
+                        m_scenes.loadPresetChain(favName, m_graph);
+                        m_auditionedPreset = favName;
+                        syncMacrosFromGraph();
+                        triggerHudToast("Loaded " + favName);
+                    }
                 }
             }
 
@@ -986,7 +922,10 @@ void RackView::renderSceneBar() {
             {ImGuiCol_Text, tokens.text.primary.vec4}
         }, isToneAActive);
         if (CenteredButton("A##ToneA", ImVec2(toneSlotBtnW, barBtnH))) {
-            if (!isToneAActive) {
+            if (m_midiMapMode) {
+                m_midi.startLearning(midi::BindingTargetType::SceneSelect, -1, -1, 0);
+                triggerHudToast("MIDI LEARN: SCENE A");
+            } else if (!isToneAActive) {
                 if (isToneBActive) {
                     m_scenes.captureToneSnapshotB(m_graph);
                 }
@@ -1012,7 +951,10 @@ void RackView::renderSceneBar() {
             {ImGuiCol_Text, tokens.text.primary.vec4}
         }, isToneBActive);
         if (CenteredButton("B##ToneB", ImVec2(toneSlotBtnW, barBtnH))) {
-            if (!isToneBActive) {
+            if (m_midiMapMode) {
+                m_midi.startLearning(midi::BindingTargetType::SceneSelect, -1, -1, 1);
+                triggerHudToast("MIDI LEARN: SCENE B");
+            } else if (!isToneBActive) {
                 if (isToneAActive || m_scenes.activeToneSnapshot() == state::SceneManager::ToneSnapshotSlot::None) {
                     m_scenes.captureToneSnapshotA(m_graph);
                 }
@@ -1401,20 +1343,6 @@ void RackView::renderSignalRack() {
     ImGui::EndChild();
 }
 
-void RackView::renderSignalCable(float width) {
-    ImGui::SameLine(0, 0);
-    const ImVec2 pos = ImGui::GetCursorScreenPos();
-    const float cardH = 224.0f;
-    const float centerY = pos.y + (cardH * 0.5f);
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-
-    drawCubicHermiteCable(dl, ImVec2(pos.x, centerY), ImVec2(pos.x + width, centerY),
-                         0.25f, false, static_cast<float>(ImGui::GetTime()));
-
-    ImGui::Dummy(ImVec2(width, cardH));
-    ImGui::SameLine(0, 0);
-}
-
 void RackView::renderInputCard(float cardY) {
     if (cardY >= 0.0f) {
         ImGui::SetCursorPosY(cardY);
@@ -1675,10 +1603,18 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         char pillId[32];
         std::snprintf(pillId, sizeof(pillId), "##Pill_%d_%d_%d", slotIndex, blockIndex, branchIndex);
         if (renderSlidingPillToggle(pillId, &activeState, ImVec2(38.0f, 18.0f))) {
-            slot->setBypassed(!activeState);
-            m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Toggle Bypass"),
-                                       "Bypass: " + slot->name(),
-                                       state::UndoActionType::ParameterTweak);
+            if (m_midiMapMode) {
+                m_midi.startLearning(midi::BindingTargetType::SlotBypass, slotIndex, branchIndex);
+                triggerHudToast("MIDI LEARN: " + slot->name() + " BYPASS");
+            } else {
+                slot->setBypassed(!activeState);
+                m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Toggle Bypass"),
+                                           "Bypass: " + slot->name(),
+                                           state::UndoActionType::ParameterTweak);
+            }
+        } else if (m_midiMapMode && ImGui::IsItemClicked()) {
+            m_midi.startLearning(midi::BindingTargetType::SlotBypass, slotIndex, branchIndex);
+            triggerHudToast("MIDI LEARN: " + slot->name() + " BYPASS");
         }
     }
 
@@ -1702,11 +1638,11 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         if (isFaulted) {
             dl->AddRect(ImVec2(previewPos.x - 2.0f, previewPos.y - 2.0f),
                         ImVec2(previewPos.x + previewW + 2.0f, previewPos.y + previewH + 2.0f),
-                        ColorToken(tokens.signal.faulted.r, tokens.signal.faulted.g, tokens.signal.faulted.b, 0.25f), 7.0f, 0, 2.0f);
+                        tokens.signal.faulted.withAlpha(0.25f), 7.0f, 0, 2.0f);
         } else if (!bypassed) {
             dl->AddRect(ImVec2(previewPos.x - 1.5f, previewPos.y - 1.5f),
                         ImVec2(previewPos.x + previewW + 1.5f, previewPos.y + previewH + 1.5f),
-                        ColorToken(tokens.signal.active.r, tokens.signal.active.g, tokens.signal.active.b, 0.22f), 6.5f, 0, 2.0f);
+                        tokens.signal.active.withAlpha(0.22f), 6.5f, 0, 2.0f);
         }
 
         // Invisible button to capture clicks over the entire preview area
@@ -1832,7 +1768,14 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                                             macro.minValue, macro.maxValue, macro.defaultValue,
                                             "%.1f", opt);
 
-            if (changed) {
+            if (m_midiMapMode && ImGui::IsItemClicked()) {
+                if (macro.isSlotTrim) {
+                    m_midi.startLearning(midi::BindingTargetType::SlotOutputGain, slotIndex, branchIndex);
+                } else {
+                    m_midi.startLearning(midi::BindingTargetType::SlotDryWet, slotIndex, branchIndex);
+                }
+                triggerHudToast("MIDI LEARN: " + slot->name() + " MACRO " + std::to_string(m + 1));
+            } else if (changed) {
                 if (macro.bound) {
                     slot->setParameter(macro.paramId, macro.currentValue);
                     if (pluginInst) {
@@ -1946,7 +1889,15 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         std::snprintf(mixLabel, sizeof(mixLabel), "##Mix_%d_%d_%d", slotIndex, blockIndex, branchIndex);
         ImGui::SetNextItemWidth(190.0f);
         if (ResettableSliderFloat(mixLabel, &mix, 0.0f, 100.0f, 100.0f, "Mix: %.0f%%")) {
-            slot->setDryWet(mix / 100.0f);
+            if (m_midiMapMode) {
+                m_midi.startLearning(midi::BindingTargetType::SlotDryWet, slotIndex, branchIndex);
+                triggerHudToast("MIDI LEARN: " + slot->name() + " MIX");
+            } else {
+                slot->setDryWet(mix / 100.0f);
+            }
+        } else if (m_midiMapMode && ImGui::IsItemClicked()) {
+            m_midi.startLearning(midi::BindingTargetType::SlotDryWet, slotIndex, branchIndex);
+            triggerHudToast("MIDI LEARN: " + slot->name() + " MIX");
         }
         if (ImGui::IsItemDeactivatedAfterEdit()) {
             m_undoManager.pushSnapshot(
@@ -1972,7 +1923,15 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         std::snprintf(trimLabel, sizeof(trimLabel), "##Trim_%d_%d_%d", slotIndex, blockIndex, branchIndex);
         ImGui::SetNextItemWidth(206.0f);
         if (ResettableSliderFloat(trimLabel, &outTrim, -24.0f, +12.0f, 0.0f, "Trim: %+.1f dB")) {
-            slot->setOutputGainDb(outTrim);
+            if (m_midiMapMode) {
+                m_midi.startLearning(midi::BindingTargetType::SlotOutputGain, slotIndex, branchIndex);
+                triggerHudToast("MIDI LEARN: " + slot->name() + " TRIM");
+            } else {
+                slot->setOutputGainDb(outTrim);
+            }
+        } else if (m_midiMapMode && ImGui::IsItemClicked()) {
+            m_midi.startLearning(midi::BindingTargetType::SlotOutputGain, slotIndex, branchIndex);
+            triggerHudToast("MIDI LEARN: " + slot->name() + " TRIM");
         }
         if (ImGui::IsItemDeactivatedAfterEdit()) {
             m_undoManager.pushSnapshot(
@@ -2571,15 +2530,6 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
     ImGui::PopID();
 }
 
-bool RackView::renderRotaryKnob(const char* label, float* value, float minVal, float maxVal, float radius, const char* format, float defaultVal) {
-    HardwareKnobOptions opt;
-    opt.radius = radius;
-    opt.arcThickness = 2.0f;
-    opt.showValue = false;
-    opt.showLabel = false;
-    return DrawHardwareKnob(label, label, value, minVal, maxVal, defaultVal, format, opt);
-}
-
 void RackView::renderBottomBar() {
     ImGui::Separator();
     const auto& tokens = themeTokens();
@@ -2819,16 +2769,14 @@ void RackView::renderUpdateModal() {
         ImGui::Separator();
         ImGui::Spacing();
 
-        ImGui::Text("Installed Version: %s", "v2.5-beta1");
+        ImGui::Text("Installed Version: %s", "v2.5-beta2");
         ImGui::Spacing();
 
         // Option to enable beta builds from dev branch
-        state::AppConfig cfg;
-        cfg.load();
-        bool includeBeta = cfg.checkBetaUpdates;
+        bool includeBeta = m_cachedConfig.checkBetaUpdates;
         if (ImGui::Checkbox("Enable beta builds from 'dev' branch on GitHub", &includeBeta)) {
-            cfg.checkBetaUpdates = includeBeta;
-            cfg.save();
+            m_cachedConfig.checkBetaUpdates = includeBeta;
+            m_cachedConfig.save();
             UpdateChecker::instance().checkForUpdates(includeBeta);
         }
         if (ImGui::IsItemHovered()) {
@@ -2861,9 +2809,9 @@ void RackView::renderUpdateModal() {
 
             ImGui::Spacing();
             if (!info.assetUrl.empty()) {
-                ImGui::PushStyleColor(ImGuiCol_Button, ColorToken(tokens.signal.active.r, tokens.signal.active.g, tokens.signal.active.b, 0.45f).vec4);
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ColorToken(tokens.signal.active.r, tokens.signal.active.g, tokens.signal.active.b, 0.65f).vec4);
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ColorToken(tokens.signal.active.r, tokens.signal.active.g, tokens.signal.active.b, 0.85f).vec4);
+                ImGui::PushStyleColor(ImGuiCol_Button, tokens.signal.active.withAlpha(0.45f).vec4);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, tokens.signal.active.withAlpha(0.65f).vec4);
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, tokens.signal.active.withAlpha(0.85f).vec4);
                 if (CenteredButton("Download & Apply Update", ImVec2(210, 30))) {
                     UpdateChecker::instance().startDownload();
                 }
@@ -2909,9 +2857,9 @@ void RackView::renderUpdateModal() {
             ImGui::TextWrapped("Praccy will now close, copy the updated files into place, and restart automatically.");
             ImGui::Spacing();
 
-            ImGui::PushStyleColor(ImGuiCol_Button, ColorToken(tokens.signal.active.r, tokens.signal.active.g, tokens.signal.active.b, 0.45f).vec4);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ColorToken(tokens.signal.active.r, tokens.signal.active.g, tokens.signal.active.b, 0.65f).vec4);
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ColorToken(tokens.signal.active.r, tokens.signal.active.g, tokens.signal.active.b, 0.85f).vec4);
+            ImGui::PushStyleColor(ImGuiCol_Button, tokens.signal.active.withAlpha(0.45f).vec4);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, tokens.signal.active.withAlpha(0.65f).vec4);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, tokens.signal.active.withAlpha(0.85f).vec4);
             if (CenteredButton("Restart & Apply Update Now", ImVec2(230, 32))) {
                 UpdateChecker::instance().applyUpdateAndRestart();
             }
@@ -3205,30 +3153,10 @@ void RackView::renderFloatingHudToast() {
     if (ImGui::Begin("##FloatingHudToastOverlay", nullptr, flags)) {
         ImDrawList* dl = ImGui::GetWindowDrawList();
 
-        const ImU32 bgCol = ColorToken(
-            static_cast<uint8_t>(tokens.surfaces.cardBg.r * 255.0f),
-            static_cast<uint8_t>(tokens.surfaces.cardBg.g * 255.0f),
-            static_cast<uint8_t>(tokens.surfaces.cardBg.b * 255.0f),
-            static_cast<uint8_t>(std::clamp(tokens.surfaces.cardBg.a * alpha * 0.95f * 255.0f, 0.0f, 255.0f))
-        ).u32;
-        const ImU32 borderCol = ColorToken(
-            static_cast<uint8_t>(tokens.borders.focus.r * 255.0f),
-            static_cast<uint8_t>(tokens.borders.focus.g * 255.0f),
-            static_cast<uint8_t>(tokens.borders.focus.b * 255.0f),
-            static_cast<uint8_t>(std::clamp(tokens.borders.focus.a * alpha * 0.90f * 255.0f, 0.0f, 255.0f))
-        ).u32;
-        const ImU32 textCol = ColorToken(
-            static_cast<uint8_t>(tokens.text.primary.r * 255.0f),
-            static_cast<uint8_t>(tokens.text.primary.g * 255.0f),
-            static_cast<uint8_t>(tokens.text.primary.b * 255.0f),
-            static_cast<uint8_t>(std::clamp(alpha * 255.0f, 0.0f, 255.0f))
-        ).u32;
-        const ImU32 ledCol = ColorToken(
-            static_cast<uint8_t>(tokens.signal.active.r * 255.0f),
-            static_cast<uint8_t>(tokens.signal.active.g * 255.0f),
-            static_cast<uint8_t>(tokens.signal.active.b * 255.0f),
-            static_cast<uint8_t>(std::clamp(alpha * 255.0f, 0.0f, 255.0f))
-        ).u32;
+        const ImU32 bgCol = tokens.surfaces.cardBg.withAlpha(tokens.surfaces.cardBg.a * alpha * 0.95f).u32;
+        const ImU32 borderCol = tokens.borders.focus.withAlpha(tokens.borders.focus.a * alpha * 0.90f).u32;
+        const ImU32 textCol = tokens.text.primary.withAlpha(alpha).u32;
+        const ImU32 ledCol = tokens.signal.active.withAlpha(alpha).u32;
 
         dl->AddRectFilled(ImVec2(posX, posY), ImVec2(posX + boxW, posY + boxH), bgCol, 8.0f);
         dl->AddRect(ImVec2(posX, posY), ImVec2(posX + boxW, posY + boxH), borderCol, 8.0f, 0, 1.5f);
@@ -3466,66 +3394,134 @@ void RackView::moveSlot(int srcIdx, int srcBlockIdx, int srcBranchIdx,
     }
     // 3. From Serial Rack into a Branch
     else if (srcBranchIdx == -1 && dstBranchIdx >= 0) {
-        auto node = m_graph.takeSerialNode(static_cast<size_t>(srcIdx));
-        if (!node) return;
-        slotName = node->name();
-        auto* rawSlot = dynamic_cast<audio::PluginSlot*>(node.get());
-        if (!rawSlot) {
-            // Cannot put non-plugin node into a branch; put back in serial
-            m_graph.insertSerialNode(static_cast<size_t>(srcIdx), std::move(node));
-            return;
-        }
-        node.release();
-        std::unique_ptr<audio::PluginSlot> slot(rawSlot);
-
-        auto* blk = dynamic_cast<audio::ParallelSplitMergeBlock*>(m_graph.getNode(dstBlockIdx));
-        auto* br = blk ? blk->getBranch(dstBranchIdx) : nullptr;
-        if (!br) {
-            m_graph.insertSerialNode(static_cast<size_t>(srcIdx), std::move(slot));
-            return;
-        }
-
-        if (dstIdx < 0 || static_cast<size_t>(dstIdx) >= br->numSlots()) {
-            br->addSlot(std::move(slot));
+        if (m_asio.isRunning()) {
+            auto scene = state::SceneManager::captureGraphSnapshot(m_graph, "Move");
+            if (static_cast<size_t>(srcIdx) < scene.nodes.size()) {
+                auto node = std::move(scene.nodes[srcIdx]);
+                scene.nodes.erase(scene.nodes.begin() + srcIdx);
+                slotName = node.slot.name;
+                size_t actualDstBlock = static_cast<size_t>(dstBlockIdx);
+                if (srcIdx < dstBlockIdx && actualDstBlock > 0) {
+                    actualDstBlock--;
+                }
+                if (actualDstBlock < scene.nodes.size() && scene.nodes[actualDstBlock].kind == state::NodePreset::Kind::ParallelBlock) {
+                    auto& branches = scene.nodes[actualDstBlock].branches;
+                    if (static_cast<size_t>(dstBranchIdx) < branches.size()) {
+                        auto& brSlots = branches[dstBranchIdx].slots;
+                        size_t insertIdx = (dstIdx < 0 || static_cast<size_t>(dstIdx) >= brSlots.size()) ? brSlots.size() : static_cast<size_t>(dstIdx);
+                        brSlots.insert(brSlots.begin() + insertIdx, std::move(node.slot));
+                        m_scenes.applyGraphSnapshot(scene, m_graph);
+                    }
+                }
+            }
         } else {
-            br->insertSlot(static_cast<size_t>(dstIdx), std::move(slot));
+            auto node = m_graph.takeSerialNode(static_cast<size_t>(srcIdx));
+            if (!node) return;
+            slotName = node->name();
+            auto* rawSlot = dynamic_cast<audio::PluginSlot*>(node.get());
+            if (!rawSlot) {
+                // Cannot put non-plugin node into a branch; put back in serial
+                m_graph.insertSerialNode(static_cast<size_t>(srcIdx), std::move(node));
+                return;
+            }
+            node.release();
+            std::unique_ptr<audio::PluginSlot> slot(rawSlot);
+
+            auto* blk = dynamic_cast<audio::ParallelSplitMergeBlock*>(m_graph.getNode(dstBlockIdx));
+            auto* br = blk ? blk->getBranch(dstBranchIdx) : nullptr;
+            if (!br) {
+                m_graph.insertSerialNode(static_cast<size_t>(srcIdx), std::move(slot));
+                return;
+            }
+
+            if (dstIdx < 0 || static_cast<size_t>(dstIdx) >= br->numSlots()) {
+                br->addSlot(std::move(slot));
+            } else {
+                br->insertSlot(static_cast<size_t>(dstIdx), std::move(slot));
+            }
         }
     }
     // 4. From a Branch into Serial Rack
     else if (srcBranchIdx >= 0 && dstBranchIdx == -1) {
-        auto* blk = dynamic_cast<audio::ParallelSplitMergeBlock*>(m_graph.getNode(srcBlockIdx));
-        auto* br = blk ? blk->getBranch(srcBranchIdx) : nullptr;
-        if (!br) return;
-        auto slot = br->takeSlot(static_cast<size_t>(srcIdx));
-        if (!slot) return;
-        slotName = slot->name();
+        if (m_asio.isRunning()) {
+            auto scene = state::SceneManager::captureGraphSnapshot(m_graph, "Move");
+            if (static_cast<size_t>(srcBlockIdx) < scene.nodes.size() && scene.nodes[srcBlockIdx].kind == state::NodePreset::Kind::ParallelBlock) {
+                auto& branches = scene.nodes[srcBlockIdx].branches;
+                if (static_cast<size_t>(srcBranchIdx) < branches.size()) {
+                    auto& brSlots = branches[srcBranchIdx].slots;
+                    if (static_cast<size_t>(srcIdx) < brSlots.size()) {
+                        auto slotPreset = std::move(brSlots[srcIdx]);
+                        brSlots.erase(brSlots.begin() + srcIdx);
+                        slotName = slotPreset.name;
 
-        if (dstIdx < 0 || static_cast<size_t>(dstIdx) >= m_graph.numNodes()) {
-            m_graph.addSerialNode(std::move(slot));
+                        state::NodePreset newNode;
+                        newNode.kind = state::NodePreset::Kind::Plugin;
+                        newNode.slot = std::move(slotPreset);
+
+                        size_t insertIdx = (dstIdx < 0 || static_cast<size_t>(dstIdx) >= scene.nodes.size()) ? scene.nodes.size() : static_cast<size_t>(dstIdx);
+                        scene.nodes.insert(scene.nodes.begin() + insertIdx, std::move(newNode));
+                        m_scenes.applyGraphSnapshot(scene, m_graph);
+                    }
+                }
+            }
         } else {
-            m_graph.insertSerialNode(static_cast<size_t>(dstIdx), std::move(slot));
+            auto* blk = dynamic_cast<audio::ParallelSplitMergeBlock*>(m_graph.getNode(srcBlockIdx));
+            auto* br = blk ? blk->getBranch(srcBranchIdx) : nullptr;
+            if (!br) return;
+            auto slot = br->takeSlot(static_cast<size_t>(srcIdx));
+            if (!slot) return;
+            slotName = slot->name();
+
+            if (dstIdx < 0 || static_cast<size_t>(dstIdx) >= m_graph.numNodes()) {
+                m_graph.addSerialNode(std::move(slot));
+            } else {
+                m_graph.insertSerialNode(static_cast<size_t>(dstIdx), std::move(slot));
+            }
         }
     }
     // 5. From one Branch into another Branch (Branch A -> Branch B, or Branch B -> Branch A)
     else if (srcBranchIdx >= 0 && dstBranchIdx >= 0) {
-        auto* srcBlk = dynamic_cast<audio::ParallelSplitMergeBlock*>(m_graph.getNode(srcBlockIdx));
-        auto* srcBr = srcBlk ? srcBlk->getBranch(srcBranchIdx) : nullptr;
-        if (!srcBr) return;
-        auto slot = srcBr->takeSlot(static_cast<size_t>(srcIdx));
-        if (!slot) return;
-        slotName = slot->name();
+        if (m_asio.isRunning()) {
+            auto scene = state::SceneManager::captureGraphSnapshot(m_graph, "Move");
+            if (static_cast<size_t>(srcBlockIdx) < scene.nodes.size() && static_cast<size_t>(dstBlockIdx) < scene.nodes.size()) {
+                auto& srcBlock = scene.nodes[srcBlockIdx];
+                auto& dstBlock = scene.nodes[dstBlockIdx];
+                if (srcBlock.kind == state::NodePreset::Kind::ParallelBlock && dstBlock.kind == state::NodePreset::Kind::ParallelBlock) {
+                    if (static_cast<size_t>(srcBranchIdx) < srcBlock.branches.size() && static_cast<size_t>(dstBranchIdx) < dstBlock.branches.size()) {
+                        auto& srcSlots = srcBlock.branches[srcBranchIdx].slots;
+                        auto& dstSlots = dstBlock.branches[dstBranchIdx].slots;
+                        if (static_cast<size_t>(srcIdx) < srcSlots.size()) {
+                            auto slotPreset = std::move(srcSlots[srcIdx]);
+                            srcSlots.erase(srcSlots.begin() + srcIdx);
+                            slotName = slotPreset.name;
 
-        auto* dstBlk = dynamic_cast<audio::ParallelSplitMergeBlock*>(m_graph.getNode(dstBlockIdx));
-        auto* dstBr = dstBlk ? dstBlk->getBranch(dstBranchIdx) : nullptr;
-        if (!dstBr) {
-            srcBr->insertSlot(static_cast<size_t>(srcIdx), std::move(slot));
-            return;
-        }
-
-        if (dstIdx < 0 || static_cast<size_t>(dstIdx) >= dstBr->numSlots()) {
-            dstBr->addSlot(std::move(slot));
+                            size_t insertIdx = (dstIdx < 0 || static_cast<size_t>(dstIdx) >= dstSlots.size()) ? dstSlots.size() : static_cast<size_t>(dstIdx);
+                            dstSlots.insert(dstSlots.begin() + insertIdx, std::move(slotPreset));
+                            m_scenes.applyGraphSnapshot(scene, m_graph);
+                        }
+                    }
+                }
+            }
         } else {
-            dstBr->insertSlot(static_cast<size_t>(dstIdx), std::move(slot));
+            auto* srcBlk = dynamic_cast<audio::ParallelSplitMergeBlock*>(m_graph.getNode(srcBlockIdx));
+            auto* srcBr = srcBlk ? srcBlk->getBranch(srcBranchIdx) : nullptr;
+            if (!srcBr) return;
+            auto slot = srcBr->takeSlot(static_cast<size_t>(srcIdx));
+            if (!slot) return;
+            slotName = slot->name();
+
+            auto* dstBlk = dynamic_cast<audio::ParallelSplitMergeBlock*>(m_graph.getNode(dstBlockIdx));
+            auto* dstBr = dstBlk ? dstBlk->getBranch(dstBranchIdx) : nullptr;
+            if (!dstBr) {
+                srcBr->insertSlot(static_cast<size_t>(srcIdx), std::move(slot));
+                return;
+            }
+
+            if (dstIdx < 0 || static_cast<size_t>(dstIdx) >= dstBr->numSlots()) {
+                dstBr->addSlot(std::move(slot));
+            } else {
+                dstBr->insertSlot(static_cast<size_t>(dstIdx), std::move(slot));
+            }
         }
     }
 

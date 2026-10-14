@@ -1,4 +1,5 @@
 #include "audio_player.h"
+#include "../utils/wav_reader.h"
 #include <fstream>
 #include <filesystem>
 #include <cmath>
@@ -6,28 +7,6 @@
 #include <chrono>
 
 namespace praccy::tools {
-
-#pragma pack(push, 1)
-struct RiffHeader {
-    char riffTag[4];      // "RIFF"
-    uint32_t fileSize;
-    char waveTag[4];      // "WAVE"
-};
-
-struct ChunkHeader {
-    char tag[4];
-    uint32_t size;
-};
-
-struct FmtChunk {
-    uint16_t audioFormat;    // 1 = PCM, 3 = IEEE float
-    uint16_t numChannels;
-    uint32_t sampleRate;
-    uint32_t byteRate;
-    uint16_t blockAlign;
-    uint16_t bitsPerSample;
-};
-#pragma pack(pop)
 
 AudioPlayer::AudioPlayer() = default;
 
@@ -37,6 +16,15 @@ AudioPlayer::~AudioPlayer() {
 
 void AudioPlayer::prepare(double sampleRate) {
     m_sampleRate = sampleRate;
+}
+
+void AudioPlayer::retireBuffer(AudioTrackBuffer* oldBuf) {
+    if (!oldBuf) return;
+
+    while (m_audioReadingBuffer.load(std::memory_order_seq_cst) == oldBuf) {
+        std::this_thread::yield();
+    }
+    delete oldBuf;
 }
 
 bool AudioPlayer::loadWavFile(const std::string& filePath) {
@@ -85,129 +73,52 @@ bool AudioPlayer::loadWavFileSync(const std::string& filePath) {
 }
 
 bool AudioPlayer::executeLoad(const std::string& filePath, std::stop_token stopToken) {
-    std::ifstream file(filePath, std::ios::binary);
-    if (!file.is_open()) return false;
+    if (stopToken.stop_requested()) return false;
 
-    RiffHeader riff{};
-    file.read(reinterpret_cast<char*>(&riff), sizeof(riff));
-    if (file.gcount() < static_cast<std::streamsize>(sizeof(riff))) return false;
+    praccy::utils::WavAudioData wavData;
+    m_loadProgress.store(0.10f, std::memory_order_relaxed);
 
-    if (std::memcmp(riff.riffTag, "RIFF", 4) != 0 || std::memcmp(riff.waveTag, "WAVE", 4) != 0) {
+    if (!praccy::utils::WavReader::loadWavFile(filePath, wavData) || wavData.numFrames == 0) {
         return false;
     }
 
-    FmtChunk fmt{};
-    bool foundFmt = false;
-    std::vector<uint8_t> rawAudioData;
-
-    while (file) {
-        if (stopToken.stop_requested()) return false;
-        ChunkHeader chunk{};
-        file.read(reinterpret_cast<char*>(&chunk), sizeof(chunk));
-        if (file.gcount() < static_cast<std::streamsize>(sizeof(chunk))) break;
-
-        if (std::memcmp(chunk.tag, "fmt ", 4) == 0) {
-            uint32_t readSize = std::min(chunk.size, static_cast<uint32_t>(sizeof(fmt)));
-            file.read(reinterpret_cast<char*>(&fmt), readSize);
-            if (chunk.size > readSize) {
-                file.seekg(chunk.size - readSize, std::ios::cur);
-            }
-            foundFmt = true;
-        } else if (std::memcmp(chunk.tag, "data", 4) == 0) {
-            rawAudioData.resize(chunk.size);
-            file.read(reinterpret_cast<char*>(rawAudioData.data()), chunk.size);
-            break;
-        } else {
-            file.seekg(chunk.size, std::ios::cur);
-        }
-    }
-
-    if (!foundFmt || rawAudioData.empty()) return false;
-    if (fmt.numChannels == 0 || fmt.bitsPerSample == 0) return false;
     if (stopToken.stop_requested()) return false;
-
-    const size_t bytesPerSample = fmt.bitsPerSample / 8;
-    const size_t frameSize = fmt.numChannels * bytesPerSample;
-    const size_t numFrames = rawAudioData.size() / frameSize;
-    if (numFrames == 0) return false;
-
-    m_loadProgress.store(0.15f, std::memory_order_relaxed);
-
-    std::vector<float> srcL(numFrames);
-    std::vector<float> srcR(numFrames);
-
-    const uint8_t* ptr = rawAudioData.data();
-    for (size_t i = 0; i < numFrames; ++i) {
-        if ((i & 0x3FFF) == 0) {
-            if (stopToken.stop_requested()) return false;
-            float p = 0.15f + 0.50f * (static_cast<float>(i) / static_cast<float>(numFrames));
-            m_loadProgress.store(p, std::memory_order_relaxed);
-        }
-
-        float s0 = 0.0f;
-        float s1 = 0.0f;
-
-        if (fmt.audioFormat == 1) { // PCM
-            if (fmt.bitsPerSample == 16) {
-                const int16_t* p16 = reinterpret_cast<const int16_t*>(ptr);
-                s0 = p16[0] / 32768.0f;
-                s1 = (fmt.numChannels > 1) ? (p16[1] / 32768.0f) : s0;
-            } else if (fmt.bitsPerSample == 24) {
-                auto read24 = [](const uint8_t* b) -> float {
-                    int32_t val = (b[0] << 8) | (b[1] << 16) | (b[2] << 24);
-                    return (val >> 8) / 8388608.0f;
-                };
-                s0 = read24(ptr);
-                s1 = (fmt.numChannels > 1) ? read24(ptr + 3) : s0;
-            } else if (fmt.bitsPerSample == 32) {
-                const int32_t* p32 = reinterpret_cast<const int32_t*>(ptr);
-                s0 = p32[0] / 2147483648.0f;
-                s1 = (fmt.numChannels > 1) ? (p32[1] / 2147483648.0f) : s0;
-            }
-        } else if (fmt.audioFormat == 3) { // IEEE Float
-            if (fmt.bitsPerSample == 32) {
-                const float* pf = reinterpret_cast<const float*>(ptr);
-                s0 = pf[0];
-                s1 = (fmt.numChannels > 1) ? pf[1] : s0;
-            }
-        }
-
-        srcL[i] = s0;
-        srcR[i] = s1;
-        ptr += frameSize;
-    }
+    m_loadProgress.store(0.40f, std::memory_order_relaxed);
 
     auto newTrack = std::make_unique<AudioTrackBuffer>();
 
     // Resample to m_sampleRate if needed
-    if (fmt.sampleRate != static_cast<uint32_t>(m_sampleRate) && fmt.sampleRate > 0) {
-        double ratio = m_sampleRate / static_cast<double>(fmt.sampleRate);
-        size_t targetFrames = static_cast<size_t>(numFrames * ratio);
+    if (wavData.sampleRate != static_cast<uint32_t>(m_sampleRate) && wavData.sampleRate > 0) {
+        double ratio = m_sampleRate / static_cast<double>(wavData.sampleRate);
+        size_t targetFrames = static_cast<size_t>(wavData.numFrames * ratio);
         newTrack->samplesL.resize(targetFrames);
         newTrack->samplesR.resize(targetFrames);
 
         for (size_t i = 0; i < targetFrames; ++i) {
             if ((i & 0x3FFF) == 0) {
                 if (stopToken.stop_requested()) return false;
-                float p = 0.65f + 0.25f * (static_cast<float>(i) / static_cast<float>(targetFrames));
+                float p = 0.40f + 0.35f * (static_cast<float>(i) / static_cast<float>(targetFrames));
                 m_loadProgress.store(p, std::memory_order_relaxed);
             }
             double srcIdx = i / ratio;
             size_t idx0 = static_cast<size_t>(srcIdx);
-            size_t idx1 = std::min(idx0 + 1, numFrames - 1);
+            size_t idx1 = std::min(idx0 + 1, wavData.numFrames - 1);
             float frac = static_cast<float>(srcIdx - idx0);
 
-            newTrack->samplesL[i] = srcL[idx0] * (1.0f - frac) + srcL[idx1] * frac;
-            newTrack->samplesR[i] = srcR[idx0] * (1.0f - frac) + srcR[idx1] * frac;
+            newTrack->samplesL[i] = wavData.samplesL[idx0] * (1.0f - frac) + wavData.samplesL[idx1] * frac;
+            newTrack->samplesR[i] = wavData.samplesR[idx0] * (1.0f - frac) + wavData.samplesR[idx1] * frac;
         }
     } else {
-        newTrack->samplesL = std::move(srcL);
-        newTrack->samplesR = std::move(srcR);
+        newTrack->samplesL = std::move(wavData.samplesL);
+        newTrack->samplesR = std::move(wavData.samplesR);
     }
 
     newTrack->numFrames = newTrack->samplesL.size();
     newTrack->filePath = filePath;
     newTrack->fileName = std::filesystem::path(filePath).filename().string();
+
+    if (stopToken.stop_requested()) return false;
+    m_loadProgress.store(0.80f, std::memory_order_relaxed);
 
     // Precalculate 800-point overview waveform peaks
     constexpr size_t kPeakPoints = 800;
@@ -249,11 +160,7 @@ bool AudioPlayer::executeLoad(const std::string& filePath, std::stop_token stopT
     m_loadProgress.store(1.0f, std::memory_order_release);
     m_isLoading.store(false, std::memory_order_release);
 
-    if (oldBuf) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(30));
-        delete oldBuf;
-    }
-
+    retireBuffer(oldBuf);
     return true;
 }
 
@@ -274,10 +181,7 @@ void AudioPlayer::unload() {
     m_isLoading.store(false, std::memory_order_release);
     m_loadProgress.store(0.0f, std::memory_order_release);
 
-    if (oldBuf) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(30));
-        delete oldBuf;
-    }
+    retireBuffer(oldBuf);
 }
 
 void AudioPlayer::play() {
@@ -339,8 +243,19 @@ std::vector<std::pair<float, float>> AudioPlayer::waveformPeaks800() const {
 void AudioPlayer::process(audio::AudioBufferView& output) {
     if (!m_isPlaying.load(std::memory_order_relaxed) || !m_isLoaded.load(std::memory_order_relaxed)) return;
 
-    const AudioTrackBuffer* buf = m_activeBuffer.load(std::memory_order_acquire);
-    if (!buf || buf->numFrames == 0) return;
+    const AudioTrackBuffer* buf = nullptr;
+    while (true) {
+        buf = m_activeBuffer.load(std::memory_order_acquire);
+        m_audioReadingBuffer.store(buf, std::memory_order_seq_cst);
+        if (buf == m_activeBuffer.load(std::memory_order_acquire)) {
+            break;
+        }
+    }
+
+    if (!buf || buf->numFrames == 0) {
+        m_audioReadingBuffer.store(nullptr, std::memory_order_release);
+        return;
+    }
 
     const size_t totalFrames = buf->numFrames;
     const uint32_t numSamples = output.numSamples();
@@ -351,11 +266,24 @@ void AudioPlayer::process(audio::AudioBufferView& output) {
 
     size_t curHead = m_playhead.load(std::memory_order_relaxed);
 
+    const float loopStartNorm = std::clamp(m_loopStartNorm.load(std::memory_order_relaxed), 0.0f, 1.0f);
+    const float loopEndNorm = std::clamp(m_loopEndNorm.load(std::memory_order_relaxed), 0.0f, 1.0f);
+    const size_t loopStartFrame = static_cast<size_t>(loopStartNorm * totalFrames);
+    const size_t loopEndFrame = (loopEndNorm > loopStartNorm)
+        ? std::min<size_t>(totalFrames, static_cast<size_t>(loopEndNorm * totalFrames))
+        : totalFrames;
+
+    if (loop && (curHead < loopStartFrame || curHead >= loopEndFrame)) {
+        curHead = loopStartFrame;
+    }
+
     for (uint32_t s = 0; s < numSamples; ++s) {
-        if (curHead >= totalFrames) {
-            if (loop) {
-                curHead = 0;
-            } else {
+        if (loop) {
+            if (curHead >= loopEndFrame) {
+                curHead = loopStartFrame;
+            }
+        } else {
+            if (curHead >= totalFrames) {
                 m_isPlaying.store(false, std::memory_order_relaxed);
                 break;
             }
@@ -366,6 +294,7 @@ void AudioPlayer::process(audio::AudioBufferView& output) {
     }
 
     m_playhead.store(curHead, std::memory_order_relaxed);
+    m_audioReadingBuffer.store(nullptr, std::memory_order_release);
 }
 
 } // namespace praccy::tools

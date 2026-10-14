@@ -67,11 +67,9 @@ public:
     void setRackViewMode(state::AppConfig::RackViewMode mode) noexcept { m_rackViewMode = mode; }
 
 private:
-    void renderPraccyLogo();
     bool renderStatusPill(bool isRunning, const char* statusText);
     void renderPracticeRibbon();
     void renderSignalRack();
-    void renderSignalCable(float width = 36.0f);
     void renderInputCard(float cardY = -1.0f);
     void renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int blockIndex = -1, int branchIndex = -1);
     void renderParallelBlock(audio::ParallelSplitMergeBlock* block, int blockIndex, float centerY);
@@ -79,7 +77,6 @@ private:
     void renderBottomBar();
     void renderMeter(const char* label, float level, float width, float height);
     void renderDspTweakModal();
-    bool renderRotaryKnob(const char* label, float* value, float minVal, float maxVal, float radius, const char* format = "%.1f", float defaultVal = 0.0f);
     void renderUpdateModal();
     void renderFloatingHudToast();
     void renderPresetBrowserModal();
@@ -134,6 +131,7 @@ private:
     float m_expandPulseTimer{0.0f};
 
     bool m_showUpdateModal{false};
+    state::AppConfig m_cachedConfig;
 
     state::UndoManager m_undoManager;
     audio::RetroactiveRiffBuffer m_riffBuffer;

@@ -6,6 +6,7 @@
 #include <deque>
 #include <chrono>
 #include <thread>
+#undef NDEBUG
 #include <cassert>
 #include <cmath>
 #include <cstring>
@@ -25,6 +26,9 @@
 namespace praccy::state {
     std::unique_ptr<audio::PluginSlot> SceneManager::createSlotFromPreset(const PluginSlotPreset&) {
         return nullptr;
+    }
+    bool SceneManager::applyGraphSnapshot(const ScenePreset&, audio::GraphEngine&) {
+        return true;
     }
 }
 

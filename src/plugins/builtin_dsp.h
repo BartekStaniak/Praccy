@@ -38,8 +38,8 @@ public:
         return s_path;
     }
 
-    [[nodiscard]] std::vector<uint8_t> saveState() const override { return {}; }
-    bool loadState(const std::vector<uint8_t>&) override { return true; }
+    [[nodiscard]] std::vector<uint8_t> saveState() const override;
+    bool loadState(const std::vector<uint8_t>& state) override;
 
 private:
     std::string m_name{"Praccy Drive"};
@@ -83,8 +83,8 @@ public:
         return s_path;
     }
 
-    [[nodiscard]] std::vector<uint8_t> saveState() const override { return {}; }
-    bool loadState(const std::vector<uint8_t>&) override { return true; }
+    [[nodiscard]] std::vector<uint8_t> saveState() const override;
+    bool loadState(const std::vector<uint8_t>& state) override;
 
 private:
     std::string m_name{"Praccy Amp Sim"};
@@ -130,8 +130,8 @@ public:
         return s_path;
     }
 
-    [[nodiscard]] std::vector<uint8_t> saveState() const override { return {}; }
-    bool loadState(const std::vector<uint8_t>&) override { return true; }
+    [[nodiscard]] std::vector<uint8_t> saveState() const override;
+    bool loadState(const std::vector<uint8_t>& state) override;
 
 private:
     std::string m_name{"Praccy Stereo Delay"};

@@ -1,31 +1,11 @@
 #include "quick_looper.h"
+#include "../utils/wav_reader.h"
 #include <cstring>
 #include <fstream>
 #include <cstdint>
 #include <cmath>
 #include <filesystem>
 
-#pragma pack(push, 1)
-struct LooperRiffHeader {
-    char riffTag[4];
-    uint32_t fileSize;
-    char waveTag[4];
-};
-
-struct LooperChunkHeader {
-    char tag[4];
-    uint32_t size;
-};
-
-struct LooperFmtChunk {
-    uint16_t audioFormat;
-    uint16_t numChannels;
-    uint32_t sampleRate;
-    uint32_t byteRate;
-    uint16_t blockAlign;
-    uint16_t bitsPerSample;
-};
-#pragma pack(pop)
 
 namespace praccy::tools {
 
@@ -66,50 +46,108 @@ void QuickLooper::prepare(double sampleRate, uint32_t maxSeconds, uint32_t maxBl
     clear();
 }
 
-void QuickLooper::triggerAction() {
-    LooperState s = m_state.load(std::memory_order_relaxed);
-    switch (s) {
-        case LooperState::Empty:
-        case LooperState::Stopped:
-            // Start recording fresh loop
+void QuickLooper::executeCommand(LooperCommand cmd) {
+    switch (cmd) {
+        case LooperCommand::Clear: {
+            m_state.store(LooperState::Empty, std::memory_order_relaxed);
             m_head.store(0, std::memory_order_relaxed);
             m_loopLength.store(0, std::memory_order_relaxed);
-            std::fill(m_loopBufferL.begin(), m_loopBufferL.end(), 0.0f);
-            std::fill(m_loopBufferR.begin(), m_loopBufferR.end(), 0.0f);
             m_canUndo.store(false, std::memory_order_relaxed);
             m_canRedo.store(false, std::memory_order_relaxed);
-            m_state.store(LooperState::Recording, std::memory_order_relaxed);
+            std::fill(m_loopBufferL.begin(), m_loopBufferL.end(), 0.0f);
+            std::fill(m_loopBufferR.begin(), m_loopBufferR.end(), 0.0f);
             break;
-
-        case LooperState::Recording:
-            // Lock loop length and immediately start looping playback
-            if (m_head.load(std::memory_order_relaxed) > 1000) {
-                m_loopLength.store(m_head.load(std::memory_order_relaxed), std::memory_order_relaxed);
-                m_head.store(0, std::memory_order_relaxed);
-                m_state.store(LooperState::Playing, std::memory_order_relaxed);
-            } else {
-                clear();
-            }
-            break;
-
-        case LooperState::Playing:
-            // Switch to Overdubbing: snapshot current layer so it can be undone
-            {
-                size_t len = m_loopLength.load(std::memory_order_relaxed);
-                if (len > 0 && len <= m_maxFrames && len <= m_undoBufferL.size()) {
-                    std::memcpy(m_undoBufferL.data(), m_loopBufferL.data(), len * sizeof(float));
-                    std::memcpy(m_undoBufferR.data(), m_loopBufferR.data(), len * sizeof(float));
-                    m_canUndo.store(true, std::memory_order_relaxed);
+        }
+        case LooperCommand::TriggerAction: {
+            LooperState s = m_state.load(std::memory_order_relaxed);
+            switch (s) {
+                case LooperState::Empty:
+                case LooperState::Stopped:
+                    // Start recording fresh loop
+                    m_head.store(0, std::memory_order_relaxed);
+                    m_loopLength.store(0, std::memory_order_relaxed);
+                    std::fill(m_loopBufferL.begin(), m_loopBufferL.end(), 0.0f);
+                    std::fill(m_loopBufferR.begin(), m_loopBufferR.end(), 0.0f);
+                    m_canUndo.store(false, std::memory_order_relaxed);
                     m_canRedo.store(false, std::memory_order_relaxed);
-                }
-            }
-            m_state.store(LooperState::Overdubbing, std::memory_order_relaxed);
-            break;
+                    m_state.store(LooperState::Recording, std::memory_order_relaxed);
+                    break;
 
-        case LooperState::Overdubbing:
-            // Switch back to Playing
-            m_state.store(LooperState::Playing, std::memory_order_relaxed);
+                case LooperState::Recording:
+                    // Lock loop length and immediately start looping playback
+                    if (m_head.load(std::memory_order_relaxed) > 1000) {
+                        m_loopLength.store(m_head.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                        m_head.store(0, std::memory_order_relaxed);
+                        m_state.store(LooperState::Playing, std::memory_order_relaxed);
+                    } else {
+                        executeCommand(LooperCommand::Clear);
+                    }
+                    break;
+
+                case LooperState::Playing: {
+                    // Switch to Overdubbing: snapshot current layer so it can be undone
+                    size_t len = m_loopLength.load(std::memory_order_relaxed);
+                    if (len > 0 && len <= m_maxFrames && len <= m_undoBufferL.size()) {
+                        std::memcpy(m_undoBufferL.data(), m_loopBufferL.data(), len * sizeof(float));
+                        std::memcpy(m_undoBufferR.data(), m_loopBufferR.data(), len * sizeof(float));
+                        m_canUndo.store(true, std::memory_order_relaxed);
+                        m_canRedo.store(false, std::memory_order_relaxed);
+                    }
+                    m_state.store(LooperState::Overdubbing, std::memory_order_relaxed);
+                    break;
+                }
+
+                case LooperState::Overdubbing:
+                    // Switch back to Playing
+                    m_state.store(LooperState::Playing, std::memory_order_relaxed);
+                    break;
+            }
             break;
+        }
+        case LooperCommand::Undo: {
+            if (!m_canUndo.load(std::memory_order_relaxed)) break;
+            size_t len = m_loopLength.load(std::memory_order_relaxed);
+            if (len == 0 || len > m_maxFrames || len > m_undoBufferL.size() || len > m_redoBufferL.size()) break;
+
+            // Save current loop state into redo buffer
+            std::memcpy(m_redoBufferL.data(), m_loopBufferL.data(), len * sizeof(float));
+            std::memcpy(m_redoBufferR.data(), m_loopBufferR.data(), len * sizeof(float));
+
+            // Restore undo buffer into loop buffer
+            std::memcpy(m_loopBufferL.data(), m_undoBufferL.data(), len * sizeof(float));
+            std::memcpy(m_loopBufferR.data(), m_undoBufferR.data(), len * sizeof(float));
+
+            m_canUndo.store(false, std::memory_order_relaxed);
+            m_canRedo.store(true, std::memory_order_relaxed);
+            break;
+        }
+        case LooperCommand::Redo: {
+            if (!m_canRedo.load(std::memory_order_relaxed)) break;
+            size_t len = m_loopLength.load(std::memory_order_relaxed);
+            if (len == 0 || len > m_maxFrames || len > m_undoBufferL.size() || len > m_redoBufferL.size()) break;
+
+            // Save current into undo buffer
+            std::memcpy(m_undoBufferL.data(), m_loopBufferL.data(), len * sizeof(float));
+            std::memcpy(m_undoBufferR.data(), m_loopBufferR.data(), len * sizeof(float));
+
+            // Restore redo buffer into loop buffer
+            std::memcpy(m_loopBufferL.data(), m_redoBufferL.data(), len * sizeof(float));
+            std::memcpy(m_loopBufferR.data(), m_redoBufferR.data(), len * sizeof(float));
+
+            m_canUndo.store(true, std::memory_order_relaxed);
+            m_canRedo.store(false, std::memory_order_relaxed);
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+void QuickLooper::triggerAction() {
+    if (m_isProcessingAudio.load(std::memory_order_acquire)) {
+        m_pendingCommand.store(LooperCommand::TriggerAction, std::memory_order_release);
+    } else {
+        executeCommand(LooperCommand::TriggerAction);
     }
 }
 
@@ -121,49 +159,33 @@ void QuickLooper::stop() {
 }
 
 void QuickLooper::clear() {
-    m_state.store(LooperState::Empty, std::memory_order_relaxed);
-    m_head.store(0, std::memory_order_relaxed);
-    m_loopLength.store(0, std::memory_order_relaxed);
-    m_canUndo.store(false, std::memory_order_relaxed);
-    m_canRedo.store(false, std::memory_order_relaxed);
-    std::fill(m_loopBufferL.begin(), m_loopBufferL.end(), 0.0f);
-    std::fill(m_loopBufferR.begin(), m_loopBufferR.end(), 0.0f);
+    if (m_isProcessingAudio.load(std::memory_order_acquire)) {
+        m_pendingCommand.store(LooperCommand::Clear, std::memory_order_release);
+    } else {
+        executeCommand(LooperCommand::Clear);
+    }
 }
 
 bool QuickLooper::undo() {
     if (!m_canUndo.load(std::memory_order_relaxed)) return false;
-    size_t len = m_loopLength.load(std::memory_order_relaxed);
-    if (len == 0 || len > m_maxFrames || len > m_undoBufferL.size() || len > m_redoBufferL.size()) return false;
-
-    // Save current loop state into redo buffer
-    std::memcpy(m_redoBufferL.data(), m_loopBufferL.data(), len * sizeof(float));
-    std::memcpy(m_redoBufferR.data(), m_loopBufferR.data(), len * sizeof(float));
-
-    // Restore undo buffer into loop buffer
-    std::memcpy(m_loopBufferL.data(), m_undoBufferL.data(), len * sizeof(float));
-    std::memcpy(m_loopBufferR.data(), m_undoBufferR.data(), len * sizeof(float));
-
-    m_canUndo.store(false, std::memory_order_relaxed);
-    m_canRedo.store(true, std::memory_order_relaxed);
-    return true;
+    if (m_isProcessingAudio.load(std::memory_order_acquire)) {
+        m_pendingCommand.store(LooperCommand::Undo, std::memory_order_release);
+        return true;
+    } else {
+        executeCommand(LooperCommand::Undo);
+        return true;
+    }
 }
 
 bool QuickLooper::redo() {
     if (!m_canRedo.load(std::memory_order_relaxed)) return false;
-    size_t len = m_loopLength.load(std::memory_order_relaxed);
-    if (len == 0 || len > m_maxFrames || len > m_undoBufferL.size() || len > m_redoBufferL.size()) return false;
-
-    // Save current into undo buffer
-    std::memcpy(m_undoBufferL.data(), m_loopBufferL.data(), len * sizeof(float));
-    std::memcpy(m_undoBufferR.data(), m_loopBufferR.data(), len * sizeof(float));
-
-    // Restore redo buffer into loop buffer
-    std::memcpy(m_loopBufferL.data(), m_redoBufferL.data(), len * sizeof(float));
-    std::memcpy(m_loopBufferR.data(), m_redoBufferR.data(), len * sizeof(float));
-
-    m_canUndo.store(true, std::memory_order_relaxed);
-    m_canRedo.store(false, std::memory_order_relaxed);
-    return true;
+    if (m_isProcessingAudio.load(std::memory_order_acquire)) {
+        m_pendingCommand.store(LooperCommand::Redo, std::memory_order_release);
+        return true;
+    } else {
+        executeCommand(LooperCommand::Redo);
+        return true;
+    }
 }
 
 int QuickLooper::totalBeats() const noexcept {
@@ -214,6 +236,21 @@ float QuickLooper::playheadNormalized() const noexcept {
 }
 
 void QuickLooper::process(const audio::AudioBufferView& in, audio::AudioBufferView& out) {
+    struct ProcessingGuard {
+        std::atomic<bool>& flag;
+        explicit ProcessingGuard(std::atomic<bool>& f) noexcept : flag(f) {
+            flag.store(true, std::memory_order_release);
+        }
+        ~ProcessingGuard() noexcept {
+            flag.store(false, std::memory_order_release);
+        }
+    } guard(m_isProcessingAudio);
+
+    LooperCommand cmd = m_pendingCommand.exchange(LooperCommand::None, std::memory_order_acq_rel);
+    if (cmd != LooperCommand::None) {
+        executeCommand(cmd);
+    }
+
     LooperState s = m_state.load(std::memory_order_relaxed);
     if (s == LooperState::Empty || s == LooperState::Stopped) return;
 
@@ -272,106 +309,9 @@ void QuickLooper::process(const audio::AudioBufferView& in, audio::AudioBufferVi
 
 bool QuickLooper::loadWavFile(const std::string& filePath) {
     try {
-        std::ifstream file(filePath, std::ios::binary);
-        if (!file.is_open()) return false;
-
-        LooperRiffHeader riff{};
-        file.read(reinterpret_cast<char*>(&riff), sizeof(riff));
-        if (file.gcount() < static_cast<std::streamsize>(sizeof(riff))) return false;
-
-        if (std::memcmp(riff.riffTag, "RIFF", 4) != 0 || std::memcmp(riff.waveTag, "WAVE", 4) != 0) {
+        praccy::utils::WavAudioData wavData;
+        if (!praccy::utils::WavReader::loadWavFile(filePath, wavData) || wavData.numFrames == 0) {
             return false;
-        }
-
-        file.seekg(0, std::ios::end);
-        std::streampos fileSize = file.tellg();
-        if (fileSize < static_cast<std::streampos>(sizeof(riff))) return false;
-        file.seekg(sizeof(riff), std::ios::beg);
-
-        LooperFmtChunk fmt{};
-        bool foundFmt = false;
-        std::vector<uint8_t> rawAudioData;
-
-        while (file) {
-            LooperChunkHeader chunk{};
-            file.read(reinterpret_cast<char*>(&chunk), sizeof(chunk));
-            if (file.gcount() < static_cast<std::streamsize>(sizeof(chunk))) break;
-
-            std::streampos currentPos = file.tellg();
-            if (currentPos < 0) return false;
-
-            // Maximum allowed chunk size is 256 MB for looper audio data
-            constexpr uint32_t kMaxChunkSize = 256 * 1024 * 1024;
-            if (chunk.size > kMaxChunkSize) {
-                return false;
-            }
-
-            // Check against remaining file size in stream
-            if (static_cast<std::streampos>(chunk.size) > (fileSize - currentPos)) {
-                return false;
-            }
-
-            if (std::memcmp(chunk.tag, "fmt ", 4) == 0) {
-                uint32_t readSize = std::min(chunk.size, static_cast<uint32_t>(sizeof(fmt)));
-                file.read(reinterpret_cast<char*>(&fmt), readSize);
-                if (chunk.size > readSize) {
-                    file.seekg(chunk.size - readSize, std::ios::cur);
-                }
-                foundFmt = true;
-            } else if (std::memcmp(chunk.tag, "data", 4) == 0) {
-                rawAudioData.resize(chunk.size);
-                file.read(reinterpret_cast<char*>(rawAudioData.data()), chunk.size);
-                break;
-            } else {
-                file.seekg(chunk.size, std::ios::cur);
-            }
-        }
-
-        if (!foundFmt || rawAudioData.empty()) return false;
-        if (fmt.numChannels == 0 || fmt.bitsPerSample == 0) return false;
-
-        const size_t bytesPerSample = fmt.bitsPerSample / 8;
-        const size_t frameSize = fmt.numChannels * bytesPerSample;
-        if (frameSize == 0) return false;
-        const size_t numFrames = rawAudioData.size() / frameSize;
-        if (numFrames == 0) return false;
-
-        std::vector<float> srcL(numFrames);
-        std::vector<float> srcR(numFrames);
-
-        const uint8_t* ptr = rawAudioData.data();
-        for (size_t i = 0; i < numFrames; ++i) {
-            float s0 = 0.0f;
-            float s1 = 0.0f;
-
-            if (fmt.audioFormat == 1) { // PCM
-                if (fmt.bitsPerSample == 16) {
-                    const int16_t* p16 = reinterpret_cast<const int16_t*>(ptr);
-                    s0 = p16[0] / 32768.0f;
-                    s1 = (fmt.numChannels > 1) ? (p16[1] / 32768.0f) : s0;
-                } else if (fmt.bitsPerSample == 24) {
-                    auto read24 = [](const uint8_t* b) -> float {
-                        int32_t val = (b[0] << 8) | (b[1] << 16) | (b[2] << 24);
-                        return (val >> 8) / 8388608.0f;
-                    };
-                    s0 = read24(ptr);
-                    s1 = (fmt.numChannels > 1) ? read24(ptr + 3) : s0;
-                } else if (fmt.bitsPerSample == 32) {
-                    const int32_t* p32 = reinterpret_cast<const int32_t*>(ptr);
-                    s0 = p32[0] / 2147483648.0f;
-                    s1 = (fmt.numChannels > 1) ? (p32[1] / 2147483648.0f) : s0;
-                }
-            } else if (fmt.audioFormat == 3) { // IEEE Float
-                if (fmt.bitsPerSample == 32) {
-                    const float* pf = reinterpret_cast<const float*>(ptr);
-                    s0 = pf[0];
-                    s1 = (fmt.numChannels > 1) ? pf[1] : s0;
-                }
-            }
-
-            srcL[i] = s0;
-            srcR[i] = s1;
-            ptr += frameSize;
         }
 
         if (m_maxFrames == 0) {
@@ -381,24 +321,24 @@ bool QuickLooper::loadWavFile(const std::string& filePath) {
         // Resample if needed
         std::vector<float> finalL;
         std::vector<float> finalR;
-        if (fmt.sampleRate != static_cast<uint32_t>(m_sampleRate) && fmt.sampleRate > 0) {
-            double ratio = m_sampleRate / static_cast<double>(fmt.sampleRate);
-            size_t targetFrames = static_cast<size_t>(numFrames * ratio);
+        if (wavData.sampleRate != static_cast<uint32_t>(m_sampleRate) && wavData.sampleRate > 0) {
+            double ratio = m_sampleRate / static_cast<double>(wavData.sampleRate);
+            size_t targetFrames = static_cast<size_t>(wavData.numFrames * ratio);
             finalL.resize(targetFrames);
             finalR.resize(targetFrames);
 
             for (size_t i = 0; i < targetFrames; ++i) {
                 double srcIdx = i / ratio;
                 size_t idx0 = static_cast<size_t>(srcIdx);
-                size_t idx1 = std::min(idx0 + 1, numFrames - 1);
+                size_t idx1 = std::min(idx0 + 1, wavData.numFrames - 1);
                 float frac = static_cast<float>(srcIdx - idx0);
 
-                finalL[i] = srcL[idx0] * (1.0f - frac) + srcL[idx1] * frac;
-                finalR[i] = srcR[idx0] * (1.0f - frac) + srcR[idx1] * frac;
+                finalL[i] = wavData.samplesL[idx0] * (1.0f - frac) + wavData.samplesL[idx1] * frac;
+                finalR[i] = wavData.samplesR[idx0] * (1.0f - frac) + wavData.samplesR[idx1] * frac;
             }
         } else {
-            finalL = std::move(srcL);
-            finalR = std::move(srcR);
+            finalL = std::move(wavData.samplesL);
+            finalR = std::move(wavData.samplesR);
         }
 
         size_t copyFrames = std::min(finalL.size(), m_maxFrames);

@@ -11,8 +11,11 @@
 #include <atomic>
 #include <mutex>
 #include <array>
-#include <algorithm>
 #include "readerwriterqueue/readerwriterqueue.h"
+
+namespace praccy::plugins {
+class IPluginInstance;
+}
 
 namespace praccy::audio {
 
@@ -89,6 +92,7 @@ public:
 
 private:
     std::unique_ptr<AudioNode> m_innerNode;
+    plugins::IPluginInstance* m_pluginPtr{nullptr};
     std::atomic<float> m_dryWet{1.0f};      // 1.0 = 100% wet
     std::atomic<float> m_inputGainDb{0.0f};  // 0 dB
     std::atomic<float> m_outputGainDb{0.0f}; // 0 dB
@@ -188,6 +192,8 @@ public:
     [[nodiscard]] PluginSlot* getSlot(size_t index) noexcept {
         return (index < m_uiSlots.size()) ? m_uiSlots[index] : nullptr;
     }
+    void addSlotToUiShadow(PluginSlot* slot) { m_uiSlots.push_back(slot); }
+    [[nodiscard]] std::vector<std::unique_ptr<PluginSlot>>& activeSlots() noexcept { return m_activeSlots; }
 
     // Audio thread processing (Drains commands wait-free, pushes retired to reclaim queue)
     void process(AudioProcessContext& ctx);
@@ -250,6 +256,7 @@ private:
     // 5. Fail-Safe Audio Thread Stash (Prevents destruction on audio thread if queue is saturated)
     std::array<std::unique_ptr<PluginSlot>, 16> m_stashedReclamations;
     size_t m_stashedCount{0};
+    std::atomic<bool> m_isAudioRunning{false};
 
     // 6. Parallel Delay Compensation (PDC) stereo circular delay lines (16,384 samples)
     std::vector<float> m_delayBufferL;
@@ -344,7 +351,9 @@ enum class GraphCommandType : uint8_t {
     Swap,
     Reorder,
     Clear,
-    CrossfadeTo
+    CrossfadeTo,
+    SplitToParallel,
+    DissolveParallel
 };
 
 /**
@@ -414,6 +423,22 @@ struct GraphCommand {
         GraphCommand cmd;
         cmd.type = GraphCommandType::CrossfadeTo;
         cmd.chainPayload = std::move(chain);
+        return cmd;
+    }
+
+    static GraphCommand makeSplitToParallel(size_t index, std::unique_ptr<AudioNode> block) noexcept {
+        GraphCommand cmd;
+        cmd.type = GraphCommandType::SplitToParallel;
+        cmd.indexA = index;
+        cmd.node = std::move(block);
+        return cmd;
+    }
+
+    static GraphCommand makeDissolveParallel(size_t blockIndex, int branchToKeep) noexcept {
+        GraphCommand cmd;
+        cmd.type = GraphCommandType::DissolveParallel;
+        cmd.indexA = blockIndex;
+        cmd.indexB = static_cast<size_t>(branchToKeep >= 0 ? branchToKeep : 0);
         return cmd;
     }
 };
@@ -514,7 +539,8 @@ private:
     size_t m_stashedChainCount{0};
 
     // UI thread mutex (Guards UI shadow modifications, NEVER locked on audio thread!)
-    std::mutex m_uiMutex;
+    mutable std::mutex m_uiMutex;
+    std::atomic<bool> m_isAudioRunning{false};
 
     OwnedAudioBuffer m_mainProcessingBuffer;
     OwnedAudioBuffer m_scratchBuffer;

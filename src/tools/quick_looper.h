@@ -16,6 +16,14 @@ enum class LooperState {
     Stopped
 };
 
+enum class LooperCommand : uint32_t {
+    None = 0,
+    Clear,
+    TriggerAction,
+    Undo,
+    Redo
+};
+
 class QuickLooper {
 public:
     QuickLooper();
@@ -75,6 +83,11 @@ private:
     std::atomic<size_t> m_loopLength{0};
     std::atomic<size_t> m_head{0};
     std::atomic<float> m_volume{1.0f};
+
+    std::atomic<LooperCommand> m_pendingCommand{LooperCommand::None};
+    std::atomic<bool> m_isProcessingAudio{false};
+
+    void executeCommand(LooperCommand cmd);
 };
 
 } // namespace praccy::tools

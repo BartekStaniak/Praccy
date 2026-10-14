@@ -206,7 +206,18 @@ std::shared_ptr<XmlNode> XmlParser::parse(std::string_view xml) {
         }
 
         // 6. Opening tag: <tag attr="val"...> or self-closing <tag ... />
-        size_t endTag = xml.find('>', i + 1);
+        size_t endTag = std::string_view::npos;
+        char inQuote = 0;
+        for (size_t scanIdx = i + 1; scanIdx < xml.size(); ++scanIdx) {
+            char c = xml[scanIdx];
+            if (c == '"' || c == '\'') {
+                if (inQuote == 0) inQuote = c;
+                else if (inQuote == c) inQuote = 0;
+            } else if (c == '>' && inQuote == 0) {
+                endTag = scanIdx;
+                break;
+            }
+        }
         if (endTag == std::string_view::npos) break;
 
         bool selfClosing = false;

@@ -3,6 +3,7 @@
 #include <string>
 #include <cstring>
 #include <cmath>
+#undef NDEBUG
 #include <cassert>
 #include <chrono>
 #include <thread>
@@ -25,12 +26,18 @@ using namespace praccy;
 // 1. REAL-TIME AUDIO HEAP ALLOCATION MONITOR
 // ============================================================================
 
+#if defined(__GNUC__)
+#define PRACCY_NOINLINE __attribute__((noinline))
+#else
+#define PRACCY_NOINLINE
+#endif
+
 static thread_local bool t_isAudioThread = false;
 static std::atomic<size_t> g_audioThreadAllocCount{0};
 static std::atomic<size_t> g_audioThreadAllocBytes{0};
 static std::atomic<size_t> g_audioThreadFreeCount{0};
 
-void* operator new(std::size_t size) {
+PRACCY_NOINLINE void* operator new(std::size_t size) {
     if (t_isAudioThread) {
         g_audioThreadAllocCount.fetch_add(1, std::memory_order_relaxed);
         g_audioThreadAllocBytes.fetch_add(size, std::memory_order_relaxed);
@@ -40,14 +47,14 @@ void* operator new(std::size_t size) {
     return p;
 }
 
-void operator delete(void* p) noexcept {
+PRACCY_NOINLINE void operator delete(void* p) noexcept {
     if (t_isAudioThread && p != nullptr) {
         g_audioThreadFreeCount.fetch_add(1, std::memory_order_relaxed);
     }
     std::free(p);
 }
 
-void* operator new[](std::size_t size) {
+PRACCY_NOINLINE void* operator new[](std::size_t size) {
     if (t_isAudioThread) {
         g_audioThreadAllocCount.fetch_add(1, std::memory_order_relaxed);
         g_audioThreadAllocBytes.fetch_add(size, std::memory_order_relaxed);
@@ -57,25 +64,103 @@ void* operator new[](std::size_t size) {
     return p;
 }
 
-void operator delete[](void* p) noexcept {
+PRACCY_NOINLINE void operator delete[](void* p) noexcept {
     if (t_isAudioThread && p != nullptr) {
         g_audioThreadFreeCount.fetch_add(1, std::memory_order_relaxed);
     }
     std::free(p);
 }
 
-void operator delete(void* p, std::size_t) noexcept {
+PRACCY_NOINLINE void operator delete(void* p, std::size_t) noexcept {
     if (t_isAudioThread && p != nullptr) {
         g_audioThreadFreeCount.fetch_add(1, std::memory_order_relaxed);
     }
     std::free(p);
 }
 
-void operator delete[](void* p, std::size_t) noexcept {
+PRACCY_NOINLINE void operator delete[](void* p, std::size_t) noexcept {
     if (t_isAudioThread && p != nullptr) {
         g_audioThreadFreeCount.fetch_add(1, std::memory_order_relaxed);
     }
     std::free(p);
+}
+
+PRACCY_NOINLINE void* operator new(std::size_t size, std::align_val_t al) {
+    if (t_isAudioThread) {
+        g_audioThreadAllocCount.fetch_add(1, std::memory_order_relaxed);
+        g_audioThreadAllocBytes.fetch_add(size, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    void* p = _aligned_malloc(size ? size : 1, static_cast<std::size_t>(al));
+#else
+    void* p = std::aligned_alloc(static_cast<std::size_t>(al), size ? size : 1);
+#endif
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+PRACCY_NOINLINE void* operator new[](std::size_t size, std::align_val_t al) {
+    if (t_isAudioThread) {
+        g_audioThreadAllocCount.fetch_add(1, std::memory_order_relaxed);
+        g_audioThreadAllocBytes.fetch_add(size, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    void* p = _aligned_malloc(size ? size : 1, static_cast<std::size_t>(al));
+#else
+    void* p = std::aligned_alloc(static_cast<std::size_t>(al), size ? size : 1);
+#endif
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+PRACCY_NOINLINE void operator delete(void* p, std::align_val_t al) noexcept {
+    (void)al;
+    if (t_isAudioThread && p != nullptr) {
+        g_audioThreadFreeCount.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+PRACCY_NOINLINE void operator delete[](void* p, std::align_val_t al) noexcept {
+    (void)al;
+    if (t_isAudioThread && p != nullptr) {
+        g_audioThreadFreeCount.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+PRACCY_NOINLINE void operator delete(void* p, std::size_t size, std::align_val_t al) noexcept {
+    (void)size;
+    (void)al;
+    if (t_isAudioThread && p != nullptr) {
+        g_audioThreadFreeCount.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+PRACCY_NOINLINE void operator delete[](void* p, std::size_t size, std::align_val_t al) noexcept {
+    (void)size;
+    (void)al;
+    if (t_isAudioThread && p != nullptr) {
+        g_audioThreadFreeCount.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
 }
 
 // ============================================================================

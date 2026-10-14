@@ -5,6 +5,7 @@
 #include <string_view>
 #include <array>
 #include <cmath>
+#undef NDEBUG
 #include <cassert>
 #include <filesystem>
 #include <fstream>

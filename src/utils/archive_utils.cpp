@@ -222,6 +222,26 @@ bool extractZipArchiveCore(mz_zip_archive& zip,
             return false;
         }
 
+        // Verify post-extraction uncompressed size against bomb guards
+        if (uncompSize > guards.maxSingleFileSize) {
+            mz_free(pData);
+            outError = "Extracted file exceeds maxSingleFileSize limit: " + rawName;
+            return false;
+        }
+
+        const std::string extLower = safeRel.extension().string();
+        if ((extLower == ".xml" || extLower == ".dawproject") && uncompSize > guards.maxXmlSize) {
+            mz_free(pData);
+            outError = "Extracted XML file exceeds maxXmlSize limit: " + rawName;
+            return false;
+        }
+
+        if (stat.m_comp_size > 0 && (uncompSize / stat.m_comp_size) > guards.maxCompressionRatio) {
+            mz_free(pData);
+            outError = "Extracted file exceeds maxCompressionRatio: " + rawName;
+            return false;
+        }
+
         std::ofstream outFile(canonicalTarget, std::ios::binary | std::ios::trunc);
         if (!outFile.is_open()) {
             mz_free(pData);
@@ -339,22 +359,38 @@ bool ArchiveUtils::gzipDecompress(const std::vector<uint8_t>& gzData, std::strin
     size_t deflateLen = gzData.size() - 8 - offset;
     const uint8_t* deflateData = gzData.data() + offset;
 
-    size_t uncompLen = 0;
-    void* uncompBuf = tinfl_decompress_mem_to_heap(deflateData, deflateLen, &uncompLen, 0);
-    if (!uncompBuf) return false;
+    const size_t maxAllowedUncomp = std::min(kMaxDecompressedXmlBytes, deflateLen * kMaxCompressionRatio);
+    if (maxAllowedUncomp == 0) return false;
 
-    if (uncompLen > kMaxDecompressedXmlBytes) {
-        mz_free(uncompBuf);
+    std::vector<uint8_t> outBuffer(maxAllowedUncomp);
+    tinfl_decompressor decomp;
+    tinfl_init(&decomp);
+
+    size_t inBytes = deflateLen;
+    size_t outBytes = maxAllowedUncomp;
+    tinfl_status status = tinfl_decompress(
+        &decomp,
+        reinterpret_cast<const mz_uint8*>(deflateData),
+        &inBytes,
+        outBuffer.data(),
+        outBuffer.data(),
+        &outBytes,
+        TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF
+    );
+
+    if (status != TINFL_STATUS_DONE) {
         return false;
     }
 
-    if (deflateLen > 0 && (uncompLen / deflateLen) > kMaxCompressionRatio) {
-        mz_free(uncompBuf);
+    if (outBytes > kMaxDecompressedXmlBytes) {
         return false;
     }
 
-    outXml.assign(reinterpret_cast<const char*>(uncompBuf), uncompLen);
-    mz_free(uncompBuf);
+    if (deflateLen > 0 && (outBytes / deflateLen) > kMaxCompressionRatio) {
+        return false;
+    }
+
+    outXml.assign(reinterpret_cast<const char*>(outBuffer.data()), outBytes);
     return true;
 }
 

@@ -6,6 +6,7 @@
 #include <array>
 #include <deque>
 #include <cmath>
+#undef NDEBUG
 #include <cassert>
 #include <thread>
 #include <atomic>
@@ -23,7 +24,6 @@
 #include <new>
 
 #if defined(__GNUC__)
-#pragma GCC diagnostic ignored "-Wmismatched-new-delete"
 #pragma GCC diagnostic ignored "-Wunused-function"
 #endif
 
@@ -52,10 +52,16 @@ using namespace praccy;
 // ============================================================================
 // REAL-TIME MEMORY ALLOCATION TRACKING HOOKS
 // ============================================================================
+#if defined(__GNUC__)
+#define PRACCY_NOINLINE __attribute__((noinline))
+#else
+#define PRACCY_NOINLINE
+#endif
+
 static thread_local bool t_disallowAllocations = false;
 static thread_local size_t t_allocationsCount = 0;
 
-void* operator new(std::size_t size) {
+PRACCY_NOINLINE void* operator new(std::size_t size) {
     if (t_disallowAllocations) {
         t_allocationsCount++;
     }
@@ -64,11 +70,11 @@ void* operator new(std::size_t size) {
     return p;
 }
 
-void operator delete(void* p) noexcept {
+PRACCY_NOINLINE void operator delete(void* p) noexcept {
     std::free(p);
 }
 
-void* operator new[](std::size_t size) {
+PRACCY_NOINLINE void* operator new[](std::size_t size) {
     if (t_disallowAllocations) {
         t_allocationsCount++;
     }
@@ -77,16 +83,50 @@ void* operator new[](std::size_t size) {
     return p;
 }
 
-void operator delete[](void* p) noexcept {
+PRACCY_NOINLINE void operator delete[](void* p) noexcept {
     std::free(p);
 }
 
-void operator delete(void* p, std::size_t) noexcept {
+PRACCY_NOINLINE void operator delete(void* p, std::size_t) noexcept {
     std::free(p);
 }
 
-void operator delete[](void* p, std::size_t) noexcept {
+PRACCY_NOINLINE void operator delete[](void* p, std::size_t) noexcept {
     std::free(p);
+}
+
+PRACCY_NOINLINE void* operator new(std::size_t size, std::align_val_t al) {
+    if (t_disallowAllocations) {
+        t_allocationsCount++;
+    }
+    void* p = _aligned_malloc(size ? size : 1, static_cast<size_t>(al));
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+PRACCY_NOINLINE void operator delete(void* p, std::align_val_t) noexcept {
+    _aligned_free(p);
+}
+
+PRACCY_NOINLINE void operator delete(void* p, std::size_t, std::align_val_t) noexcept {
+    _aligned_free(p);
+}
+
+PRACCY_NOINLINE void* operator new[](std::size_t size, std::align_val_t al) {
+    if (t_disallowAllocations) {
+        t_allocationsCount++;
+    }
+    void* p = _aligned_malloc(size ? size : 1, static_cast<size_t>(al));
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+PRACCY_NOINLINE void operator delete[](void* p, std::align_val_t) noexcept {
+    _aligned_free(p);
+}
+
+PRACCY_NOINLINE void operator delete[](void* p, std::size_t, std::align_val_t) noexcept {
+    _aligned_free(p);
 }
 
 // ============================================================================
@@ -1264,16 +1304,8 @@ void test_T1_R6_DragDropRouter_Classification() {
     assert(ui::DragDropRouter::classifyPath("Praccy.exe") == ui::DroppedFileType::Unknown);
 }
 
-static void initializeMidiTableStrings(midi::MidiManager& mgr) {
-    for (size_t ch = 0; ch < midi::NUM_MIDI_CHANNELS; ++ch) {
-        for (size_t cc = 0; cc < midi::NUM_CC_NUMBERS; ++cc) {
-            auto& slot = mgr.m_ccTable[ch][cc];
-            new (&slot.binding.id) std::string();
-            for (size_t b = 0; b < midi::MAX_BINDINGS_PER_CC; ++b) {
-                new (&slot.bindings[b].id) std::string();
-            }
-        }
-    }
+static void initializeMidiTableStrings(midi::MidiManager&) {
+    // FlatCcBinding is now 100% trivially copyable; no placement-new workaround needed
 }
 
 void test_T1_R6_MidiManager_FlatTable_O1() {

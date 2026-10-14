@@ -57,6 +57,12 @@ public:
     void clear() noexcept { m_count = 0; }
 
     bool addParameterChange(Steinberg::Vst::ParamID id, double value) noexcept {
+        for (size_t i = 0; i < m_count; ++i) {
+            if (m_queues[i].getParameterId() == id) {
+                m_queues[i].init(id, value);
+                return true;
+            }
+        }
         if (m_count >= kMaxQueuedParams) return false;
         m_queues[m_count].init(id, value);
         m_count++;

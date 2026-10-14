@@ -2,6 +2,7 @@
 #include "crash_isolation.h"
 #include <iostream>
 #include <sstream>
+#include <filesystem>
 
 namespace praccy::plugins {
 
@@ -14,7 +15,16 @@ void ClapPluginInstance::clapHostRequestProcess(const clap_host* host) {}
 void ClapPluginInstance::clapHostRequestCallback(const clap_host* host) {}
 
 std::unique_ptr<ClapPluginInstance> ClapPluginInstance::loadFromFile(const std::string& path, uint32_t pluginIndex) {
-    HMODULE hLib = LoadLibraryA(path.c_str());
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
+    std::wstring wpath(wlen > 0 ? wlen - 1 : 0, L'\0');
+    if (wlen > 1) {
+        MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, wpath.data(), wlen);
+    }
+    HMODULE hLib = LoadLibraryW(wpath.c_str());
+    if (!hLib) {
+        // Fallback to ANSI if UTF-8 conversion fails or module not found
+        hLib = LoadLibraryA(path.c_str());
+    }
     if (!hLib) {
         std::cerr << "Failed to LoadLibrary for CLAP: " << path << "\n";
         return nullptr;
@@ -59,6 +69,8 @@ std::unique_ptr<ClapPluginInstance> ClapPluginInstance::loadFromFile(const std::
     instance->m_libraryModule = hLib;
     instance->m_entry = entry;
     instance->m_path = path;
+    instance->m_bundleFileName = std::filesystem::path(path).filename().string();
+    instance->m_clapId = desc->id ? desc->id : "";
     instance->m_name = desc->name ? desc->name : "CLAP Plugin";
     instance->m_vendor = desc->vendor ? desc->vendor : "Unknown";
     instance->m_version = desc->version ? desc->version : "1.0.0";
@@ -106,7 +118,14 @@ std::unique_ptr<ClapPluginInstance> ClapPluginInstance::loadFromFile(const std::
 ClapPluginInstance::~ClapPluginInstance() {
     closeGui();
     if (m_plugin) {
-        m_plugin->deactivate(m_plugin);
+        if (m_isProcessing) {
+            m_plugin->stop_processing(m_plugin);
+            m_isProcessing = false;
+        }
+        if (m_isActivated) {
+            m_plugin->deactivate(m_plugin);
+            m_isActivated = false;
+        }
         m_plugin->destroy(m_plugin);
         m_plugin = nullptr;
     }
@@ -122,7 +141,17 @@ ClapPluginInstance::~ClapPluginInstance() {
 
 void ClapPluginInstance::prepare(double sampleRate, uint32_t maxBlockSize) {
     if (m_plugin) {
-        m_plugin->activate(m_plugin, sampleRate, 1, maxBlockSize);
+        if (m_isProcessing) {
+            m_plugin->stop_processing(m_plugin);
+            m_isProcessing = false;
+        }
+        if (m_isActivated) {
+            m_plugin->deactivate(m_plugin);
+            m_isActivated = false;
+        }
+        if (m_plugin->activate(m_plugin, sampleRate, 1, maxBlockSize)) {
+            m_isActivated = true;
+        }
         if (m_latencyExt) {
             m_latencySamples = m_latencyExt->get(m_plugin);
         }
@@ -171,6 +200,11 @@ void ClapPluginInstance::process(audio::AudioProcessContext& ctx) {
 
     DWORD exCode = 0;
     bool ok = safeCallPluginAudio([&]() {
+        if (!m_isProcessing) {
+            if (m_plugin->start_processing(m_plugin)) {
+                m_isProcessing = true;
+            }
+        }
         m_plugin->process(m_plugin, &processData);
     }, &exCode);
 
@@ -227,6 +261,11 @@ PluginParameterDesc ClapPluginInstance::getParameterDesc(size_t index) const {
 }
 
 void ClapPluginInstance::setParameterValue(uint32_t paramId, float value) {
+    if (m_faulted.load(std::memory_order_relaxed)) return;
+    m_paramQueue.try_enqueue({static_cast<clap_id>(paramId), static_cast<double>(value)});
+}
+
+void ClapPluginInstance::setParameterFromAudioThread(uint32_t paramId, float value) noexcept {
     if (m_faulted.load(std::memory_order_relaxed)) return;
     m_paramQueue.try_enqueue({static_cast<clap_id>(paramId), static_cast<double>(value)});
 }
@@ -314,16 +353,58 @@ void ClapPluginInstance::getPreferredSize(int& width, int& height) const {
 }
 
 std::vector<uint8_t> ClapPluginInstance::saveState() const {
-    return {};
+    if (!m_stateExt || !m_plugin || m_faulted.load(std::memory_order_relaxed)) {
+        return {};
+    }
+
+    std::vector<uint8_t> buffer;
+    clap_ostream stream{};
+    stream.ctx = &buffer;
+    stream.write = [](const struct clap_ostream* s, const void* data, uint64_t size) -> int64_t {
+        if (!s || !s->ctx || !data || size == 0) return 0;
+        auto* vec = static_cast<std::vector<uint8_t>*>(s->ctx);
+        const auto* bytes = static_cast<const uint8_t*>(data);
+        vec->insert(vec->end(), bytes, bytes + size);
+        return static_cast<int64_t>(size);
+    };
+
+    bool ok = false;
+    safeCallPlugin([&]() {
+        ok = m_stateExt->save(m_plugin, &stream);
+    });
+
+    return ok ? buffer : std::vector<uint8_t>{};
 }
 
 bool ClapPluginInstance::loadState(const std::vector<uint8_t>& state) {
-    if (state.empty() || m_faulted.load(std::memory_order_relaxed)) return false;
-    bool success = true;
+    if (state.empty() || !m_stateExt || !m_plugin || m_faulted.load(std::memory_order_relaxed)) {
+        return false;
+    }
+
+    struct ReadCtx {
+        const uint8_t* data;
+        size_t size;
+        size_t offset;
+    } ctx{state.data(), state.size(), 0};
+
+    clap_istream stream{};
+    stream.ctx = &ctx;
+    stream.read = [](const struct clap_istream* s, void* data, uint64_t size) -> int64_t {
+        if (!s || !s->ctx || !data || size == 0) return 0;
+        auto* c = static_cast<ReadCtx*>(s->ctx);
+        if (c->offset >= c->size) return 0; // EOF
+        size_t toRead = std::min(static_cast<size_t>(size), c->size - c->offset);
+        std::memcpy(data, c->data + c->offset, toRead);
+        c->offset += toRead;
+        return static_cast<int64_t>(toRead);
+    };
+
+    bool ok = false;
     safeCallPlugin([&]() {
-        // Protected state load hook
+        ok = m_stateExt->load(m_plugin, &stream);
     });
-    return success;
+
+    return ok;
 }
 
 } // namespace praccy::plugins

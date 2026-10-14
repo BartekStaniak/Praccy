@@ -223,6 +223,11 @@ std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::
     instance->m_module = hLib;
     instance->m_factory = factory;
     instance->m_path = path;
+    instance->m_bundleFileName = std::filesystem::path(path).filename().string();
+    Steinberg::FUID fuid = Steinberg::FUID::fromTUID(classInfo.cid);
+    char guidStr[33] = {0};
+    fuid.toString(guidStr);
+    instance->m_classGuid = guidStr;
     instance->m_name = classInfo.name;
     instance->m_vendor = "VST3 Plugin";
 
@@ -454,6 +459,13 @@ void Vst3PluginInstance::setParameterValue(uint32_t paramId, float value) {
             m_controller->setParamNormalized(paramId, normVal);
         });
     }
+}
+
+void Vst3PluginInstance::setParameterFromAudioThread(uint32_t paramId, float value) noexcept {
+    if (m_faulted.load(std::memory_order_relaxed)) return;
+    const float normVal = std::clamp(value, 0.0f, 1.0f);
+    // Directly enqueue to param queue without touching m_controller
+    m_paramQueue.try_enqueue({static_cast<Steinberg::Vst::ParamID>(paramId), static_cast<double>(normVal)});
 }
 
 float Vst3PluginInstance::getParameterValue(uint32_t paramId) const {

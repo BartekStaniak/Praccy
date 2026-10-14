@@ -34,14 +34,47 @@ bool VstPresetAdapter::parseVstPreset(
     std::string guidStr(reinterpret_cast<const char*>(fileData.data() + 8), 32);
     outClassGuid = utils::GuidUtils::normalizeToCanonicalGuid(guidStr, utils::DawGuidFormat::SteinbergFUID);
 
-    // Look for 'Comp' tag starting from offset 40
+    // 1. Official Steinberg layout: Chunk list at chunkListOffset (offset 40)
+    uint64_t chunkListOffset = 0;
+    std::memcpy(&chunkListOffset, fileData.data() + 40, 8);
+    if (chunkListOffset <= fileData.size() && (fileData.size() - chunkListOffset) >= 8) {
+        const size_t listPos = static_cast<size_t>(chunkListOffset);
+        if (fileData[listPos] == 'L' && fileData[listPos + 1] == 'i' &&
+            fileData[listPos + 2] == 's' && fileData[listPos + 3] == 't') {
+            uint32_t entryCount = 0;
+            std::memcpy(&entryCount, fileData.data() + listPos + 4, 4);
+            size_t entryPos = listPos + 8;
+            for (uint32_t i = 0; i < entryCount; ++i) {
+                if (entryPos + 20 > fileData.size()) {
+                    break;
+                }
+                if (fileData[entryPos] == 'C' && fileData[entryPos + 1] == 'o' &&
+                    fileData[entryPos + 2] == 'm' && fileData[entryPos + 3] == 'p') {
+                    uint64_t chunkOffset = 0;
+                    uint64_t chunkSize = 0;
+                    std::memcpy(&chunkOffset, fileData.data() + entryPos + 4, 8);
+                    std::memcpy(&chunkSize, fileData.data() + entryPos + 12, 8);
+                    if (chunkOffset <= fileData.size() && chunkSize <= fileData.size() - chunkOffset) {
+                        outCompState.assign(
+                            fileData.begin() + chunkOffset,
+                            fileData.begin() + chunkOffset + chunkSize
+                        );
+                        return true;
+                    }
+                }
+                entryPos += 20;
+            }
+        }
+    }
+
+    // 2. Backward-compatible fallback: Look for 'Comp' tag starting from offset 40
     size_t compPos = 40;
     while (compPos + 12 <= fileData.size()) {
         if (fileData[compPos] == 'C' && fileData[compPos + 1] == 'o' &&
             fileData[compPos + 2] == 'm' && fileData[compPos + 3] == 'p') {
             uint64_t compSize = 0;
             std::memcpy(&compSize, fileData.data() + compPos + 4, 8);
-            if (compPos + 12 + compSize <= fileData.size()) {
+            if (compPos + 12 <= fileData.size() && compSize <= fileData.size() - (compPos + 12)) {
                 outCompState.assign(
                     fileData.begin() + compPos + 12,
                     fileData.begin() + compPos + 12 + compSize
@@ -52,8 +85,11 @@ bool VstPresetAdapter::parseVstPreset(
         compPos++;
     }
 
-    // If 'Comp' tag wasn't found, read remainder of file past header as state
-    if (fileData.size() > 40) {
+    // 3. Backward-compatible fallback: read remainder past header as state
+    if (fileData.size() > 48) {
+        outCompState.assign(fileData.begin() + 48, fileData.end());
+        return true;
+    } else if (fileData.size() > 40) {
         outCompState.assign(fileData.begin() + 40, fileData.end());
         return true;
     }
@@ -67,7 +103,24 @@ std::vector<uint8_t> VstPresetAdapter::packVstPreset(
 ) {
     std::vector<uint8_t> out;
     const uint64_t compSize = compState.size();
-    out.resize(40 + 12 + compSize, 0);
+    // Official Steinberg .vstpreset container layout:
+    // Header (48 bytes):
+    //   0..3: 'VST3'
+    //   4..7: version = 1
+    //   8..39: class ID (32 bytes ASCII)
+    //   40..47: chunkListOffset (uint64_t) = 48 + compSize
+    // Component data (compSize bytes):
+    //   48..(48 + compSize - 1)
+    // Chunk List (28 bytes):
+    //   (48 + compSize)..(48 + compSize + 3): 'List'
+    //   (48 + compSize + 4)..(48 + compSize + 7): entryCount = 1
+    //   Entry:
+    //     id: 'Comp' (4 bytes)
+    //     offset: 48 (8 bytes)
+    //     size: compSize (8 bytes)
+    const uint64_t chunkListOffset = 48 + compSize;
+    const size_t totalSize = static_cast<size_t>(chunkListOffset + 4 + 4 + 4 + 8 + 8);
+    out.resize(totalSize, 0);
 
     // Header: 'VST3'
     out[0] = 'V'; out[1] = 'S'; out[2] = 'T'; out[3] = '3';
@@ -81,13 +134,32 @@ std::vector<uint8_t> VstPresetAdapter::packVstPreset(
     size_t copyLen = std::min(cleanGuid.size(), size_t(32));
     std::memcpy(out.data() + 8, cleanGuid.data(), copyLen);
 
-    // 'Comp' chunk
-    out[40] = 'C'; out[41] = 'o'; out[42] = 'm'; out[43] = 'p';
-    std::memcpy(out.data() + 44, &compSize, 8);
+    // chunkListOffset at offset 40
+    std::memcpy(out.data() + 40, &chunkListOffset, 8);
 
+    // Component data at offset 48
     if (compSize > 0) {
-        std::memcpy(out.data() + 52, compState.data(), compSize);
+        std::memcpy(out.data() + 48, compState.data(), compSize);
     }
+
+    // Chunk List at chunkListOffset
+    size_t listPos = static_cast<size_t>(chunkListOffset);
+    out[listPos]     = 'L';
+    out[listPos + 1] = 'i';
+    out[listPos + 2] = 's';
+    out[listPos + 3] = 't';
+    const uint32_t entryCount = 1;
+    std::memcpy(out.data() + listPos + 4, &entryCount, 4);
+
+    // Entry 0: 'Comp'
+    size_t entryPos = listPos + 8;
+    out[entryPos]     = 'C';
+    out[entryPos + 1] = 'o';
+    out[entryPos + 2] = 'm';
+    out[entryPos + 3] = 'p';
+    const uint64_t compDataOffset = 48;
+    std::memcpy(out.data() + entryPos + 4, &compDataOffset, 8);
+    std::memcpy(out.data() + entryPos + 12, &compSize, 8);
 
     return out;
 }

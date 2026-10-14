@@ -93,16 +93,26 @@ public:
     void resize(uint32_t numChannels, uint32_t maxSamples) {
         m_numChannels = numChannels;
         m_maxSamples = maxSamples;
-        m_data.resize(static_cast<size_t>(numChannels) * maxSamples, 0.0f);
+        // Align channel pointers to 64-byte boundaries (16-float stride multiple)
+        const size_t channelStride = (static_cast<size_t>(maxSamples) + 15) & ~size_t(15);
+        m_data.assign(static_cast<size_t>(numChannels) * channelStride + 16, 0.0f);
         m_channelPointers.resize(numChannels);
+
+        const uintptr_t rawAddr = reinterpret_cast<uintptr_t>(m_data.data());
+        const size_t byteOffset = (64 - (rawAddr % 64)) % 64;
+        const size_t floatOffset = byteOffset / sizeof(float);
+        float* base = m_data.data() + floatOffset;
+
         for (uint32_t ch = 0; ch < numChannels; ++ch) {
-            m_channelPointers[ch] = m_data.data() + (static_cast<size_t>(ch) * maxSamples);
+            m_channelPointers[ch] = base + (static_cast<size_t>(ch) * channelStride);
+            assert(reinterpret_cast<uintptr_t>(m_channelPointers[ch]) % 64 == 0);
         }
     }
 
     [[nodiscard]] AudioBufferView view(uint32_t numSamples) noexcept {
         assert(numSamples <= m_maxSamples);
-        return AudioBufferView(m_channelPointers.data(), m_numChannels, numSamples);
+        const uint32_t safeSamples = std::min(numSamples, m_maxSamples);
+        return AudioBufferView(m_channelPointers.data(), m_numChannels, safeSamples);
     }
 
     [[nodiscard]] uint32_t numChannels() const noexcept { return m_numChannels; }

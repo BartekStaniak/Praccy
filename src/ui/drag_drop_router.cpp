@@ -34,7 +34,7 @@ DroppedFileType DragDropRouter::classifyFile(const std::filesystem::path& path) 
     }
 
     // Signal chains
-    if (ext == ".pracchaim" || ext == ".chain" || ext == ".rack" ||
+    if (ext == ".praccy" || ext == ".pracchain" || ext == ".pracchaim" || ext == ".chain" || ext == ".rack" ||
         ext == ".rfxchain" || ext == ".adg" || ext == ".dawproject") {
         return DroppedFileType::SignalChain;
     }

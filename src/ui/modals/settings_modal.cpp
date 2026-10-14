@@ -105,6 +105,7 @@ SettingsModal::~SettingsModal() = default;
 
 void SettingsModal::open() {
     m_isOpen = true;
+    m_cachedConfig.load();
     m_cachedDrivers = audio::AsioManager::enumerateDrivers();
     std::string currentDriver = m_asio.driverInfo().name;
     for (int i = 0; i < static_cast<int>(m_cachedDrivers.size()); ++i) {
@@ -138,10 +139,18 @@ void SettingsModal::renderAudioTab() {
             if (ImGui::Selectable(m_cachedDrivers[i].name.c_str(), isSelected)) {
                 m_selectedDriverIdx = i;
                 if (m_asio.loadDriver(m_cachedDrivers[i])) {
-                    state::AppConfig cfg;
-                    cfg.load();
-                    cfg.lastAsioDriver = m_cachedDrivers[i].name;
-                    cfg.save();
+                    m_cachedConfig.lastAsioDriver = m_cachedDrivers[i].name;
+                    m_cachedConfig.save();
+                    double sRate = m_asio.currentSampleRate();
+                    if (sRate <= 0.0) sRate = 48000.0;
+                    const auto& dInfo = m_asio.driverInfo();
+                    uint32_t bufSize = static_cast<uint32_t>(std::max(dInfo.preferredBufferSize, dInfo.maxBufferSize));
+                    if (bufSize == 0) bufSize = 2048;
+                    if (m_onDriverChanged) {
+                        m_onDriverChanged(sRate, bufSize);
+                    } else {
+                        m_asio.start();
+                    }
                 }
             }
             if (isSelected) {
@@ -188,9 +197,7 @@ void SettingsModal::renderAudioTab() {
     ImGui::TextColored(tokens.text.accent.vec4, "RETROACTIVE RIFF RECORDER:");
     ImGui::Spacing();
 
-    state::AppConfig cfg;
-    cfg.load();
-    uint32_t currentMinutes = cfg.retroactiveBufferMinutes;
+    uint32_t currentMinutes = m_cachedConfig.retroactiveBufferMinutes;
     if (currentMinutes != 1 && currentMinutes != 2 && currentMinutes != 5 && currentMinutes != 10) {
         currentMinutes = 2;
     }
@@ -202,8 +209,8 @@ void SettingsModal::renderAudioTab() {
         std::snprintf(radioLabel, sizeof(radioLabel), "%u min##RiffDur", durations[d]);
         if (d > 0) ImGui::SameLine(0, 16);
         if (ImGui::RadioButton(radioLabel, currentMinutes == durations[d])) {
-            cfg.retroactiveBufferMinutes = durations[d];
-            cfg.save();
+            m_cachedConfig.retroactiveBufferMinutes = durations[d];
+            m_cachedConfig.save();
             currentMinutes = durations[d];
         }
     }
@@ -338,15 +345,13 @@ void SettingsModal::renderUpdatesTab() {
     ImGui::Separator();
     ImGui::Spacing();
 
-    ImGui::Text("Installed Version: %s", "v2.5-beta1");
+    ImGui::Text("Installed Version: %s", "v2.5-beta2");
     ImGui::Spacing();
 
-    state::AppConfig cfg;
-    cfg.load();
-    bool includeBeta = cfg.checkBetaUpdates;
+    bool includeBeta = m_cachedConfig.checkBetaUpdates;
     if (ImGui::Checkbox("Enable beta builds from 'dev' branch on GitHub", &includeBeta)) {
-        cfg.checkBetaUpdates = includeBeta;
-        cfg.save();
+        m_cachedConfig.checkBetaUpdates = includeBeta;
+        m_cachedConfig.save();
     }
 
     ImGui::Spacing();
@@ -361,7 +366,7 @@ void SettingsModal::renderUpdatesTab() {
 void SettingsModal::renderAboutTab() {
     const auto& tokens = themeTokens();
     ImGui::Spacing();
-    ImGui::TextColored(tokens.text.accent.vec4, "PRACCY v2.5-beta1");
+    ImGui::TextColored(tokens.text.accent.vec4, "PRACCY v2.5-beta2");
     ImGui::TextDisabled("Professional Ultra-Low-Latency Guitar & Audio Practice Suite");
     ImGui::Separator();
     ImGui::Spacing();

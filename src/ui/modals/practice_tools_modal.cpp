@@ -1,4 +1,5 @@
 #include "practice_tools_modal.h"
+#include "../../utils/wav_reader.h"
 #include "../design_tokens.h"
 #include "../theme.h"
 #include "../ui_helpers.h"
@@ -21,6 +22,8 @@ PracticeToolsModal::~PracticeToolsModal() = default;
 
 void PracticeToolsModal::open() {
     m_isOpen = true;
+    m_loopStart = m_player.loopStart();
+    m_loopEnd = m_player.loopEnd();
 }
 
 void PracticeToolsModal::close() {
@@ -75,20 +78,20 @@ void PracticeToolsModal::renderLooperCircularProgressRing() {
     if (state == tools::LooperState::Recording) {
         // Pulsing red halo
         float pulse = 0.55f + 0.45f * std::sin(curTime * 8.0f);
-        ColorToken haloInner(tokens.signal.recording.r, tokens.signal.recording.g, tokens.signal.recording.b, pulse * 0.50f);
-        ColorToken haloOuter(tokens.signal.recording.r, tokens.signal.recording.g, tokens.signal.recording.b, pulse * 0.22f);
+        ColorToken haloInner = tokens.signal.recording.withAlpha(pulse * 0.50f);
+        ColorToken haloOuter = tokens.signal.recording.withAlpha(pulse * 0.22f);
         dl->AddCircle(center, radius + 2.0f, haloInner.u32, 64, 4.0f);
         dl->AddCircle(center, radius + 5.0f, haloOuter.u32, 64, 6.0f);
     } else if (state == tools::LooperState::Playing) {
         // Solid green halo
-        ColorToken haloInner(tokens.signal.playing.r, tokens.signal.playing.g, tokens.signal.playing.b, 0.40f);
-        ColorToken haloOuter(tokens.signal.playing.r, tokens.signal.playing.g, tokens.signal.playing.b, 0.18f);
+        ColorToken haloInner = tokens.signal.playing.withAlpha(0.40f);
+        ColorToken haloOuter = tokens.signal.playing.withAlpha(0.18f);
         dl->AddCircle(center, radius + 2.0f, haloInner.u32, 64, 4.0f);
         dl->AddCircle(center, radius + 5.0f, haloOuter.u32, 64, 6.0f);
     } else if (state == tools::LooperState::Overdubbing) {
         // Warm amber halo
-        ColorToken haloInner(tokens.signal.overdubbing.r, tokens.signal.overdubbing.g, tokens.signal.overdubbing.b, 0.45f);
-        ColorToken haloOuter(tokens.signal.overdubbing.r, tokens.signal.overdubbing.g, tokens.signal.overdubbing.b, 0.20f);
+        ColorToken haloInner = tokens.signal.overdubbing.withAlpha(0.45f);
+        ColorToken haloOuter = tokens.signal.overdubbing.withAlpha(0.20f);
         dl->AddCircle(center, radius + 2.0f, haloInner.u32, 64, 4.0f);
         dl->AddCircle(center, radius + 5.0f, haloOuter.u32, 64, 6.0f);
     }
@@ -361,6 +364,7 @@ void PracticeToolsModal::renderBackingTrackTab() {
         if (CenteredButton("Reset Loop Points", ImVec2(130, 22))) {
             m_loopStart = 0.0f;
             m_loopEnd = 1.0f;
+            m_player.setLoopPoints(0.0f, 1.0f);
         }
 
         ImGui::Spacing();
@@ -384,8 +388,8 @@ void PracticeToolsModal::generateWaveform800(const std::string& wavPath) {
 
     if (wavPath.empty()) return;
 
-    std::ifstream file(wavPath, std::ios::binary);
-    if (!file.is_open()) {
+    praccy::utils::WavAudioData wavData;
+    if (!praccy::utils::WavReader::loadWavFile(wavPath, wavData) || wavData.numFrames == 0) {
         for (int i = 0; i < 800; ++i) {
             float t = static_cast<float>(i) / 800.0f;
             float amp = 0.35f + 0.25f * std::sin(t * 18.0f) + 0.15f * std::cos(t * 42.0f);
@@ -395,74 +399,8 @@ void PracticeToolsModal::generateWaveform800(const std::string& wavPath) {
         return;
     }
 
-    char riffTag[4]{};
-    uint32_t fileSize = 0;
-    char waveTag[4]{};
-    file.read(riffTag, 4);
-    file.read(reinterpret_cast<char*>(&fileSize), 4);
-    file.read(waveTag, 4);
-
-    if (std::memcmp(riffTag, "RIFF", 4) != 0 || std::memcmp(waveTag, "WAVE", 4) != 0) {
-        for (int i = 0; i < 800; ++i) {
-            float t = static_cast<float>(i) / 800.0f;
-            float amp = 0.3f + 0.2f * std::sin(t * 20.0f);
-            m_waveform800[i] = WaveformPeak{-amp, amp};
-        }
-        return;
-    }
-
-    uint16_t numChannels = 0;
-    uint32_t sampleRate = 0;
-    uint16_t bitsPerSample = 0;
-    uint16_t audioFormat = 1;
-    bool foundFmt = false;
-    std::vector<uint8_t> rawData;
-
-    while (file) {
-        char chunkTag[4]{};
-        uint32_t chunkSize = 0;
-        file.read(chunkTag, 4);
-        file.read(reinterpret_cast<char*>(&chunkSize), 4);
-        if (file.gcount() < 8) break;
-
-        if (std::memcmp(chunkTag, "fmt ", 4) == 0) {
-            file.read(reinterpret_cast<char*>(&audioFormat), 2);
-            file.read(reinterpret_cast<char*>(&numChannels), 2);
-            file.read(reinterpret_cast<char*>(&sampleRate), 4);
-            uint32_t byteRate = 0;
-            uint16_t blockAlign = 0;
-            file.read(reinterpret_cast<char*>(&byteRate), 4);
-            file.read(reinterpret_cast<char*>(&blockAlign), 2);
-            file.read(reinterpret_cast<char*>(&bitsPerSample), 2);
-            if (chunkSize > 16) {
-                file.seekg(chunkSize - 16, std::ios::cur);
-            }
-            foundFmt = true;
-        } else if (std::memcmp(chunkTag, "data", 4) == 0) {
-            rawData.resize(chunkSize);
-            file.read(reinterpret_cast<char*>(rawData.data()), chunkSize);
-            break;
-        } else {
-            file.seekg(chunkSize, std::ios::cur);
-        }
-    }
-
-    if (!foundFmt || rawData.empty() || numChannels == 0 || bitsPerSample == 0) {
-        for (int i = 0; i < 800; ++i) {
-            float t = static_cast<float>(i) / 800.0f;
-            float amp = 0.3f + 0.2f * std::sin(t * 20.0f);
-            m_waveform800[i] = WaveformPeak{-amp, amp};
-        }
-        return;
-    }
-
-    const size_t bytesPerSample = bitsPerSample / 8;
-    const size_t frameSize = numChannels * bytesPerSample;
-    const size_t totalFrames = rawData.size() / frameSize;
-    if (totalFrames == 0) return;
-
+    const size_t totalFrames = wavData.numFrames;
     const size_t bucketSize = std::max<size_t>(1, totalFrames / 800);
-    const uint8_t* ptr = rawData.data();
 
     for (size_t b = 0; b < 800; ++b) {
         size_t startFrame = b * bucketSize;
@@ -472,20 +410,7 @@ void PracticeToolsModal::generateWaveform800(const std::string& wavPath) {
 
         size_t step = std::max<size_t>(1, (endFrame - startFrame) / 128);
         for (size_t f = startFrame; f < endFrame; f += step) {
-            const uint8_t* framePtr = ptr + f * frameSize;
-            float s = 0.0f;
-            if (audioFormat == 1) { // PCM
-                if (bitsPerSample == 16) {
-                    s = reinterpret_cast<const int16_t*>(framePtr)[0] / 32768.0f;
-                } else if (bitsPerSample == 24) {
-                    int32_t val = (framePtr[0] << 8) | (framePtr[1] << 16) | (framePtr[2] << 24);
-                    s = (val >> 8) / 8388608.0f;
-                } else if (bitsPerSample == 32) {
-                    s = reinterpret_cast<const int32_t*>(framePtr)[0] / 2147483648.0f;
-                }
-            } else if (audioFormat == 3 && bitsPerSample == 32) { // IEEE float
-                s = reinterpret_cast<const float*>(framePtr)[0];
-            }
+            float s = (wavData.samplesL[f] + wavData.samplesR[f]) * 0.5f;
             if (std::isnan(s)) s = 0.0f;
             if (s < minVal) minVal = s;
             if (s > maxVal) maxVal = s;
@@ -521,7 +446,7 @@ void PracticeToolsModal::renderOverviewWaveformStrip(float stripWidth, float str
 
     // Loop region shaded background
     if (m_loopEnd > m_loopStart) {
-        ImU32 loopShadeCol = ColorToken(tokens.text.accent.r, tokens.text.accent.g, tokens.text.accent.b, 0.15f);
+        ImU32 loopShadeCol = static_cast<ImU32>(tokens.text.accent.withAlpha(0.15f));
         dl->AddRectFilled(ImVec2(loopStartX, screenPos.y), ImVec2(loopEndX, stripMax.y), loopShadeCol, 2.0f);
     }
 
@@ -577,15 +502,19 @@ void PracticeToolsModal::renderOverviewWaveformStrip(float stripWidth, float str
 
         if (m_isDraggingLoopStart) {
             m_loopStart = std::clamp(normX, 0.0f, m_loopEnd - 0.02f);
+            m_player.setLoopPoints(m_loopStart, m_loopEnd);
         } else if (m_isDraggingLoopEnd) {
             m_loopEnd = std::clamp(normX, m_loopStart + 0.02f, 1.0f);
+            m_player.setLoopPoints(m_loopStart, m_loopEnd);
         } else {
             if (std::abs(io.MouseClickedPos[0].x - loopStartX) < 12.0f) {
                 m_isDraggingLoopStart = true;
                 m_loopStart = std::clamp(normX, 0.0f, m_loopEnd - 0.02f);
+                m_player.setLoopPoints(m_loopStart, m_loopEnd);
             } else if (std::abs(io.MouseClickedPos[0].x - loopEndX) < 12.0f) {
                 m_isDraggingLoopEnd = true;
                 m_loopEnd = std::clamp(normX, m_loopStart + 0.02f, 1.0f);
+                m_player.setLoopPoints(m_loopStart, m_loopEnd);
             } else {
                 m_player.seek(normX);
             }
@@ -600,13 +529,6 @@ void PracticeToolsModal::renderOverviewWaveformStrip(float stripWidth, float str
             ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
         } else {
             ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-        }
-    }
-
-    // Auto-looping within custom loop boundaries
-    if (m_player.isPlaying() && m_player.isLooping()) {
-        if (curPlayhead >= m_loopEnd || curPlayhead < m_loopStart) {
-            m_player.seek(m_loopStart);
         }
     }
 }

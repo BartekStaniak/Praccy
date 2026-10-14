@@ -26,12 +26,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "Praccy Audio"
             VALUE "FileDescription",  "Praccy - ASIO VST3 & CLAP Practice Suite"
-            VALUE "FileVersion",      "2.5-beta1"
+            VALUE "FileVersion",      "2.5-beta2"
             VALUE "InternalName",     "Praccy"
             VALUE "LegalCopyright",   "Copyright (C) 2026 Bartek Staniak"
             VALUE "OriginalFilename", "Praccy.exe"
             VALUE "ProductName",      "Praccy"
-            VALUE "ProductVersion",   "2.5-beta1"
+            VALUE "ProductVersion",   "2.5-beta2"
         END
     END
     BLOCK "VarFileInfo"

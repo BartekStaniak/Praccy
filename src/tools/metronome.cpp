@@ -21,7 +21,17 @@ void Metronome::reset() {
 }
 
 void Metronome::process(audio::AudioBufferView& output) {
-    if (!m_playing.load(std::memory_order_relaxed)) return;
+    if (m_resetRequested.exchange(false, std::memory_order_acq_rel)) {
+        m_currentBeatSample = 0;
+        m_clickSamplePosition = 0;
+        m_currentBeat.store(0, std::memory_order_relaxed);
+        m_isAccent = true;
+    }
+    if (!m_playing.load(std::memory_order_relaxed)) {
+        m_currentBeatSample = 0;
+        m_clickSamplePosition = m_clickLengthSamples;
+        return;
+    }
 
     const float bpm = m_bpm.load(std::memory_order_relaxed);
     const int beatsPerBar = m_beatsPerBar.load(std::memory_order_relaxed);

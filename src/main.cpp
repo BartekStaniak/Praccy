@@ -18,6 +18,7 @@
 #include "tools/audio_player.h"
 #include "tools/quick_looper.h"
 #include "state/scene_manager.h"
+#include "state/daw_interop/universal_daw_interop_manager.h"
 #include "plugins/builtin_dsp.h"
 #include "plugins/plugin_scanner.h"
 #include "plugins/plugin_window.h"
@@ -372,17 +373,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     praccy::midi::MidiManager midi;
     praccy::state::SceneManager scenes;
 
-    g_dragDropRouter.setAudioTrackHandler([&](const std::filesystem::path& p) {
-        player.loadWavFile(p.string());
-        looper.loadWavFile(p.string());
-    });
-    g_dragDropRouter.setPresetHandler([&](const std::filesystem::path& p) {
-        scenes.loadFromFile(p.string());
-    });
-    g_dragDropRouter.setChainHandler([&](const std::filesystem::path& p) {
-        scenes.loadPresetChain(p.stem().string(), graph);
-    });
-
     praccy::plugins::PluginScanner scanner;
     if (configLoaded) {
         for (const auto& cp : appConfig.customPluginPaths) {
@@ -391,6 +381,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
     // Launch asynchronous non-blocking plugin scanner in the background
     scanner.scanAll();
+
+    g_dragDropRouter.setAudioTrackHandler([&](const std::filesystem::path& p) {
+        player.loadWavFile(p.string());
+        looper.loadWavFile(p.string());
+    });
+    g_dragDropRouter.setPresetHandler([&](const std::filesystem::path& p) {
+        scenes.loadFromFile(p.string());
+    });
+    g_dragDropRouter.setChainHandler([&](const std::filesystem::path& p) {
+        auto* dawAdapter = praccy::state::UniversalDawInteropManager::instance().findAdapter(p);
+        if (dawAdapter) {
+            praccy::state::UniversalDawInteropManager::instance().importAndApply(p, graph, scenes, scanner);
+        } else {
+            scenes.loadPresetChain(p.stem().string(), graph);
+        }
+    });
 
     // Initialize ASIO
     praccy::audio::AsioManager asio;
@@ -424,7 +430,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         graph.process(in, out);
 
         // 3. Process Practice Tools (Looper, Backing Track Player, Metronome)
-        looper.process(in, out);
+        looper.process(out, out);
         player.process(out);
         metronome.process(out);
 
@@ -454,6 +460,21 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         }
     });
 
+    auto prepareAndStartAsio = [&]() {
+        double sRate = asio.currentSampleRate();
+        if (sRate <= 0.0) sRate = 48000.0;
+        const auto& dInfo = asio.driverInfo();
+        uint32_t bufSize = static_cast<uint32_t>(std::max(dInfo.preferredBufferSize, dInfo.maxBufferSize));
+        if (bufSize == 0) bufSize = 2048;
+        graph.prepare(sRate, bufSize);
+        tuner.prepare(sRate, 4096);
+        metronome.prepare(sRate);
+        player.prepare(sRate);
+        looper.prepare(sRate);
+        rackView.getRiffBuffer().prepare(sRate, static_cast<int>(appConfig.retroactiveBufferMinutes));
+        asio.start();
+    };
+
     // Auto-select and start ASIO driver (prioritizing last saved driver, then hardware USB)
     auto drivers = praccy::audio::AsioManager::enumerateDrivers();
     int activeDriverIdx = -1;
@@ -464,7 +485,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             if (drivers[i].name == appConfig.lastAsioDriver) {
                 if (asio.loadDriver(drivers[i], hwnd)) {
                     activeDriverIdx = static_cast<int>(i);
-                    asio.start();
+                    prepareAndStartAsio();
                     break;
                 }
             }
@@ -477,7 +498,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             if (drivers[i].name.find("USB") != std::string::npos) {
                 if (asio.loadDriver(drivers[i], hwnd)) {
                     activeDriverIdx = static_cast<int>(i);
-                    asio.start();
+                    prepareAndStartAsio();
                     break;
                 }
             }
@@ -489,7 +510,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         for (size_t i = 0; i < drivers.size(); ++i) {
             if (asio.loadDriver(drivers[i], hwnd)) {
                 activeDriverIdx = static_cast<int>(i);
-                asio.start();
+                prepareAndStartAsio();
                 break;
             }
         }
@@ -563,6 +584,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
 
     // Persist configuration
+    appConfig.load();
     appConfig.inputMode = graph.inputRouting().mode;
     appConfig.inputGainDb = graph.inputGainDb();
     appConfig.masterVolumeDb = graph.masterVolumeDb();

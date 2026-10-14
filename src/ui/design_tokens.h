@@ -39,6 +39,23 @@ struct ColorToken {
         , b(static_cast<float>(b8) / 255.0f)
         , a(static_cast<float>(a8) / 255.0f) {}
 
+    constexpr ColorToken(int r8, int g8, int b8, int a8 = 255) noexcept
+        : ColorToken(static_cast<uint8_t>(r8),
+                     static_cast<uint8_t>(g8),
+                     static_cast<uint8_t>(b8),
+                     static_cast<uint8_t>(a8)) {}
+
+    constexpr ColorToken(float rf, float gf, float bf, float af = 1.0f) noexcept
+        : ColorToken(
+            static_cast<uint8_t>(std::clamp(rf, 0.0f, 1.0f) * 255.0f + 0.5f),
+            static_cast<uint8_t>(std::clamp(gf, 0.0f, 1.0f) * 255.0f + 0.5f),
+            static_cast<uint8_t>(std::clamp(bf, 0.0f, 1.0f) * 255.0f + 0.5f),
+            static_cast<uint8_t>(std::clamp(af, 0.0f, 1.0f) * 255.0f + 0.5f)) {}
+
+    [[nodiscard]] constexpr ColorToken withAlpha(float af) const noexcept {
+        return ColorToken(r, g, b, af);
+    }
+
     constexpr operator ImU32() const noexcept { return u32; }
     constexpr operator ImVec4() const noexcept { return vec4; }
 };
@@ -190,7 +207,7 @@ inline const ThemeTokens kThemes[static_cast<size_t>(ThemeId::Count)] = {
         },
         // Text
         {
-            ColorToken(242, 244, 248), ColorToken(168, 175, 188), ColorToken(116, 124, 138),
+            ColorToken(242, 244, 248), ColorToken(168, 175, 188), ColorToken(140, 148, 162),
             ColorToken(255, 179, 38), ColorToken(18, 19, 22), ColorToken(65, 185, 255),
             ColorToken(220, 110, 240), ColorToken(255, 179, 38), ColorToken(52, 199, 89),
             ColorToken(255, 179, 38), ColorToken(235, 64, 52), ColorToken(156, 163, 175, 255)
@@ -241,7 +258,7 @@ inline const ThemeTokens kThemes[static_cast<size_t>(ThemeId::Count)] = {
         },
         // Text
         {
-            ColorToken(240, 248, 255), ColorToken(155, 185, 220), ColorToken(100, 125, 155),
+            ColorToken(240, 248, 255), ColorToken(155, 185, 220), ColorToken(135, 155, 185),
             ColorToken(0, 240, 255), ColorToken(10, 14, 23), ColorToken(0, 240, 255),
             ColorToken(255, 0, 128), ColorToken(255, 180, 40), ColorToken(0, 230, 160),
             ColorToken(255, 185, 30), ColorToken(255, 42, 85), ColorToken(156, 163, 175, 255)
@@ -292,7 +309,7 @@ inline const ThemeTokens kThemes[static_cast<size_t>(ThemeId::Count)] = {
         },
         // Text
         {
-            ColorToken(244, 248, 250), ColorToken(165, 185, 198), ColorToken(115, 132, 145),
+            ColorToken(244, 248, 250), ColorToken(165, 185, 198), ColorToken(145, 162, 175),
             ColorToken(88, 184, 216), ColorToken(22, 27, 34), ColorToken(88, 184, 216),
             ColorToken(185, 145, 225), ColorToken(226, 167, 98), ColorToken(69, 194, 154),
             ColorToken(230, 175, 80), ColorToken(224, 82, 82), ColorToken(156, 163, 175, 255)
@@ -330,7 +347,7 @@ inline const ThemeTokens kThemes[static_cast<size_t>(ThemeId::Count)] = {
             ColorToken(230, 224, 210), ColorToken(198, 186, 166), ColorToken(180, 166, 144),
             ColorToken(160, 146, 124), ColorToken(244, 238, 226, 240), ColorToken(230, 236, 242, 235),
             ColorToken(215, 226, 236), ColorToken(245, 235, 226, 235), ColorToken(238, 220, 206),
-            ColorToken(238, 232, 220, 250), ColorToken(16, 75, 45, 255)
+            ColorToken(238, 232, 220, 250), ColorToken(198, 228, 210, 255)
         },
         // Borders
         {
@@ -343,10 +360,10 @@ inline const ThemeTokens kThemes[static_cast<size_t>(ThemeId::Count)] = {
         },
         // Text
         {
-            ColorToken(36, 28, 22), ColorToken(95, 80, 68), ColorToken(120, 106, 94),
+            ColorToken(36, 28, 22), ColorToken(95, 80, 68), ColorToken(105, 92, 80),
             ColorToken(168, 64, 18), ColorToken(248, 245, 238), ColorToken(24, 95, 155),
             ColorToken(140, 40, 135), ColorToken(168, 64, 18), ColorToken(32, 120, 58),
-            ColorToken(168, 64, 18), ColorToken(195, 45, 35), ColorToken(120, 106, 94, 255)
+            ColorToken(168, 64, 18), ColorToken(195, 45, 35), ColorToken(105, 92, 80, 255)
         },
         // Signal
         {

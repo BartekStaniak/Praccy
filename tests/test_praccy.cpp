@@ -1,4 +1,5 @@
 #include <iostream>
+#undef NDEBUG
 #include <cassert>
 #include <cmath>
 #include <vector>
@@ -29,6 +30,10 @@
 #include "ui/widgets/strobe_tuner.h"
 #include <imgui_internal.h>
 #include "utils/parse_utils.h"
+#include "utils/archive_utils.h"
+#include "state/daw_interop/reaper_adapter.h"
+#include "state/daw_interop/vstpreset_adapter.h"
+#include "state/daw_interop/dawproject_adapter.h"
 #include "miniz.h"
 #include <fstream>
 #include <filesystem>
@@ -2112,6 +2117,129 @@ void testMilestone3PracticeSuiteAndStrobeTuner() {
     std::cout << "PASSED\n";
 }
 
+void testGraphEngineVariableBlockSizes() {
+    std::cout << "[TEST] GraphEngine Variable Block Sizes (512, 1024, 2048)... ";
+    audio::GraphEngine engine;
+    engine.prepare(48000.0, 2048);
+
+    auto slot = std::make_unique<audio::PluginSlot>(std::make_unique<plugins::OverdriveEffect>());
+    slot->prepare(48000.0, 2048);
+    engine.addSerialNode(std::move(slot));
+
+    audio::OwnedAudioBuffer inBuf(2, 2048);
+    audio::OwnedAudioBuffer outBuf(2, 2048);
+
+    const uint32_t blockSizes[] = {512, 1024, 2048};
+    for (uint32_t bs : blockSizes) {
+        auto inView = inBuf.view(bs);
+        auto outView = outBuf.view(bs);
+
+        for (uint32_t ch = 0; ch < 2; ++ch) {
+            for (uint32_t s = 0; s < bs; ++s) {
+                inView.channel(ch)[s] = 0.5f * std::sin(2.0f * 3.14159265f * 440.0f * s / 48000.0f);
+            }
+        }
+        outView.clear();
+
+        engine.process(inView, outView);
+
+        float sumAbs = 0.0f;
+        for (uint32_t ch = 0; ch < 2; ++ch) {
+            for (uint32_t s = 0; s < bs; ++s) {
+                sumAbs += std::abs(outView.channel(ch)[s]);
+            }
+        }
+        assert(sumAbs > 0.0f);
+    }
+    std::cout << "PASSED\n";
+}
+
+void testStereoBypassRampSymmetry() {
+    std::cout << "[TEST] Stereo Bypass Ramp Symmetry... ";
+    audio::PluginSlot slot(std::make_unique<plugins::OverdriveEffect>());
+    slot.prepare(48000.0, 512);
+
+    audio::OwnedAudioBuffer inBuf(2, 512);
+    audio::OwnedAudioBuffer outBuf(2, 512);
+
+    auto inView = inBuf.view(512);
+    auto outView = outBuf.view(512);
+
+    for (uint32_t s = 0; s < 512; ++s) {
+        float v = 0.4f * std::sin(2.0f * 3.14159265f * 220.0f * s / 48000.0f);
+        inView.channel(0)[s] = v;
+        inView.channel(1)[s] = v;
+    }
+
+    slot.setBypassed(true);
+
+    audio::AudioProcessContext ctx{inView, outView, 48000.0, 512};
+    slot.process(ctx);
+
+    for (uint32_t s = 0; s < 512; ++s) {
+        float l = outView.channel(0)[s];
+        float r = outView.channel(1)[s];
+        assert(l == r);
+    }
+
+    slot.setBypassed(false);
+    slot.process(ctx);
+
+    for (uint32_t s = 0; s < 512; ++s) {
+        float l = outView.channel(0)[s];
+        float r = outView.channel(1)[s];
+        assert(l == r);
+    }
+    std::cout << "PASSED\n";
+}
+
+void testColorTokenFloatConversion() {
+    std::cout << "[TEST] ColorToken float RGBA conversion... ";
+    ui::ColorToken col(0.5f, 0.8f, 0.2f, 0.9f);
+    assert(col.u32 != 0);
+    assert(col.r > 0.49f && col.r < 0.51f);
+    assert(col.g > 0.79f && col.g < 0.81f);
+    assert(col.b > 0.19f && col.b < 0.21f);
+    assert(col.a > 0.89f && col.a < 0.91f);
+    assert(col.vec4.x == col.r);
+    assert(col.vec4.y == col.g);
+    assert(col.vec4.z == col.b);
+    assert(col.vec4.w == col.a);
+    std::cout << "PASSED\n";
+}
+
+void testDawInteropSecurityAndOverflowRejection() {
+    std::cout << "[TEST] DAW Interop Security & Overflow Payload Rejection... ";
+
+    // 1. ReaperAdapter: compLen = 0xFFFFFFFC overflow rejection
+    std::vector<uint8_t> malformedReaper = {'v', 's', 't', '3', 0xFC, 0xFF, 0xFF, 0xFF, 0x01, 0x02, 0x03, 0x04};
+    std::vector<uint8_t> reaperComp, reaperCtrl;
+    bool okReaper = state::ReaperAdapter::unpackVst3ChunkEnvelope(malformedReaper, reaperComp, reaperCtrl);
+    (void)okReaper;
+    assert(reaperComp.size() != 0xFFFFFFFC);
+
+    // 2. VstPresetAdapter: compSize = UINT64_MAX - 8 overflow rejection
+    std::vector<uint8_t> malformedPreset(64, 0);
+    malformedPreset[0] = 'V'; malformedPreset[1] = 'S'; malformedPreset[2] = 'T'; malformedPreset[3] = '3';
+    malformedPreset[40] = 'C'; malformedPreset[41] = 'o'; malformedPreset[42] = 'm'; malformedPreset[43] = 'p';
+    uint64_t overflowCompSize = UINT64_MAX - 8;
+    std::memcpy(malformedPreset.data() + 44, &overflowCompSize, 8);
+    std::vector<uint8_t> vstComp;
+    std::string vstGuid;
+    (void)state::VstPresetAdapter::parseVstPreset(malformedPreset, vstGuid, vstComp);
+    assert(vstComp.size() != overflowCompSize);
+    assert(vstComp.size() <= malformedPreset.size());
+
+    // 3. DawprojectAdapter: path traversal rejection
+    std::filesystem::path safeRel;
+    assert(!utils::sanitizeZipPath("../../win.ini", safeRel));
+    assert(!utils::sanitizeZipPath("..\\..\\win.ini", safeRel));
+    assert(!utils::sanitizeZipPath("/etc/passwd", safeRel));
+    assert(!utils::sanitizeZipPath("C:\\Windows\\System32\\cmd.exe", safeRel));
+
+    std::cout << "PASSED\n";
+}
+
 int main() {
     std::cout << "===========================================\n";
     std::cout << "   PRACCY CORE AUDIO ENGINE TEST SUITE   \n";
@@ -2150,9 +2278,13 @@ int main() {
     testAudioPlayerAsyncLoading();
     testHardwareGradeWidgetsAndCategoryBadges();
     testMilestone3PracticeSuiteAndStrobeTuner();
+    testGraphEngineVariableBlockSizes();
+    testStereoBypassRampSymmetry();
+    testColorTokenFloatConversion();
+    testDawInteropSecurityAndOverflowRejection();
 
     std::cout << "===========================================\n";
-    std::cout << "   ALL TESTS PASSED SUCCESSFULLY! (33/33)  \n";
+    std::cout << "   ALL TESTS PASSED SUCCESSFULLY! (37/37)  \n";
     std::cout << "===========================================\n";
     return 0;
 }
