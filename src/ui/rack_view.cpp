@@ -2769,7 +2769,7 @@ void RackView::renderUpdateModal() {
         ImGui::Separator();
         ImGui::Spacing();
 
-        ImGui::Text("Installed Version: %s", "v2.5-beta2");
+        ImGui::Text("Installed Version: %s", "v2.5-beta3");
         ImGui::Spacing();
 
         // Option to enable beta builds from dev branch
