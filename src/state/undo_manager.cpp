@@ -126,6 +126,17 @@ bool UndoManager::redo() {
 }
 
 bool UndoManager::undo(audio::GraphEngine& graph, SceneManager& /*scenes*/) {
+    if (m_undoStack.empty()) {
+        return false;
+    }
+    if (m_undoStack.size() == 1) {
+        // Preserve the baseline snapshot at the bottom of the undo stack so subsequent
+        // parameter or rack edits always have a baseline state to undo back to.
+        m_inContinuousGroup = false;
+        applyScenePresetToGraph(m_undoStack.back().snapshot, graph);
+        m_lastActionDesc = "Undo: " + m_undoStack.back().description;
+        return true;
+    }
     ScenePreset restored;
     if (!undo(restored)) {
         return false;

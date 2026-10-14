@@ -63,6 +63,47 @@ public:
     [[nodiscard]] virtual std::vector<uint8_t> saveState() const = 0;
     virtual bool loadState(const std::vector<uint8_t>& state) = 0;
 
+    // GUI parameter edit notifications (wait-free, lock-free)
+    void notifyGuiParamEdited(uint32_t paramId, bool gestureEnded = false) noexcept {
+        m_lastGuiEditedParamId.store(paramId, std::memory_order_relaxed);
+        if (gestureEnded) {
+            m_guiGestureEnded.store(true, std::memory_order_release);
+        }
+        m_guiParamDirty.store(true, std::memory_order_release);
+    }
+
+    void notifyGuiGestureEnded(uint32_t paramId) noexcept {
+        m_lastGuiEditedParamId.store(paramId, std::memory_order_relaxed);
+        m_guiGestureEnded.store(true, std::memory_order_release);
+        m_guiParamDirty.store(true, std::memory_order_release);
+    }
+
+    [[nodiscard]] bool consumeGuiParamEdit(uint32_t& outParamId, bool& outGestureEnded) noexcept {
+        const bool dirty = m_guiParamDirty.exchange(false, std::memory_order_acq_rel);
+        const bool ended = m_guiGestureEnded.exchange(false, std::memory_order_acq_rel);
+        if (!dirty && !ended) {
+            outGestureEnded = false;
+            return false;
+        }
+        outParamId = m_lastGuiEditedParamId.load(std::memory_order_relaxed);
+        outGestureEnded = ended;
+        return true;
+    }
+
+    void clearGuiParamEdit() noexcept {
+        m_guiParamDirty.store(false, std::memory_order_release);
+        m_guiGestureEnded.store(false, std::memory_order_release);
+        m_guiEditingActive.store(false, std::memory_order_release);
+    }
+
+    void setGuiEditingActive(bool active) noexcept {
+        m_guiEditingActive.store(active, std::memory_order_release);
+    }
+
+    [[nodiscard]] bool isGuiEditingActive() const noexcept {
+        return m_guiEditingActive.load(std::memory_order_acquire);
+    }
+
     // Fault state tracking
     [[nodiscard]] virtual bool isFaulted() const noexcept {
         return m_faulted.load(std::memory_order_acquire);
@@ -85,6 +126,10 @@ public:
 protected:
     std::atomic<bool> m_faulted{false};
     std::atomic<const char*> m_faultReason{nullptr};
+    std::atomic<bool> m_guiParamDirty{false};
+    std::atomic<bool> m_guiGestureEnded{false};
+    std::atomic<bool> m_guiEditingActive{false};
+    std::atomic<uint32_t> m_lastGuiEditedParamId{0};
 };
 
 } // namespace praccy::plugins

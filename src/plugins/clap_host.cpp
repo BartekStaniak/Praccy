@@ -3,16 +3,132 @@
 #include <iostream>
 #include <sstream>
 #include <filesystem>
+#include <cstring>
 
 namespace praccy::plugins {
 
-const void* ClapPluginInstance::clapHostGetExtension(const clap_host* host, const char* extensionId) {
+namespace {
+
+bool CLAP_ABI clapOutputEventsTryPush(const clap_output_events_t* list, const clap_event_header_t* event) {
+    if (!list || !list->ctx || !event) return false;
+    auto* self = static_cast<ClapPluginInstance*>(list->ctx);
+    self->onPluginOutputEvent(event);
+    return true;
+}
+
+} // anonymous namespace
+
+const void* ClapPluginInstance::clapHostGetExtension(const clap_host* /*host*/, const char* extensionId) {
+    if (!extensionId) return nullptr;
+    if (std::strcmp(extensionId, CLAP_EXT_PARAMS) == 0) {
+        static const clap_host_params s_hostParams{
+            &ClapPluginInstance::clapHostParamsRescan,
+            &ClapPluginInstance::clapHostParamsClear,
+            &ClapPluginInstance::clapHostParamsRequestFlush
+        };
+        return &s_hostParams;
+    }
+    if (std::strcmp(extensionId, CLAP_EXT_STATE) == 0) {
+        static const clap_host_state s_hostState{
+            &ClapPluginInstance::clapHostStateMarkDirty
+        };
+        return &s_hostState;
+    }
     return nullptr;
 }
 
-void ClapPluginInstance::clapHostRequestRestart(const clap_host* host) {}
-void ClapPluginInstance::clapHostRequestProcess(const clap_host* host) {}
-void ClapPluginInstance::clapHostRequestCallback(const clap_host* host) {}
+void ClapPluginInstance::clapHostRequestRestart(const clap_host* host) {
+    if (!host || !host->host_data) return;
+    auto* self = static_cast<ClapPluginInstance*>(host->host_data);
+    self->notifyGuiParamEdited(0xFFFFFFFFu, true);
+}
+
+void ClapPluginInstance::clapHostRequestProcess(const clap_host* /*host*/) {}
+void ClapPluginInstance::clapHostRequestCallback(const clap_host* /*host*/) {}
+
+void CLAP_ABI ClapPluginInstance::clapHostParamsRescan(const clap_host_t* host, clap_param_rescan_flags flags) {
+    if (!host || !host->host_data) return;
+    auto* self = static_cast<ClapPluginInstance*>(host->host_data);
+    if (flags & (CLAP_PARAM_RESCAN_VALUES | CLAP_PARAM_RESCAN_ALL)) {
+        self->notifyGuiParamEdited(0xFFFFFFFFu, true);
+    }
+}
+
+void CLAP_ABI ClapPluginInstance::clapHostParamsClear(const clap_host_t* /*host*/, clap_id /*paramId*/, clap_param_clear_flags /*flags*/) {}
+
+void CLAP_ABI ClapPluginInstance::clapHostParamsRequestFlush(const clap_host_t* host) {
+    if (!host || !host->host_data) return;
+    auto* self = static_cast<ClapPluginInstance*>(host->host_data);
+    if (!self->m_isProcessing.load(std::memory_order_acquire)) {
+        self->flushPendingParamsIfStopped();
+    }
+    self->notifyGuiParamEdited(0xFFFFFFFFu, false);
+}
+
+void CLAP_ABI ClapPluginInstance::clapHostStateMarkDirty(const clap_host_t* host) {
+    if (!host || !host->host_data) return;
+    auto* self = static_cast<ClapPluginInstance*>(host->host_data);
+    self->notifyGuiParamEdited(0xFFFFFFFFu, true);
+}
+
+void ClapPluginInstance::onPluginOutputEvent(const clap_event_header_t* event) noexcept {
+    if (!event || event->space_id != CLAP_CORE_EVENT_SPACE_ID) return;
+    if (event->type == CLAP_EVENT_PARAM_GESTURE_BEGIN) {
+        if (event->size >= sizeof(clap_event_param_gesture_t)) {
+            const auto* gev = reinterpret_cast<const clap_event_param_gesture_t*>(event);
+            setGuiEditingActive(true);
+            m_lastGuiEditedParamId.store(gev->param_id, std::memory_order_relaxed);
+        }
+    } else if (event->type == CLAP_EVENT_PARAM_VALUE) {
+        if (event->size >= sizeof(clap_event_param_value_t)) {
+            const auto* pev = reinterpret_cast<const clap_event_param_value_t*>(event);
+            m_guiOutParamQueue.try_enqueue({pev->param_id, pev->value});
+            notifyGuiParamEdited(pev->param_id, false);
+        }
+    } else if (event->type == CLAP_EVENT_PARAM_GESTURE_END) {
+        if (event->size >= sizeof(clap_event_param_gesture_t)) {
+            const auto* gev = reinterpret_cast<const clap_event_param_gesture_t*>(event);
+            setGuiEditingActive(false);
+            notifyGuiGestureEnded(gev->param_id);
+        }
+    }
+}
+
+void ClapPluginInstance::flushPendingParamsIfStopped() {
+    if (!m_plugin || !m_paramsExt || !m_paramsExt->flush || m_faulted.load(std::memory_order_relaxed)) {
+        return;
+    }
+    if (m_isProcessing.load(std::memory_order_acquire)) {
+        return;
+    }
+    const uint64_t pushGenBefore = m_paramPushGen.load(std::memory_order_acquire);
+    ClapEventBuffer flushBuf;
+    std::pair<clap_id, double> ev;
+    while (m_paramQueue.try_dequeue(ev)) {
+        flushBuf.pushParam(ev.first, ev.second);
+    }
+    clap_input_events_t inEvs = flushBuf.makeInputEvents();
+    clap_output_events_t outEvs{};
+    outEvs.ctx = this;
+    outEvs.try_push = &clapOutputEventsTryPush;
+
+    safeCallPlugin([&]() {
+        m_paramsExt->flush(m_plugin, &inEvs, &outEvs);
+    });
+    m_paramDrainGen.store(pushGenBefore, std::memory_order_release);
+}
+
+void ClapPluginInstance::drainGuiOutParamQueue() const {
+    std::pair<clap_id, double> guiEv;
+    bool any = false;
+    while (m_guiOutParamQueue.try_dequeue(guiEv)) {
+        if (!any) {
+            any = true;
+        }
+        std::lock_guard<std::mutex> lock(m_paramCacheMutex);
+        m_paramCache[static_cast<uint32_t>(guiEv.first)] = static_cast<float>(guiEv.second);
+    }
+}
 
 std::unique_ptr<ClapPluginInstance> ClapPluginInstance::loadFromFile(const std::string& path, uint32_t pluginIndex) {
     int wlen = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
@@ -112,15 +228,27 @@ std::unique_ptr<ClapPluginInstance> ClapPluginInstance::loadFromFile(const std::
         instance->m_latencySamples = instance->m_latencyExt->get(instance->m_plugin);
     }
 
+    if (instance->m_paramsExt) {
+        const uint32_t paramCount = instance->m_paramsExt->count(instance->m_plugin);
+        for (uint32_t i = 0; i < paramCount; ++i) {
+            clap_param_info info{};
+            if (instance->m_paramsExt->get_info(instance->m_plugin, i, &info)) {
+                double val = info.default_value;
+                instance->m_paramsExt->get_value(instance->m_plugin, info.id, &val);
+                instance->m_paramCache[info.id] = static_cast<float>(val);
+            }
+        }
+    }
+
     return instance;
 }
 
 ClapPluginInstance::~ClapPluginInstance() {
     closeGui();
     if (m_plugin) {
-        if (m_isProcessing) {
+        if (m_isProcessing.load(std::memory_order_acquire)) {
             m_plugin->stop_processing(m_plugin);
-            m_isProcessing = false;
+            m_isProcessing.store(false, std::memory_order_release);
         }
         if (m_isActivated) {
             m_plugin->deactivate(m_plugin);
@@ -141,9 +269,9 @@ ClapPluginInstance::~ClapPluginInstance() {
 
 void ClapPluginInstance::prepare(double sampleRate, uint32_t maxBlockSize) {
     if (m_plugin) {
-        if (m_isProcessing) {
+        if (m_isProcessing.load(std::memory_order_acquire)) {
             m_plugin->stop_processing(m_plugin);
-            m_isProcessing = false;
+            m_isProcessing.store(false, std::memory_order_release);
         }
         if (m_isActivated) {
             m_plugin->deactivate(m_plugin);
@@ -163,6 +291,9 @@ void ClapPluginInstance::process(audio::AudioProcessContext& ctx) {
         ctx.output.copyFrom(ctx.input);
         return;
     }
+
+    m_audioThreadId.store(GetCurrentThreadId(), std::memory_order_relaxed);
+    const uint64_t pushGenBefore = m_paramPushGen.load(std::memory_order_acquire);
 
     const uint32_t numSamples = ctx.numSamples;
     const uint32_t inCh = ctx.input.numChannels();
@@ -186,29 +317,34 @@ void ClapPluginInstance::process(audio::AudioProcessContext& ctx) {
         m_eventBuffer.pushParam(ev.first, ev.second);
     }
 
+    clap_input_events_t inEvs = m_eventBuffer.makeInputEvents();
+    clap_output_events_t outEvs{};
+    outEvs.ctx = this;
+    outEvs.try_push = &clapOutputEventsTryPush;
+
     clap_process processData{};
     processData.steady_time = -1;
     processData.frames_count = numSamples;
     processData.transport = nullptr;
     processData.audio_inputs = &inBuf;
     processData.audio_outputs = &outBuf;
-    clap_input_events_t inEvs = m_eventBuffer.makeInputEvents();
     processData.audio_inputs_count = 1;
     processData.audio_outputs_count = 1;
     processData.in_events = (m_eventBuffer.count > 0) ? &inEvs : nullptr;
-    processData.out_events = nullptr;
+    processData.out_events = &outEvs;
 
     DWORD exCode = 0;
     bool ok = safeCallPluginAudio([&]() {
-        if (!m_isProcessing) {
+        if (!m_isProcessing.load(std::memory_order_relaxed)) {
             if (m_plugin->start_processing(m_plugin)) {
-                m_isProcessing = true;
+                m_isProcessing.store(true, std::memory_order_release);
             }
         }
         m_plugin->process(m_plugin, &processData);
     }, &exCode);
 
     m_eventBuffer.clear();
+    m_paramDrainGen.store(pushGenBefore, std::memory_order_release);
 
     if (!ok) {
         m_faulted.store(true, std::memory_order_release);
@@ -250,10 +386,7 @@ PluginParameterDesc ClapPluginInstance::getParameterDesc(size_t index) const {
                 desc.minValue = static_cast<float>(info.min_value);
                 desc.maxValue = static_cast<float>(info.max_value);
                 desc.defaultValue = static_cast<float>(info.default_value);
-                double val = 0.0;
-                if (m_paramsExt->get_value(m_plugin, info.id, &val)) {
-                    desc.currentValue = static_cast<float>(val);
-                }
+                desc.currentValue = getParameterValue(info.id);
             }
         });
     }
@@ -262,7 +395,17 @@ PluginParameterDesc ClapPluginInstance::getParameterDesc(size_t index) const {
 
 void ClapPluginInstance::setParameterValue(uint32_t paramId, float value) {
     if (m_faulted.load(std::memory_order_relaxed)) return;
+    if (GetCurrentThreadId() != m_audioThreadId.load(std::memory_order_relaxed)) {
+        std::lock_guard<std::mutex> lock(m_paramCacheMutex);
+        m_paramCache[paramId] = value;
+    }
+    m_paramPushGen.fetch_add(1, std::memory_order_release);
     m_paramQueue.try_enqueue({static_cast<clap_id>(paramId), static_cast<double>(value)});
+
+    if (GetCurrentThreadId() != m_audioThreadId.load(std::memory_order_relaxed) &&
+        !m_isProcessing.load(std::memory_order_acquire)) {
+        flushPendingParamsIfStopped();
+    }
 }
 
 void ClapPluginInstance::setParameterFromAudioThread(uint32_t paramId, float value) noexcept {
@@ -271,17 +414,39 @@ void ClapPluginInstance::setParameterFromAudioThread(uint32_t paramId, float val
 }
 
 float ClapPluginInstance::getParameterValue(uint32_t paramId) const {
-    if (m_paramsExt && m_plugin && !m_faulted.load(std::memory_order_relaxed)) {
+    if (m_faulted.load(std::memory_order_relaxed)) return 0.0f;
+
+    drainGuiOutParamQueue();
+
+    // If a UI-thread parameter change is still queued awaiting the next audio block, return the cached value
+    if (m_paramDrainGen.load(std::memory_order_acquire) < m_paramPushGen.load(std::memory_order_acquire)) {
+        std::lock_guard<std::mutex> lock(m_paramCacheMutex);
+        auto it = m_paramCache.find(paramId);
+        if (it != m_paramCache.end()) {
+            return it->second;
+        }
+    }
+
+    if (m_paramsExt && m_plugin) {
         float result = 0.0f;
+        bool gotVal = false;
         safeCallPlugin([&]() {
             double val = 0.0;
             if (m_paramsExt->get_value(m_plugin, paramId, &val)) {
                 result = static_cast<float>(val);
+                gotVal = true;
             }
         });
-        return result;
+        if (gotVal) {
+            std::lock_guard<std::mutex> lock(m_paramCacheMutex);
+            m_paramCache[paramId] = result;
+            return result;
+        }
     }
-    return 0.0f;
+
+    std::lock_guard<std::mutex> lock(m_paramCacheMutex);
+    auto it = m_paramCache.find(paramId);
+    return (it != m_paramCache.end()) ? it->second : 0.0f;
 }
 
 bool ClapPluginInstance::hasCustomGui() const noexcept {
@@ -381,6 +546,11 @@ bool ClapPluginInstance::loadState(const std::vector<uint8_t>& state) {
         return false;
     }
 
+    // Drain any stale queued parameter changes before loading restored state
+    std::pair<clap_id, double> dummy;
+    while (m_paramQueue.try_dequeue(dummy)) {}
+    while (m_guiOutParamQueue.try_dequeue(dummy)) {}
+
     struct ReadCtx {
         const uint8_t* data;
         size_t size;
@@ -404,6 +574,21 @@ bool ClapPluginInstance::loadState(const std::vector<uint8_t>& state) {
         ok = m_stateExt->load(m_plugin, &stream);
     });
 
+    if (ok && m_paramsExt) {
+        std::lock_guard<std::mutex> lock(m_paramCacheMutex);
+        const uint32_t paramCount = m_paramsExt->count(m_plugin);
+        for (uint32_t i = 0; i < paramCount; ++i) {
+            clap_param_info info{};
+            if (m_paramsExt->get_info(m_plugin, i, &info)) {
+                double val = info.default_value;
+                if (m_paramsExt->get_value(m_plugin, info.id, &val)) {
+                    m_paramCache[info.id] = static_cast<float>(val);
+                }
+            }
+        }
+    }
+    m_paramDrainGen.store(m_paramPushGen.load(std::memory_order_relaxed), std::memory_order_release);
+    clearGuiParamEdit();
     return ok;
 }
 

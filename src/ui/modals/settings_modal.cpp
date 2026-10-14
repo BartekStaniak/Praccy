@@ -345,7 +345,7 @@ void SettingsModal::renderUpdatesTab() {
     ImGui::Separator();
     ImGui::Spacing();
 
-    ImGui::Text("Installed Version: %s", "v2.5-beta3");
+    ImGui::Text("Installed Version: %s", "v2.5-beta4");
     ImGui::Spacing();
 
     bool includeBeta = m_cachedConfig.checkBetaUpdates;
@@ -366,7 +366,7 @@ void SettingsModal::renderUpdatesTab() {
 void SettingsModal::renderAboutTab() {
     const auto& tokens = themeTokens();
     ImGui::Spacing();
-    ImGui::TextColored(tokens.text.accent.vec4, "PRACCY v2.5-beta3");
+    ImGui::TextColored(tokens.text.accent.vec4, "PRACCY v2.5-beta4");
     ImGui::TextDisabled("Professional Ultra-Low-Latency Guitar & Audio Practice Suite");
     ImGui::Separator();
     ImGui::Spacing();

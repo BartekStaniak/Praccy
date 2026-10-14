@@ -7,6 +7,9 @@
 #include <vector>
 #include <string>
 #include <array>
+#include <atomic>
+#include <mutex>
+#include <unordered_map>
 #include <utility>
 #include <readerwriterqueue/readerwriterqueue.h>
 
@@ -89,6 +92,8 @@ public:
     [[nodiscard]] std::vector<uint8_t> saveState() const override;
     bool loadState(const std::vector<uint8_t>& state) override;
 
+    void onPluginOutputEvent(const clap_event_header_t* event) noexcept;
+
 private:
     ClapPluginInstance() = default;
 
@@ -96,6 +101,14 @@ private:
     static void clapHostRequestRestart(const clap_host* host);
     static void clapHostRequestProcess(const clap_host* host);
     static void clapHostRequestCallback(const clap_host* host);
+
+    static void CLAP_ABI clapHostParamsRescan(const clap_host_t* host, clap_param_rescan_flags flags);
+    static void CLAP_ABI clapHostParamsClear(const clap_host_t* host, clap_id paramId, clap_param_clear_flags flags);
+    static void CLAP_ABI clapHostParamsRequestFlush(const clap_host_t* host);
+    static void CLAP_ABI clapHostStateMarkDirty(const clap_host_t* host);
+
+    void flushPendingParamsIfStopped();
+    void drainGuiOutParamQueue() const;
 
     HMODULE m_libraryModule{nullptr};
     const clap_plugin_entry* m_entry{nullptr};
@@ -118,9 +131,16 @@ private:
     bool m_guiCreated{false};
 
     moodycamel::ReaderWriterQueue<std::pair<clap_id, double>> m_paramQueue{128};
+    mutable moodycamel::ReaderWriterQueue<std::pair<clap_id, double>> m_guiOutParamQueue{128};
     ClapEventBuffer m_eventBuffer;
     bool m_isActivated{false};
-    bool m_isProcessing{false};
+    std::atomic<bool> m_isProcessing{false};
+    std::atomic<DWORD> m_audioThreadId{0};
+    std::atomic<uint64_t> m_paramPushGen{0};
+    std::atomic<uint64_t> m_paramDrainGen{0};
+
+    mutable std::mutex m_paramCacheMutex;
+    mutable std::unordered_map<uint32_t, float> m_paramCache;
 };
 
 } // namespace praccy::plugins

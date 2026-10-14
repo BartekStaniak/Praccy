@@ -6,7 +6,7 @@
 
 ### Ultra-lightweight ASIO VST3 & CLAP host for instant instrument practice, live jamming, and universal DAW preset exchange.
 
-[![Release](https://img.shields.io/badge/release-v2.5--beta3-brightgreen.svg)](https://github.com/BartekStaniak/Praccy/releases)
+[![Release](https://img.shields.io/badge/release-v2.5--beta4-brightgreen.svg)](https://github.com/BartekStaniak/Praccy/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64-blue.svg)](https://github.com/BartekStaniak/Praccy)
 [![Audio Architecture](https://img.shields.io/badge/audio-ASIO%20%7C%20VST3%20%7C%20CLAP-orange.svg)](https://github.com/BartekStaniak/Praccy)
 [![Graphics](https://img.shields.io/badge/gui-DirectX%2011%20%7C%20Dear%20ImGui-purple.svg)](https://github.com/BartekStaniak/Praccy)

@@ -229,6 +229,18 @@ RackView::RackView(audio::GraphEngine& graph,
     }
     m_rackViewMode = state::AppConfig::RackViewMode::Modular;
     m_riffBuffer.prepare(48000.0, static_cast<int>(cfg.retroactiveBufferMinutes));
+
+    m_pluginBrowserModal->setOnPluginInserted([this](const std::string& pluginName) {
+        syncMacrosFromGraph();
+        m_undoManager.pushSnapshot(
+            state::SceneManager::captureGraphSnapshot(m_graph, "Add " + pluginName),
+            "Add " + pluginName,
+            state::UndoActionType::StructuralMutation
+        );
+        triggerHudToast("ADDED: " + pluginName);
+    });
+
+    syncMacrosFromGraph();
     m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Initial Scene"),
                                "Initial Scene",
                                state::UndoActionType::SceneSwitch);
@@ -263,6 +275,8 @@ void RackView::toggleFavoritePreset(const std::string& name) {
 
 void RackView::render() {
     ThumbnailManager::instance().update();
+    pollPluginGuiEdits(false);
+
     if (m_expandPulseTimer > 0.0f) {
         m_expandPulseTimer -= ImGui::GetIO().DeltaTime * 2.8f;
         if (m_expandPulseTimer <= 0.0f) {
@@ -295,7 +309,8 @@ void RackView::render() {
         if (!io.WantTextInput) {
             // 1. Undo / Redo: Ctrl+Z, Ctrl+Y, Ctrl+Shift+Z
             if (io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
-                if (m_undoManager.canUndo()) {
+                pollPluginGuiEdits(true);
+                if (m_undoManager.undoCount() > 1) {
                     m_undoManager.undo(m_graph, m_scenes);
                     syncMacrosFromGraph();
                     triggerHudToast("UNDO: " + m_undoManager.lastActionDescription());
@@ -304,6 +319,7 @@ void RackView::render() {
                 }
             } else if ((io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y, false)) ||
                        (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false))) {
+                pollPluginGuiEdits(true);
                 if (m_undoManager.canRedo()) {
                     m_undoManager.redo(m_graph, m_scenes);
                     syncMacrosFromGraph();
@@ -344,6 +360,7 @@ void RackView::render() {
             for (int k = 0; k < 8 && k < static_cast<int>(m_scenes.numScenes()); ++k) {
                 if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_1 + k), false)) {
                     if (m_scenes.applyScene(k, m_graph)) {
+                        syncMacrosFromGraph();
                         triggerHudToast("PRESET " + std::to_string(k + 1) + " RECALLED");
                         m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Recall Preset " + std::to_string(k + 1)),
                                                    "Preset " + std::to_string(k + 1),
@@ -381,7 +398,10 @@ void RackView::render() {
                                                                 : ("ACTIVE: " + m_focusedSlot->name()));
                     m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Bypass " + m_focusedSlot->name()),
                                                "Bypass: " + m_focusedSlot->name(),
-                                               state::UndoActionType::ParameterTweak);
+                                               state::UndoActionType::ParameterTweak,
+                                               m_focusedSlot->name() + ":Bypass",
+                                               true);
+                    m_undoManager.commitActiveTransaction();
                 }
             }
         }
@@ -869,15 +889,16 @@ void RackView::renderSceneBar() {
                         m_midi.startLearning(midi::BindingTargetType::SceneSelect, -1, -1, static_cast<int>(i));
                         triggerHudToast("MIDI LEARN: SCENE " + std::to_string(i + 1));
                     } else {
-                        m_undoManager.pushSnapshot(
-                            state::SceneManager::captureGraphSnapshot(m_graph, "Preset: " + favName),
-                            "Preset: " + favName,
-                            state::UndoActionType::SceneSwitch
-                        );
-                        m_scenes.loadPresetChain(favName, m_graph);
-                        m_auditionedPreset = favName;
-                        syncMacrosFromGraph();
-                        triggerHudToast("Loaded " + favName);
+                        if (m_scenes.loadPresetChain(favName, m_graph)) {
+                            m_auditionedPreset = favName;
+                            syncMacrosFromGraph();
+                            m_undoManager.pushSnapshot(
+                                state::SceneManager::captureGraphSnapshot(m_graph, "Preset: " + favName),
+                                "Preset: " + favName,
+                                state::UndoActionType::SceneSwitch
+                            );
+                            triggerHudToast("Loaded " + favName);
+                        }
                     }
                 }
             }
@@ -932,6 +953,11 @@ void RackView::renderSceneBar() {
                 if (m_scenes.hasToneSnapshotA()) {
                     m_scenes.applyToneSnapshotA(m_graph);
                     syncMacrosFromGraph();
+                    m_undoManager.pushSnapshot(
+                        state::SceneManager::captureGraphSnapshot(m_graph, "Tone A"),
+                        "Tone A",
+                        state::UndoActionType::SceneSwitch
+                    );
                     triggerHudToast("A/B: SWITCHED TO TONE A");
                 } else {
                     m_scenes.captureToneSnapshotA(m_graph);
@@ -961,6 +987,11 @@ void RackView::renderSceneBar() {
                 if (m_scenes.hasToneSnapshotB()) {
                     m_scenes.applyToneSnapshotB(m_graph);
                     syncMacrosFromGraph();
+                    m_undoManager.pushSnapshot(
+                        state::SceneManager::captureGraphSnapshot(m_graph, "Tone B"),
+                        "Tone B",
+                        state::UndoActionType::SceneSwitch
+                    );
                     triggerHudToast("A/B: SWITCHED TO TONE B");
                 } else {
                     m_scenes.copyToneSnapshotAToB();
@@ -981,6 +1012,11 @@ void RackView::renderSceneBar() {
         if (isToneBActive) {
             m_scenes.applyToneSnapshotB(m_graph);
             syncMacrosFromGraph();
+            m_undoManager.pushSnapshot(
+                state::SceneManager::captureGraphSnapshot(m_graph, "Copy A to B"),
+                "Copy Tone A to B",
+                state::UndoActionType::SceneSwitch
+            );
         }
         triggerHudToast("A/B: COPIED TONE A TO B");
     }
@@ -992,12 +1028,15 @@ void RackView::renderSceneBar() {
     ImGui::TextColored(tokens.text.muted.vec4, "|");
     ImGui::SameLine(0, kGroupDividerSpacing);
 
-    bool canUndo = m_undoManager.canUndo();
+    bool canUndo = (m_undoManager.undoCount() > 1) || (m_pendingGuiEditSlot != nullptr);
     if (!canUndo) ImGui::BeginDisabled();
     if (CenteredButton("Undo##SceneUndo", ImVec2(undoRedoBtnW, barBtnH))) {
-        m_undoManager.undo(m_graph, m_scenes);
-        syncMacrosFromGraph();
-        triggerHudToast("UNDO: " + m_undoManager.lastActionDescription());
+        pollPluginGuiEdits(true);
+        if (m_undoManager.undoCount() > 1) {
+            m_undoManager.undo(m_graph, m_scenes);
+            syncMacrosFromGraph();
+            triggerHudToast("UNDO: " + m_undoManager.lastActionDescription());
+        }
     }
     if (!canUndo) ImGui::EndDisabled();
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Undo last parameter or chain edit (Ctrl+Z)");
@@ -1006,6 +1045,7 @@ void RackView::renderSceneBar() {
     bool canRedo = m_undoManager.canRedo();
     if (!canRedo) ImGui::BeginDisabled();
     if (CenteredButton("Redo##SceneRedo", ImVec2(undoRedoBtnW, barBtnH))) {
+        pollPluginGuiEdits(true);
         m_undoManager.redo(m_graph, m_scenes);
         syncMacrosFromGraph();
         triggerHudToast("REDO: " + m_undoManager.lastActionDescription());
@@ -1047,14 +1087,16 @@ void RackView::renderSceneBar() {
                 if (ImGui::BeginMenu("Quick Load Preset")) {
                     for (const auto& pName : userPresets) {
                         if (ImGui::MenuItem(pName.c_str())) {
-                            m_undoManager.pushSnapshot(
-                                state::SceneManager::captureGraphSnapshot(m_graph, "Preset: " + pName),
-                                "Preset: " + pName,
-                                state::UndoActionType::SceneSwitch
-                            );
-                            m_scenes.loadPresetChain(pName, m_graph);
-                            m_auditionedPreset = pName;
-                            triggerHudToast("Loaded preset: " + pName);
+                            if (m_scenes.loadPresetChain(pName, m_graph)) {
+                                m_auditionedPreset = pName;
+                                syncMacrosFromGraph();
+                                m_undoManager.pushSnapshot(
+                                    state::SceneManager::captureGraphSnapshot(m_graph, "Preset: " + pName),
+                                    "Preset: " + pName,
+                                    state::UndoActionType::SceneSwitch
+                                );
+                                triggerHudToast("Loaded preset: " + pName);
+                            }
                         }
                     }
                     ImGui::EndMenu();
@@ -1100,14 +1142,16 @@ void RackView::renderSceneBar() {
             if (ImGui::BeginCombo("##UserPresetsCombo", "Quick Load...")) {
                 for (const auto& pName : userPresets) {
                     if (ImGui::Selectable(pName.c_str())) {
-                        m_undoManager.pushSnapshot(
-                            state::SceneManager::captureGraphSnapshot(m_graph, "Preset: " + pName),
-                            "Preset: " + pName,
-                            state::UndoActionType::SceneSwitch
-                        );
-                        m_scenes.loadPresetChain(pName, m_graph);
-                        m_auditionedPreset = pName;
-                        triggerHudToast("Loaded preset: " + pName);
+                        if (m_scenes.loadPresetChain(pName, m_graph)) {
+                            m_auditionedPreset = pName;
+                            syncMacrosFromGraph();
+                            m_undoManager.pushSnapshot(
+                                state::SceneManager::captureGraphSnapshot(m_graph, "Preset: " + pName),
+                                "Preset: " + pName,
+                                state::UndoActionType::SceneSwitch
+                            );
+                            triggerHudToast("Loaded preset: " + pName);
+                        }
                     }
                 }
                 ImGui::EndCombo();
@@ -1558,6 +1602,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             std::snprintf(spId, sizeof(spId), "##Sp_%d", slotIndex);
             if (renderCenteredSplitButton(spId, ImVec2(18, 18))) {
                 m_graph.splitSerialNodeIntoParallel(slotIndex);
+                syncMacrosFromGraph();
                 m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Split Parallel"),
                                            "Split Parallel",
                                            state::UndoActionType::StructuralMutation);
@@ -1577,6 +1622,8 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             if (hasGui) plugins::PluginWindowManager::instance().closePluginWindow(pluginInst);
             if (m_dspTweakSlot == slot) m_dspTweakSlot = nullptr;
             if (m_expandedSlot == slot) m_expandedSlot = nullptr;
+            if (m_pendingGuiEditSlot == slot) m_pendingGuiEditSlot = nullptr;
+            m_guiParamBaseline.erase(slot);
             if (branchIndex == -1) {
                 m_graph.removeSerialNode(slotIndex);
             } else {
@@ -1610,7 +1657,10 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                 slot->setBypassed(!activeState);
                 m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Toggle Bypass"),
                                            "Bypass: " + slot->name(),
-                                           state::UndoActionType::ParameterTweak);
+                                           state::UndoActionType::ParameterTweak,
+                                           slot->name() + ":Bypass",
+                                           true);
+                m_undoManager.commitActiveTransaction();
             }
         } else if (m_midiMapMode && ImGui::IsItemClicked()) {
             m_midi.startLearning(midi::BindingTargetType::SlotBypass, slotIndex, branchIndex);
@@ -1717,6 +1767,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             m_focusedSlot = slot;
             m_focusedSlotIndex = slotIndex;
             if (hasGui) {
+                refreshGuiParamBaseline(slot);
                 plugins::PluginWindowManager::instance().openPluginWindow(pluginInst);
             } else {
                 m_dspTweakSlot = (m_dspTweakSlot == slot) ? nullptr : slot;
@@ -1767,6 +1818,8 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             bool changed = DrawHardwareKnob(knobId, macro.label.c_str(), &macro.currentValue,
                                             macro.minValue, macro.maxValue, macro.defaultValue,
                                             "%.1f", opt);
+            const bool knobDeactivatedAfterEdit = ImGui::IsItemDeactivatedAfterEdit();
+            const bool knobDiscreteChange = changed && !ImGui::IsItemActive();
 
             if (m_midiMapMode && ImGui::IsItemClicked()) {
                 if (macro.isSlotTrim) {
@@ -1780,6 +1833,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                     slot->setParameter(macro.paramId, macro.currentValue);
                     if (pluginInst) {
                         pluginInst->setParameterValue(macro.paramId, macro.currentValue);
+                        pluginInst->clearGuiParamEdit();
                     }
                 } else if (macro.isSlotTrim) {
                     slot->setOutputGainDb(macro.currentValue);
@@ -1788,15 +1842,20 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                 }
                 slot->macros()[m].currentValue = macro.currentValue;
                 m_slotMacros[slot][m].currentValue = macro.currentValue;
+                refreshGuiParamBaseline(slot);
             }
 
-            if (ImGui::IsItemDeactivatedAfterEdit()) {
+            if (!m_midiMapMode && (knobDeactivatedAfterEdit || knobDiscreteChange)) {
+                refreshGuiParamBaseline(slot);
                 m_undoManager.pushSnapshot(
                     state::SceneManager::captureGraphSnapshot(m_graph, "Tweak " + macro.label),
                     "Macro: " + macro.label,
                     state::UndoActionType::ParameterTweak,
                     slot->name() + ":" + macro.label
                 );
+                if (knobDeactivatedAfterEdit) {
+                    m_undoManager.commitActiveTransaction();
+                }
             }
 
             char macroPopupId[64];
@@ -1805,6 +1864,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                 ImGui::TextColored(tokens.text.accent.vec4, "REASSIGN MACRO %d", m + 1);
                 ImGui::Separator();
 
+                bool reassigned = false;
                 if (pluginInst) {
                     size_t pCount = pluginInst->numParameters();
                     for (size_t p = 0; p < pCount; ++p) {
@@ -1820,6 +1880,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                             macro.maxValue = desc.maxValue;
                             macro.defaultValue = desc.defaultValue;
                             macro.currentValue = pluginInst->getParameterValue(desc.id);
+                            reassigned = true;
                         }
                     }
                     ImGui::Separator();
@@ -1834,6 +1895,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                     macro.maxValue = 100.0f;
                     macro.defaultValue = 100.0f;
                     macro.currentValue = slot->dryWet() * 100.0f;
+                    reassigned = true;
                 }
                 if (ImGui::Selectable("Slot Output Trim", macro.isSlotTrim)) {
                     macro.bound = false;
@@ -1844,6 +1906,19 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                     macro.maxValue = 12.0f;
                     macro.defaultValue = 0.0f;
                     macro.currentValue = slot->outputGainDb();
+                    reassigned = true;
+                }
+
+                if (reassigned) {
+                    m_slotMacros[slot][m] = macro;
+                    m_undoManager.pushSnapshot(
+                        state::SceneManager::captureGraphSnapshot(m_graph, "Reassign Macro " + macro.label),
+                        "Reassign Macro: " + macro.label,
+                        state::UndoActionType::ParameterTweak,
+                        slot->name() + ":MacroAssign",
+                        true
+                    );
+                    m_undoManager.commitActiveTransaction();
                 }
 
                 ImGui::EndPopup();
@@ -1888,24 +1963,36 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         char mixLabel[32];
         std::snprintf(mixLabel, sizeof(mixLabel), "##Mix_%d_%d_%d", slotIndex, blockIndex, branchIndex);
         ImGui::SetNextItemWidth(190.0f);
-        if (ResettableSliderFloat(mixLabel, &mix, 0.0f, 100.0f, 100.0f, "Mix: %.0f%%")) {
+        const bool mixChanged = ResettableSliderFloat(mixLabel, &mix, 0.0f, 100.0f, 100.0f, "Mix: %.0f%%");
+        const bool mixDeactivatedAfterEdit = ImGui::IsItemDeactivatedAfterEdit();
+        const bool mixDiscreteChange = mixChanged && !ImGui::IsItemActive();
+        if (mixChanged) {
             if (m_midiMapMode) {
                 m_midi.startLearning(midi::BindingTargetType::SlotDryWet, slotIndex, branchIndex);
                 triggerHudToast("MIDI LEARN: " + slot->name() + " MIX");
             } else {
                 slot->setDryWet(mix / 100.0f);
+                for (int m = 0; m < 4; ++m) {
+                    if (slot->macros()[m].isSlotMix) {
+                        slot->macros()[m].currentValue = mix;
+                        m_slotMacros[slot][m].currentValue = mix;
+                    }
+                }
             }
         } else if (m_midiMapMode && ImGui::IsItemClicked()) {
             m_midi.startLearning(midi::BindingTargetType::SlotDryWet, slotIndex, branchIndex);
             triggerHudToast("MIDI LEARN: " + slot->name() + " MIX");
         }
-        if (ImGui::IsItemDeactivatedAfterEdit()) {
+        if (!m_midiMapMode && (mixDeactivatedAfterEdit || mixDiscreteChange)) {
             m_undoManager.pushSnapshot(
                 state::SceneManager::captureGraphSnapshot(m_graph, "Mix " + slot->name()),
                 "Mix: " + slot->name(),
                 state::UndoActionType::ParameterTweak,
                 slot->name() + ":Mix"
             );
+            if (mixDeactivatedAfterEdit) {
+                m_undoManager.commitActiveTransaction();
+            }
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Dry/Wet Mix (Double-click to reset 100%%)");
 
@@ -1922,24 +2009,36 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         char trimLabel[32];
         std::snprintf(trimLabel, sizeof(trimLabel), "##Trim_%d_%d_%d", slotIndex, blockIndex, branchIndex);
         ImGui::SetNextItemWidth(206.0f);
-        if (ResettableSliderFloat(trimLabel, &outTrim, -24.0f, +12.0f, 0.0f, "Trim: %+.1f dB")) {
+        const bool trimChanged = ResettableSliderFloat(trimLabel, &outTrim, -24.0f, +12.0f, 0.0f, "Trim: %+.1f dB");
+        const bool trimDeactivatedAfterEdit = ImGui::IsItemDeactivatedAfterEdit();
+        const bool trimDiscreteChange = trimChanged && !ImGui::IsItemActive();
+        if (trimChanged) {
             if (m_midiMapMode) {
                 m_midi.startLearning(midi::BindingTargetType::SlotOutputGain, slotIndex, branchIndex);
                 triggerHudToast("MIDI LEARN: " + slot->name() + " TRIM");
             } else {
                 slot->setOutputGainDb(outTrim);
+                for (int m = 0; m < 4; ++m) {
+                    if (slot->macros()[m].isSlotTrim) {
+                        slot->macros()[m].currentValue = outTrim;
+                        m_slotMacros[slot][m].currentValue = outTrim;
+                    }
+                }
             }
         } else if (m_midiMapMode && ImGui::IsItemClicked()) {
             m_midi.startLearning(midi::BindingTargetType::SlotOutputGain, slotIndex, branchIndex);
             triggerHudToast("MIDI LEARN: " + slot->name() + " TRIM");
         }
-        if (ImGui::IsItemDeactivatedAfterEdit()) {
+        if (!m_midiMapMode && (trimDeactivatedAfterEdit || trimDiscreteChange)) {
             m_undoManager.pushSnapshot(
                 state::SceneManager::captureGraphSnapshot(m_graph, "Trim " + slot->name()),
                 "Trim: " + slot->name(),
                 state::UndoActionType::ParameterTweak,
                 slot->name() + ":Trim"
             );
+            if (trimDeactivatedAfterEdit) {
+                m_undoManager.commitActiveTransaction();
+            }
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Output Trim (Double-click to reset 0.0 dB)");
         ImGui::PopStyleVar(); // FramePadding
@@ -1951,6 +2050,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
     if (ImGui::BeginPopupContextItem(popupId)) {
         if (hasGui) {
             if (ImGui::MenuItem("Open Plugin GUI Window")) {
+                refreshGuiParamBaseline(slot);
                 plugins::PluginWindowManager::instance().openPluginWindow(pluginInst);
                 HWND hWin = plugins::PluginWindowManager::instance().getWindow(pluginInst);
                 if (hWin) {
@@ -1981,6 +2081,8 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             if (hasGui) plugins::PluginWindowManager::instance().closePluginWindow(pluginInst);
             if (m_dspTweakSlot == slot) m_dspTweakSlot = nullptr;
             if (m_expandedSlot == slot) m_expandedSlot = nullptr;
+            if (m_pendingGuiEditSlot == slot) m_pendingGuiEditSlot = nullptr;
+            m_guiParamBaseline.erase(slot);
             if (branchIndex == -1) {
                 m_graph.removeSerialNode(slotIndex);
             } else {
@@ -2141,7 +2243,12 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
             bool m0 = br0->isMuted();
             {
                 ScopedStyleColor muteGuard(ImGuiCol_Button, tokens.signal.faulted.vec4, m0);
-                if (CenteredButton("M##br0", ImVec2(24, 24))) { br0->setMuted(!m0); }
+                if (CenteredButton("M##br0", ImVec2(24, 24))) {
+                    br0->setMuted(!m0);
+                    m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Branch A Mute"),
+                                               "Branch A Mute", state::UndoActionType::ParameterTweak, "Br0:Mute", true);
+                    m_undoManager.commitActiveTransaction();
+                }
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip(m0 ? "Unmute Branch A" : "Mute Branch A");
 
@@ -2151,7 +2258,12 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
             bool s0 = br0->isSolo();
             {
                 ScopedStyleColor soloGuard(ImGuiCol_Button, tokens.signal.active.vec4, s0);
-                if (CenteredButton("S##br0", ImVec2(24, 24))) { br0->setSolo(!s0); }
+                if (CenteredButton("S##br0", ImVec2(24, 24))) {
+                    br0->setSolo(!s0);
+                    m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Branch A Solo"),
+                                               "Branch A Solo", state::UndoActionType::ParameterTweak, "Br0:Solo", true);
+                    m_undoManager.commitActiveTransaction();
+                }
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip(s0 ? "Unsolo Branch A" : "Solo Branch A");
 
@@ -2161,7 +2273,12 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
             bool p0 = br0->isPhaseInvert();
             {
                 ScopedStyleColor phaseGuard(ImGuiCol_Button, tokens.text.accent.vec4, p0);
-                if (CenteredButton("\xC3\x98##br0", ImVec2(24, 24))) { br0->setPhaseInvert(!p0); }
+                if (CenteredButton("\xC3\x98##br0", ImVec2(24, 24))) {
+                    br0->setPhaseInvert(!p0);
+                    m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Branch A Phase"),
+                                               "Branch A Phase", state::UndoActionType::ParameterTweak, "Br0:Phase", true);
+                    m_undoManager.commitActiveTransaction();
+                }
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Phase Invert (180° Polarity Flip)");
 
@@ -2176,7 +2293,13 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
             // Pan Slider (Double-click reset to 0.0)
             float pan0 = br0->pan();
             ImGui::SetNextItemWidth(sliderW0);
-            if (ResettableSliderFloat("##Pan0", &pan0, -1.0f, 1.0f, 0.0f, "Pan: %+.2f")) { br0->setPan(pan0); }
+            const bool pan0Changed = ResettableSliderFloat("##Pan0", &pan0, -1.0f, 1.0f, 0.0f, "Pan: %+.2f");
+            if (pan0Changed) { br0->setPan(pan0); }
+            if (ImGui::IsItemDeactivatedAfterEdit() || (pan0Changed && !ImGui::IsItemActive())) {
+                m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Branch A Pan"),
+                                           "Branch A Pan", state::UndoActionType::ParameterTweak, "Br0:Pan");
+                if (ImGui::IsItemDeactivatedAfterEdit()) m_undoManager.commitActiveTransaction();
+            }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Branch A Pan (Double-click to center)");
 
             ImGui::SameLine(0, sliderGap);
@@ -2184,7 +2307,13 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
             // Gain Slider (Double-click reset to 0.0dB)
             float gain0 = br0->gainDb();
             ImGui::SetNextItemWidth(sliderW0);
-            if (ResettableSliderFloat("##Gain0", &gain0, -36.0f, +12.0f, 0.0f, "%+.1f dB")) { br0->setGainDb(gain0); }
+            const bool gain0Changed = ResettableSliderFloat("##Gain0", &gain0, -36.0f, +12.0f, 0.0f, "%+.1f dB");
+            if (gain0Changed) { br0->setGainDb(gain0); }
+            if (ImGui::IsItemDeactivatedAfterEdit() || (gain0Changed && !ImGui::IsItemActive())) {
+                m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Branch A Gain"),
+                                           "Branch A Gain", state::UndoActionType::ParameterTweak, "Br0:Gain");
+                if (ImGui::IsItemDeactivatedAfterEdit()) m_undoManager.commitActiveTransaction();
+            }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Branch A Gain (Double-click to reset 0.0 dB)");
 
             ImGui::PopStyleVar();
@@ -2322,7 +2451,12 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
             bool m1 = br1->isMuted();
             {
                 ScopedStyleColor muteGuard(ImGuiCol_Button, tokens.signal.faulted.vec4, m1);
-                if (CenteredButton("M##br1", ImVec2(24, 24))) { br1->setMuted(!m1); }
+                if (CenteredButton("M##br1", ImVec2(24, 24))) {
+                    br1->setMuted(!m1);
+                    m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Branch B Mute"),
+                                               "Branch B Mute", state::UndoActionType::ParameterTweak, "Br1:Mute", true);
+                    m_undoManager.commitActiveTransaction();
+                }
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip(m1 ? "Unmute Branch B" : "Mute Branch B");
 
@@ -2332,7 +2466,12 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
             bool s1 = br1->isSolo();
             {
                 ScopedStyleColor soloGuard(ImGuiCol_Button, tokens.signal.active.vec4, s1);
-                if (CenteredButton("S##br1", ImVec2(24, 24))) { br1->setSolo(!s1); }
+                if (CenteredButton("S##br1", ImVec2(24, 24))) {
+                    br1->setSolo(!s1);
+                    m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Branch B Solo"),
+                                               "Branch B Solo", state::UndoActionType::ParameterTweak, "Br1:Solo", true);
+                    m_undoManager.commitActiveTransaction();
+                }
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip(s1 ? "Unsolo Branch B" : "Solo Branch B");
 
@@ -2342,7 +2481,12 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
             bool p1 = br1->isPhaseInvert();
             {
                 ScopedStyleColor phaseGuard(ImGuiCol_Button, tokens.text.accent.vec4, p1);
-                if (CenteredButton("\xC3\x98##br1", ImVec2(24, 24))) { br1->setPhaseInvert(!p1); }
+                if (CenteredButton("\xC3\x98##br1", ImVec2(24, 24))) {
+                    br1->setPhaseInvert(!p1);
+                    m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Branch B Phase"),
+                                               "Branch B Phase", state::UndoActionType::ParameterTweak, "Br1:Phase", true);
+                    m_undoManager.commitActiveTransaction();
+                }
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Phase Invert (180° Polarity Flip)");
 
@@ -2357,7 +2501,13 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
             // Pan Slider (Double-click reset to 0.0)
             float pan1 = br1->pan();
             ImGui::SetNextItemWidth(sliderW1);
-            if (ResettableSliderFloat("##Pan1", &pan1, -1.0f, 1.0f, 0.0f, "Pan: %+.2f")) { br1->setPan(pan1); }
+            const bool pan1Changed = ResettableSliderFloat("##Pan1", &pan1, -1.0f, 1.0f, 0.0f, "Pan: %+.2f");
+            if (pan1Changed) { br1->setPan(pan1); }
+            if (ImGui::IsItemDeactivatedAfterEdit() || (pan1Changed && !ImGui::IsItemActive())) {
+                m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Branch B Pan"),
+                                           "Branch B Pan", state::UndoActionType::ParameterTweak, "Br1:Pan");
+                if (ImGui::IsItemDeactivatedAfterEdit()) m_undoManager.commitActiveTransaction();
+            }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Branch B Pan (Double-click to center)");
 
             ImGui::SameLine(0, sliderGap);
@@ -2365,7 +2515,13 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
             // Gain Slider (Double-click reset to 0.0dB)
             float gain1 = br1->gainDb();
             ImGui::SetNextItemWidth(sliderW1);
-            if (ResettableSliderFloat("##Gain1", &gain1, -36.0f, +12.0f, 0.0f, "%+.1f dB")) { br1->setGainDb(gain1); }
+            const bool gain1Changed = ResettableSliderFloat("##Gain1", &gain1, -36.0f, +12.0f, 0.0f, "%+.1f dB");
+            if (gain1Changed) { br1->setGainDb(gain1); }
+            if (ImGui::IsItemDeactivatedAfterEdit() || (gain1Changed && !ImGui::IsItemActive())) {
+                m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Branch B Gain"),
+                                           "Branch B Gain", state::UndoActionType::ParameterTweak, "Br1:Gain");
+                if (ImGui::IsItemDeactivatedAfterEdit()) m_undoManager.commitActiveTransaction();
+            }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Branch B Gain (Double-click to reset 0.0 dB)");
 
             ImGui::PopStyleVar();
@@ -2498,8 +2654,14 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
     float blend = block->blend();
     ImGui::SetCursorPosX(combLeft + 8.0f);
     ImGui::SetNextItemWidth(combW - 16.0f);
-    if (ResettableSliderFloat("##ABBlend", &blend, -1.0f, 1.0f, 0.0f, "A:B %+.2f")) {
+    const bool blendChanged = ResettableSliderFloat("##ABBlend", &blend, -1.0f, 1.0f, 0.0f, "A:B %+.2f");
+    if (blendChanged) {
         block->setBlend(blend);
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit() || (blendChanged && !ImGui::IsItemActive())) {
+        m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Parallel Blend"),
+                                   "Parallel Blend", state::UndoActionType::ParameterTweak, "Parallel:Blend");
+        if (ImGui::IsItemDeactivatedAfterEdit()) m_undoManager.commitActiveTransaction();
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Branch A / B Crossfade Blend\n0.00: 50/50 Equal Sum\n-1.00: 100%% Branch A\n+1.00: 100%% Branch B\nDouble-click to center");
@@ -2519,12 +2681,20 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
             for (size_t s = 0; s < delBr->numSlots(); ++s) {
                 auto* slot = delBr->getSlot(s);
                 if (slot) {
+                    if (m_pendingGuiEditSlot == slot) m_pendingGuiEditSlot = nullptr;
+                    m_guiParamBaseline.erase(slot);
                     auto* pInst = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
                     if (pInst) plugins::PluginWindowManager::instance().closePluginWindow(pInst);
                 }
             }
         }
         m_graph.dissolveParallelBlock(blockIndex, pendingDissolveKeepBranch);
+        syncMacrosFromGraph();
+        m_undoManager.pushSnapshot(
+            state::SceneManager::captureGraphSnapshot(m_graph, "Delete Branch"),
+            "Delete Branch",
+            state::UndoActionType::StructuralMutation
+        );
     }
 
     ImGui::PopID();
@@ -2729,11 +2899,39 @@ void RackView::renderDspTweakModal() {
 
                 char label[64];
                 std::snprintf(label, sizeof(label), "##p_%zu", i);
-                if (ResettableSliderFloat(label, &val, desc.minValue, desc.maxValue, desc.defaultValue, "%.2f")) {
+                const bool paramChanged = ResettableSliderFloat(label, &val, desc.minValue, desc.maxValue, desc.defaultValue, "%.2f");
+                const bool paramDeactivatedAfterEdit = ImGui::IsItemDeactivatedAfterEdit();
+                const bool paramDiscreteChange = paramChanged && !ImGui::IsItemActive();
+
+                if (paramChanged) {
                     if (m_dspTweakSlot) {
                         m_dspTweakSlot->setParameter(desc.id, val);
-                    } else if (pInst) {
+                    }
+                    if (pInst) {
                         pInst->setParameterValue(desc.id, val);
+                        pInst->clearGuiParamEdit();
+                    }
+                    if (m_dspTweakSlot) {
+                        for (int m = 0; m < 4; ++m) {
+                            auto& mac = m_dspTweakSlot->macros()[m];
+                            if (mac.bound && mac.paramId == desc.id) {
+                                mac.currentValue = val;
+                                m_slotMacros[m_dspTweakSlot][m].currentValue = val;
+                            }
+                        }
+                        refreshGuiParamBaseline(m_dspTweakSlot);
+                    }
+                }
+                if ((paramDeactivatedAfterEdit || paramDiscreteChange) && m_dspTweakSlot) {
+                    refreshGuiParamBaseline(m_dspTweakSlot);
+                    m_undoManager.pushSnapshot(
+                        state::SceneManager::captureGraphSnapshot(m_graph, m_dspTweakSlot->name() + ": " + desc.name),
+                        m_dspTweakSlot->name() + ": " + desc.name,
+                        state::UndoActionType::ParameterTweak,
+                        m_dspTweakSlot->name() + ":dsp:" + desc.name
+                    );
+                    if (paramDeactivatedAfterEdit) {
+                        m_undoManager.commitActiveTransaction();
                     }
                 }
                 if (ImGui::IsItemHovered()) {
@@ -2769,7 +2967,7 @@ void RackView::renderUpdateModal() {
         ImGui::Separator();
         ImGui::Spacing();
 
-        ImGui::Text("Installed Version: %s", "v2.5-beta3");
+        ImGui::Text("Installed Version: %s", "v2.5-beta4");
         ImGui::Spacing();
 
         // Option to enable beta builds from dev branch
@@ -3077,14 +3275,16 @@ void RackView::renderPresetBrowserModal() {
                     ImGui::TableNextColumn();
                     std::string btnId = "Audition##" + pName;
                     if (CenteredButton(btnId.c_str(), ImVec2(90, 22))) {
-                        m_undoManager.pushSnapshot(
-                            state::SceneManager::captureGraphSnapshot(m_graph, "Preset: " + pName),
-                            "Preset: " + pName,
-                            state::UndoActionType::SceneSwitch
-                        );
-                        m_scenes.loadPresetChain(pName, m_graph);
-                        m_auditionedPreset = pName;
-                        triggerHudToast("Loaded preset: " + pName);
+                        if (m_scenes.loadPresetChain(pName, m_graph)) {
+                            m_auditionedPreset = pName;
+                            syncMacrosFromGraph();
+                            m_undoManager.pushSnapshot(
+                                state::SceneManager::captureGraphSnapshot(m_graph, "Preset: " + pName),
+                                "Preset: " + pName,
+                                state::UndoActionType::SceneSwitch
+                            );
+                            triggerHudToast("Loaded preset: " + pName);
+                        }
                     }
                 }
                 ImGui::EndTable();
@@ -3223,6 +3423,7 @@ void RackView::cycleAdjacentScenePreset(int delta) {
     int next = std::clamp(current + delta, 0, maxScenes - 1);
     if (next != current) {
         if (m_scenes.applyScene(next, m_graph)) {
+            syncMacrosFromGraph();
             const auto* sc = m_scenes.getScene(next);
             std::string name = sc ? sc->name : ("Preset " + std::to_string(next + 1));
             triggerHudToast("SCENE: " + name);
@@ -3262,6 +3463,10 @@ void RackView::initMacrosForSlot(audio::PluginSlot* slot) {
             for (int m = 0; m < 4; ++m) {
                 if (macros[m].bound) {
                     macros[m].currentValue = pInst->getParameterValue(macros[m].paramId);
+                } else if (macros[m].isSlotTrim) {
+                    macros[m].currentValue = slot->outputGainDb();
+                } else if (macros[m].isSlotMix) {
+                    macros[m].currentValue = slot->dryWet() * 100.0f;
                 }
             }
         } else {
@@ -3331,15 +3536,124 @@ void RackView::initMacrosForSlot(audio::PluginSlot* slot) {
     m_slotMacros[slot] = macros;
 }
 
-void RackView::syncMacrosFromGraph() {
+void RackView::refreshGuiParamBaseline(audio::PluginSlot* slot) {
+    if (!slot) return;
+    auto* pInst = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
+    if (!pInst) return;
+
+    const size_t nParams = pInst->numParameters();
+    auto& baseline = m_guiParamBaseline[slot];
+    baseline.resize(nParams);
+    for (size_t p = 0; p < nParams; ++p) {
+        auto desc = pInst->getParameterDesc(p);
+        baseline[p] = pInst->getParameterValue(desc.id);
+    }
+}
+
+void RackView::pollPluginGuiEdits(bool forceFlushPending) {
+    auto pollSlot = [&](audio::PluginSlot* slot) {
+        if (!slot) return;
+        initMacrosForSlot(slot);
+        auto* pluginInst = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
+        if (!pluginInst) return;
+
+        uint32_t editedParamId = 0;
+        bool gestureEnded = false;
+        bool hasGuiEdit = pluginInst->consumeGuiParamEdit(editedParamId, gestureEnded);
+
+        const bool isWindowOpen = plugins::PluginWindowManager::instance().isWindowOpen(pluginInst);
+        const size_t nParams = pluginInst->numParameters();
+
+        if (m_guiParamBaseline.find(slot) == m_guiParamBaseline.end()) {
+            refreshGuiParamBaseline(slot);
+        }
+
+        // Also detect parameter changes made directly inside an open plugin GUI window
+        // even if the plugin does not invoke IComponentHandler::performEdit/endEdit.
+        if ((isWindowOpen || hasGuiEdit) && !ImGui::IsAnyItemActive()) {
+            auto& baseline = m_guiParamBaseline[slot];
+            if (baseline.size() != nParams) {
+                refreshGuiParamBaseline(slot);
+            } else {
+                for (size_t p = 0; p < nParams; ++p) {
+                    auto desc = pluginInst->getParameterDesc(p);
+                    const float curVal = pluginInst->getParameterValue(desc.id);
+                    if (std::abs(curVal - baseline[p]) > 1e-4f) {
+                        baseline[p] = curVal;
+                        slot->setParameter(desc.id, curVal);
+                        if (!hasGuiEdit) {
+                            editedParamId = desc.id;
+                            hasGuiEdit = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (hasGuiEdit) {
+            // Sync front-panel macros with the updated plugin parameter values
+            for (int m = 0; m < 4; ++m) {
+                auto& mac = slot->macros()[m];
+                if (mac.bound) {
+                    mac.currentValue = pluginInst->getParameterValue(mac.paramId);
+                }
+            }
+            m_slotMacros[slot] = slot->macros();
+
+            std::string paramName;
+            if (editedParamId != 0xFFFFFFFFu) {
+                for (size_t p = 0; p < nParams; ++p) {
+                    auto desc = pluginInst->getParameterDesc(p);
+                    if (desc.id == editedParamId) {
+                        paramName = desc.name;
+                        break;
+                    }
+                }
+            }
+
+            m_pendingGuiEditSlot = slot;
+            m_pendingGuiEditTargetKey = slot->name() + ":gui:" + std::to_string(editedParamId);
+            m_pendingGuiEditDesc = paramName.empty() ? ("GUI: " + slot->name())
+                                                     : (slot->name() + ": " + paramName);
+        }
+
+        if (m_pendingGuiEditSlot == slot) {
+            const bool mouseDown = pluginInst->isGuiEditingActive() ||
+                                   (isWindowOpen && ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0));
+            if (mouseDown && !gestureEnded && !forceFlushPending) {
+                m_guiEditWasMouseDown = true;
+            } else {
+                refreshGuiParamBaseline(slot);
+                for (int m = 0; m < 4; ++m) {
+                    auto& mac = slot->macros()[m];
+                    if (mac.bound) {
+                        mac.currentValue = pluginInst->getParameterValue(mac.paramId);
+                    }
+                }
+                m_slotMacros[slot] = slot->macros();
+
+                m_undoManager.pushSnapshot(
+                    state::SceneManager::captureGraphSnapshot(m_graph, m_pendingGuiEditDesc),
+                    m_pendingGuiEditDesc,
+                    state::UndoActionType::ParameterTweak,
+                    m_pendingGuiEditTargetKey
+                );
+                if (gestureEnded || m_guiEditWasMouseDown || forceFlushPending) {
+                    m_undoManager.commitActiveTransaction();
+                }
+                m_pendingGuiEditSlot = nullptr;
+                m_pendingGuiEditTargetKey.clear();
+                m_pendingGuiEditDesc.clear();
+                m_guiEditWasMouseDown = false;
+            }
+        }
+    };
+
     for (size_t i = 0; i < m_graph.numNodes(); ++i) {
         auto* node = m_graph.getNode(i);
         if (!node) continue;
         if (node->type() == audio::NodeType::Plugin) {
-            auto* slot = dynamic_cast<audio::PluginSlot*>(node);
-            if (slot) {
-                m_slotMacros[slot] = slot->macros();
-            }
+            pollSlot(dynamic_cast<audio::PluginSlot*>(node));
         } else if (node->type() == audio::NodeType::ParallelSplitMerge) {
             auto* block = dynamic_cast<audio::ParallelSplitMergeBlock*>(node);
             if (block) {
@@ -3347,10 +3661,57 @@ void RackView::syncMacrosFromGraph() {
                     auto* branch = block->getBranch(b);
                     if (!branch) continue;
                     for (size_t s = 0; s < branch->numSlots(); ++s) {
-                        auto* slot = branch->getSlot(s);
-                        if (slot) {
-                            m_slotMacros[slot] = slot->macros();
-                        }
+                        pollSlot(branch->getSlot(s));
+                    }
+                }
+            }
+        }
+    }
+}
+
+void RackView::syncMacrosFromGraph() {
+    m_pendingGuiEditSlot = nullptr;
+    m_pendingGuiEditTargetKey.clear();
+    m_pendingGuiEditDesc.clear();
+    m_guiEditWasMouseDown = false;
+
+    auto syncSlot = [&](audio::PluginSlot* slot) {
+        if (!slot) return;
+        if (!slot->hasMacrosInitialized()) {
+            m_slotMacros.erase(slot);
+            initMacrosForSlot(slot);
+        }
+        auto* pInst = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
+        for (int m = 0; m < 4; ++m) {
+            auto& mac = slot->macros()[m];
+            if (mac.bound && pInst) {
+                mac.currentValue = pInst->getParameterValue(mac.paramId);
+            } else if (mac.isSlotTrim) {
+                mac.currentValue = slot->outputGainDb();
+            } else if (mac.isSlotMix) {
+                mac.currentValue = slot->dryWet() * 100.0f;
+            }
+        }
+        m_slotMacros[slot] = slot->macros();
+        if (pInst) {
+            pInst->clearGuiParamEdit();
+        }
+        refreshGuiParamBaseline(slot);
+    };
+
+    for (size_t i = 0; i < m_graph.numNodes(); ++i) {
+        auto* node = m_graph.getNode(i);
+        if (!node) continue;
+        if (node->type() == audio::NodeType::Plugin) {
+            syncSlot(dynamic_cast<audio::PluginSlot*>(node));
+        } else if (node->type() == audio::NodeType::ParallelSplitMerge) {
+            auto* block = dynamic_cast<audio::ParallelSplitMergeBlock*>(node);
+            if (block) {
+                for (size_t b = 0; b < block->numBranches(); ++b) {
+                    auto* branch = block->getBranch(b);
+                    if (!branch) continue;
+                    for (size_t s = 0; s < branch->numSlots(); ++s) {
+                        syncSlot(branch->getSlot(s));
                     }
                 }
             }
@@ -3535,5 +3896,3 @@ void RackView::moveSlot(int srcIdx, int srcBlockIdx, int srcBranchIdx,
 }
 
 } // namespace praccy::ui
-
-

@@ -31,7 +31,7 @@ inline bool operator==(const PluginSlotPreset& a, const PluginSlotPreset& b) {
     return a.name == b.name && a.path == b.path && a.type == b.type &&
            a.bypassed == b.bypassed && a.dryWet == b.dryWet &&
            a.inputGainDb == b.inputGainDb && a.outputGainDb == b.outputGainDb &&
-           a.state == b.state;
+           a.state == b.state && a.macros == b.macros && a.paramValues == b.paramValues;
 }
 
 inline bool operator==(const BranchPreset& a, const BranchPreset& b) {
@@ -41,7 +41,8 @@ inline bool operator==(const BranchPreset& a, const BranchPreset& b) {
 }
 
 inline bool operator==(const NodePreset& a, const NodePreset& b) {
-    return a.kind == b.kind && a.slot == b.slot && a.branches == b.branches;
+    return a.kind == b.kind && a.slot == b.slot && a.branches == b.branches &&
+           a.branchBlend == b.branchBlend;
 }
 
 inline bool operator==(const ScenePreset& a, const ScenePreset& b) {

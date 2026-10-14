@@ -27,8 +27,35 @@ struct PluginSlotPreset {
         std::string label;
         float value{0.0f};
         float defaultValue{0.0f};
+        float minValue{0.0f};
+        float maxValue{1.0f};
+        bool bound{false};
+        bool isSlotMix{false};
+        bool isSlotTrim{false};
+
+        bool operator==(const MacroBinding& other) const noexcept {
+            return paramId == other.paramId &&
+                   label == other.label &&
+                   value == other.value &&
+                   defaultValue == other.defaultValue &&
+                   minValue == other.minValue &&
+                   maxValue == other.maxValue &&
+                   bound == other.bound &&
+                   isSlotMix == other.isSlotMix &&
+                   isSlotTrim == other.isSlotTrim;
+        }
     };
     std::vector<MacroBinding> macros;
+
+    struct ParamValue {
+        uint32_t paramId{0};
+        float value{0.0f};
+
+        bool operator==(const ParamValue& other) const noexcept {
+            return paramId == other.paramId && value == other.value;
+        }
+    };
+    std::vector<ParamValue> paramValues;
 };
 
 struct BranchPreset {

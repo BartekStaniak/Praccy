@@ -82,6 +82,7 @@ inline bool ResettableSliderFloat(const char* label, float* v, float v_min, floa
         if (*v != default_val) {
             *v = default_val;
             changed = true;
+            ImGui::MarkItemEdited(id);
         }
         ImGui::ClearActiveID();
     }
@@ -89,6 +90,7 @@ inline bool ResettableSliderFloat(const char* label, float* v, float v_min, floa
     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         *v = default_val;
         s_suppressResetId = id;
+        ImGui::MarkItemEdited(id);
         ImGui::ClearActiveID();
         changed = true;
     }
@@ -108,6 +110,7 @@ inline bool ResettableVSliderFloat(const char* label, const ImVec2& size, float*
         if (*v != default_val) {
             *v = default_val;
             changed = true;
+            ImGui::MarkItemEdited(id);
         }
         ImGui::ClearActiveID();
     }
@@ -115,6 +118,7 @@ inline bool ResettableVSliderFloat(const char* label, const ImVec2& size, float*
     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         *v = default_val;
         s_suppressResetId = id;
+        ImGui::MarkItemEdited(id);
         ImGui::ClearActiveID();
         changed = true;
     }
@@ -134,6 +138,7 @@ inline bool ResettableVSliderFloat(const char* label, const ImVec2& size, float*
         if (*v != default_val) {
             *v = default_val;
             changed = true;
+            ImGui::MarkItemEdited(id);
         }
         ImGui::ClearActiveID();
     }
@@ -141,6 +146,7 @@ inline bool ResettableVSliderFloat(const char* label, const ImVec2& size, float*
     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         *v = default_val;
         s_suppressResetId = id;
+        ImGui::MarkItemEdited(id);
         ImGui::ClearActiveID();
         changed = true;
     }

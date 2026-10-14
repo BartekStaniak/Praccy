@@ -91,6 +91,8 @@ public:
 
 class PraccyComponentHandler : public Steinberg::Vst::IComponentHandler {
 public:
+    Vst3PluginInstance* owner{nullptr};
+
     Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID _iid, void** obj) override {
         if (memcmp(_iid, Steinberg::Vst::IComponentHandler::iid, sizeof(Steinberg::TUID)) == 0 ||
             memcmp(_iid, Steinberg::FUnknown::iid, sizeof(Steinberg::TUID)) == 0) {
@@ -103,10 +105,22 @@ public:
     Steinberg::uint32 PLUGIN_API addRef() override { return 1; }
     Steinberg::uint32 PLUGIN_API release() override { return 1; }
 
-    Steinberg::tresult PLUGIN_API beginEdit(Steinberg::Vst::ParamID) override { return Steinberg::kResultOk; }
-    Steinberg::tresult PLUGIN_API performEdit(Steinberg::Vst::ParamID, Steinberg::Vst::ParamValue) override { return Steinberg::kResultOk; }
-    Steinberg::tresult PLUGIN_API endEdit(Steinberg::Vst::ParamID) override { return Steinberg::kResultOk; }
-    Steinberg::tresult PLUGIN_API restartComponent(Steinberg::int32) override { return Steinberg::kResultOk; }
+    Steinberg::tresult PLUGIN_API beginEdit(Steinberg::Vst::ParamID id) override {
+        if (owner) owner->onGuiBeginEdit(id);
+        return Steinberg::kResultOk;
+    }
+    Steinberg::tresult PLUGIN_API performEdit(Steinberg::Vst::ParamID id, Steinberg::Vst::ParamValue valueNormalized) override {
+        if (owner) owner->onGuiPerformEdit(id, valueNormalized);
+        return Steinberg::kResultOk;
+    }
+    Steinberg::tresult PLUGIN_API endEdit(Steinberg::Vst::ParamID id) override {
+        if (owner) owner->onGuiEndEdit(id);
+        return Steinberg::kResultOk;
+    }
+    Steinberg::tresult PLUGIN_API restartComponent(Steinberg::int32 flags) override {
+        if (owner) owner->onGuiRestartComponent(flags);
+        return Steinberg::kResultOk;
+    }
 };
 
 class PraccyPlugFrame : public Steinberg::IPlugFrame {
@@ -150,7 +164,42 @@ struct Vst3PluginInstance::Impl {
     PraccyPlugFrame plugFrame;
 };
 
-Vst3PluginInstance::Vst3PluginInstance() : m_impl(std::make_unique<Impl>()) {}
+Vst3PluginInstance::Vst3PluginInstance() : m_impl(std::make_unique<Impl>()) {
+    m_impl->componentHandler.owner = this;
+}
+
+void Vst3PluginInstance::onGuiBeginEdit(Steinberg::Vst::ParamID paramId) noexcept {
+    if (m_suppressHandlerCallbacks.load(std::memory_order_relaxed)) return;
+    setGuiEditingActive(true);
+    m_lastGuiEditedParamId.store(static_cast<uint32_t>(paramId), std::memory_order_relaxed);
+}
+
+void Vst3PluginInstance::onGuiPerformEdit(Steinberg::Vst::ParamID paramId, Steinberg::Vst::ParamValue valueNormalized) noexcept {
+    if (m_suppressHandlerCallbacks.load(std::memory_order_relaxed)) return;
+    if (m_faulted.load(std::memory_order_relaxed)) return;
+
+    const float normVal = static_cast<float>(std::clamp(valueNormalized, 0.0, 1.0));
+    if (GetCurrentThreadId() != m_audioThreadId.load(std::memory_order_relaxed)) {
+        std::lock_guard<std::mutex> lock(m_paramCacheMutex);
+        m_paramCache[static_cast<uint32_t>(paramId)] = normVal;
+    }
+
+    // Forward GUI parameter edit to audio processor queue
+    m_paramQueue.try_enqueue({paramId, static_cast<double>(normVal)});
+    notifyGuiParamEdited(static_cast<uint32_t>(paramId), false);
+}
+
+void Vst3PluginInstance::onGuiEndEdit(Steinberg::Vst::ParamID paramId) noexcept {
+    if (m_suppressHandlerCallbacks.load(std::memory_order_relaxed)) return;
+    setGuiEditingActive(false);
+    notifyGuiGestureEnded(static_cast<uint32_t>(paramId));
+}
+
+void Vst3PluginInstance::onGuiRestartComponent(Steinberg::int32 /*flags*/) noexcept {
+    if (m_suppressHandlerCallbacks.load(std::memory_order_relaxed)) return;
+    setGuiEditingActive(false);
+    notifyGuiParamEdited(0xFFFFFFFFu, true);
+}
 
 std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::string& path) {
     std::filesystem::path p(path);
@@ -293,10 +342,21 @@ std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::
         if (cpCtrl) cpCtrl->release();
 
         // Sync initial state from component to controller
+        instance->m_suppressHandlerCallbacks.store(true, std::memory_order_relaxed);
         PraccyMemoryStream stateStream;
         if (instance->m_component->getState(&stateStream) == Steinberg::kResultOk) {
             stateStream.seek(0, Steinberg::IBStream::kIBSeekSet, nullptr);
             instance->m_controller->setComponentState(&stateStream);
+        }
+        instance->m_suppressHandlerCallbacks.store(false, std::memory_order_relaxed);
+
+        // Populate initial parameter cache
+        const int32_t pCount = instance->m_controller->getParameterCount();
+        for (int32_t i = 0; i < pCount; ++i) {
+            Steinberg::Vst::ParameterInfo info{};
+            if (instance->m_controller->getParameterInfo(i, info) == Steinberg::kResultOk) {
+                instance->m_paramCache[info.id] = static_cast<float>(instance->m_controller->getParamNormalized(info.id));
+            }
         }
     }
 
@@ -450,14 +510,21 @@ void Vst3PluginInstance::setParameterValue(uint32_t paramId, float value) {
 
     const float normVal = std::clamp(value, 0.0f, 1.0f);
 
+    if (GetCurrentThreadId() != m_audioThreadId.load(std::memory_order_relaxed)) {
+        std::lock_guard<std::mutex> lock(m_paramCacheMutex);
+        m_paramCache[paramId] = normVal;
+    }
+
     // Queue parameter change into real-time buffer for audio-thread process()
     m_paramQueue.try_enqueue({static_cast<Steinberg::Vst::ParamID>(paramId), static_cast<double>(normVal)});
 
     // Only invoke IEditController on GUI/message thread, NEVER from the high-priority ASIO audio thread!
     if (m_controller && GetCurrentThreadId() != m_audioThreadId.load(std::memory_order_relaxed)) {
+        m_suppressHandlerCallbacks.store(true, std::memory_order_relaxed);
         safeCallPlugin([&]() {
             m_controller->setParamNormalized(paramId, normVal);
         });
+        m_suppressHandlerCallbacks.store(false, std::memory_order_relaxed);
     }
 }
 
@@ -469,12 +536,17 @@ void Vst3PluginInstance::setParameterFromAudioThread(uint32_t paramId, float val
 }
 
 float Vst3PluginInstance::getParameterValue(uint32_t paramId) const {
-    if (!m_controller || m_faulted.load(std::memory_order_relaxed)) return 0.0f;
-    float val = 0.0f;
-    safeCallPlugin([&]() {
-        val = static_cast<float>(m_controller->getParamNormalized(paramId));
-    });
-    return val;
+    if (m_faulted.load(std::memory_order_relaxed)) return 0.0f;
+    if (m_controller) {
+        float val = 0.0f;
+        safeCallPlugin([&]() {
+            val = static_cast<float>(m_controller->getParamNormalized(paramId));
+        });
+        return val;
+    }
+    std::lock_guard<std::mutex> lock(m_paramCacheMutex);
+    auto it = m_paramCache.find(paramId);
+    return (it != m_paramCache.end()) ? it->second : 0.0f;
 }
 
 bool Vst3PluginInstance::hasCustomGui() const noexcept {
@@ -564,7 +636,13 @@ std::vector<uint8_t> Vst3PluginInstance::saveState() const {
 
 bool Vst3PluginInstance::loadState(const std::vector<uint8_t>& state) {
     if (!m_component || state.empty() || m_faulted.load(std::memory_order_relaxed)) return false;
+
+    // Drain any stale pending parameter changes so they don't overwrite the restored state
+    std::pair<Steinberg::Vst::ParamID, double> dummy;
+    while (m_paramQueue.try_dequeue(dummy)) {}
+
     bool success = false;
+    m_suppressHandlerCallbacks.store(true, std::memory_order_relaxed);
     safeCallPlugin([&]() {
         PraccyMemoryStream stream(state);
         if (m_component->setState(&stream) == Steinberg::kResultOk) {
@@ -575,6 +653,21 @@ bool Vst3PluginInstance::loadState(const std::vector<uint8_t>& state) {
             success = true;
         }
     });
+    m_suppressHandlerCallbacks.store(false, std::memory_order_relaxed);
+
+    if (success && m_controller) {
+        std::lock_guard<std::mutex> lock(m_paramCacheMutex);
+        const int32_t pCount = m_controller->getParameterCount();
+        for (int32_t i = 0; i < pCount; ++i) {
+            Steinberg::Vst::ParameterInfo info{};
+            if (m_controller->getParameterInfo(i, info) == Steinberg::kResultOk) {
+                const double normVal = m_controller->getParamNormalized(info.id);
+                m_paramCache[info.id] = static_cast<float>(normVal);
+                m_paramQueue.try_enqueue({info.id, normVal});
+            }
+        }
+    }
+    clearGuiParamEdit();
     return success;
 }
 

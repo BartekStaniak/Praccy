@@ -26,6 +26,141 @@ static std::vector<uint8_t> hexToBytes(const std::string& hex) {
     return praccy::utils::hexToBytes(hex);
 }
 
+static void captureSlotToPreset(audio::PluginSlot* slot, PluginSlotPreset& sp) {
+    if (!slot) return;
+    sp.name = slot->name();
+    sp.bypassed = slot->isBypassed();
+    sp.dryWet = slot->dryWet();
+    sp.inputGainDb = slot->inputGainDb();
+    sp.outputGainDb = slot->outputGainDb();
+
+    auto* inner = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
+    if (inner) {
+        sp.path = inner->path();
+        sp.bundleFileName = inner->bundleFileName();
+        sp.classGuid = inner->classGuid();
+        sp.clapId = inner->clapId();
+        if (dynamic_cast<plugins::Vst3PluginInstance*>(inner)) {
+            sp.type = "VST3";
+        } else if (dynamic_cast<plugins::ClapPluginInstance*>(inner)) {
+            sp.type = "CLAP";
+        } else {
+            sp.type = "BuiltIn";
+        }
+        sp.state = inner->saveState();
+
+        const size_t nParams = inner->numParameters();
+        sp.paramValues.reserve(nParams);
+        for (size_t p = 0; p < nParams; ++p) {
+            auto desc = inner->getParameterDesc(p);
+            float val = inner->getParameterValue(desc.id);
+            sp.paramValues.push_back(PluginSlotPreset::ParamValue{desc.id, val});
+        }
+    }
+
+    if (slot->hasMacrosInitialized()) {
+        for (auto& sm : slot->macros()) {
+            if (sm.bound && inner) {
+                sm.currentValue = inner->getParameterValue(sm.paramId);
+            } else if (sm.isSlotTrim) {
+                sm.currentValue = slot->outputGainDb();
+            } else if (sm.isSlotMix) {
+                sm.currentValue = slot->dryWet() * 100.0f;
+            }
+
+            PluginSlotPreset::MacroBinding mb;
+            mb.paramId = sm.paramId;
+            mb.label = sm.label;
+            mb.value = sm.currentValue;
+            mb.defaultValue = sm.defaultValue;
+            mb.minValue = sm.minValue;
+            mb.maxValue = sm.maxValue;
+            mb.bound = sm.bound;
+            mb.isSlotMix = sm.isSlotMix;
+            mb.isSlotTrim = sm.isSlotTrim;
+            sp.macros.push_back(std::move(mb));
+        }
+    }
+}
+
+static void applyPresetToSlot(const PluginSlotPreset& sp, audio::PluginSlot* slot, plugins::IPluginInstance* inner) {
+    if (!slot) return;
+
+    slot->automationRegister().reset();
+    slot->setBypassed(sp.bypassed);
+    slot->setDryWet(sp.dryWet);
+    slot->setInputGainDb(sp.inputGainDb);
+    slot->setOutputGainDb(sp.outputGainDb);
+
+    if (!sp.state.empty() && inner) {
+        inner->loadState(sp.state);
+    }
+
+    if (!sp.paramValues.empty() && inner) {
+        for (const auto& pv : sp.paramValues) {
+            slot->setParameter(pv.paramId, pv.value);
+            inner->setParameterValue(pv.paramId, pv.value);
+        }
+    }
+
+    if (!sp.macros.empty()) {
+        for (size_t m = 0; m < sp.macros.size() && m < 4; ++m) {
+            const auto& mb = sp.macros[m];
+            auto& sm = slot->macros()[m];
+            sm.paramId = mb.paramId;
+            sm.label = mb.label;
+            sm.defaultValue = mb.defaultValue;
+            sm.currentValue = mb.value;
+
+            if (mb.bound || mb.isSlotMix || mb.isSlotTrim) {
+                sm.bound = mb.bound;
+                sm.isSlotMix = mb.isSlotMix;
+                sm.isSlotTrim = mb.isSlotTrim;
+                sm.minValue = mb.minValue;
+                sm.maxValue = mb.maxValue;
+            } else {
+                // Backward compatibility for presets serialized without explicit bound/trim/mix flags
+                sm.isSlotTrim = (m == 2 && mb.label == "VOL") || (mb.label == "TRIM");
+                sm.isSlotMix = (m == 3 && mb.label == "MIX") || (mb.label == "MIX");
+                sm.bound = !sm.isSlotTrim && !sm.isSlotMix && (mb.paramId != 0 || !mb.label.empty());
+                if (sm.isSlotTrim) {
+                    sm.minValue = -24.0f;
+                    sm.maxValue = 12.0f;
+                } else if (sm.isSlotMix) {
+                    sm.minValue = 0.0f;
+                    sm.maxValue = 100.0f;
+                } else if (sm.bound && inner) {
+                    const size_t nParams = inner->numParameters();
+                    for (size_t p = 0; p < nParams; ++p) {
+                        auto desc = inner->getParameterDesc(p);
+                        if (desc.id == mb.paramId) {
+                            sm.minValue = desc.minValue;
+                            sm.maxValue = desc.maxValue;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (sm.bound) {
+                slot->setParameter(mb.paramId, mb.value);
+                if (inner) {
+                    inner->setParameterValue(mb.paramId, mb.value);
+                }
+            } else if (sm.isSlotTrim) {
+                sm.currentValue = slot->outputGainDb();
+            } else if (sm.isSlotMix) {
+                sm.currentValue = slot->dryWet() * 100.0f;
+            }
+        }
+        slot->setMacrosInitialized(true);
+    }
+
+    if (inner) {
+        inner->clearGuiParamEdit();
+    }
+}
+
 SceneManager::SceneManager() {
     initializeDefaultScenes();
     if (!loadFromFile()) {
@@ -163,31 +298,9 @@ std::unique_ptr<audio::PluginSlot> SceneManager::createSlotFromPreset(const Plug
         return slot;
     }
 
-    if (!p.state.empty()) {
-        inst->loadState(p.state);
-    }
-
+    auto* rawInst = inst.get();
     auto slot = std::make_unique<audio::PluginSlot>(std::move(inst));
-    slot->setBypassed(p.bypassed);
-    slot->setDryWet(p.dryWet);
-    slot->setInputGainDb(p.inputGainDb);
-    slot->setOutputGainDb(p.outputGainDb);
-
-    if (!p.macros.empty()) {
-        for (size_t i = 0; i < p.macros.size() && i < 4; ++i) {
-            const auto& mb = p.macros[i];
-            auto& sm = slot->macros()[i];
-            sm.paramId = mb.paramId;
-            sm.label = mb.label;
-            sm.currentValue = mb.value;
-            sm.defaultValue = mb.defaultValue;
-            sm.bound = (mb.paramId != 0 || !mb.label.empty());
-            if (i == 2 && mb.label == "VOL") sm.isSlotTrim = true;
-            if (i == 3 && mb.label == "MIX") sm.isSlotMix = true;
-        }
-        slot->setMacrosInitialized(true);
-    }
-
+    applyPresetToSlot(p, slot.get(), rawInst);
     return slot;
 }
 
@@ -205,36 +318,7 @@ ScenePreset SceneManager::captureGraphSnapshot(audio::GraphEngine& graph, const 
             if (slot) {
                 NodePreset np;
                 np.kind = NodePreset::Kind::Plugin;
-                np.slot.name = slot->name();
-                np.slot.bypassed = slot->isBypassed();
-                np.slot.dryWet = slot->dryWet();
-                np.slot.inputGainDb = slot->inputGainDb();
-                np.slot.outputGainDb = slot->outputGainDb();
-
-                for (const auto& sm : slot->macros()) {
-                    PluginSlotPreset::MacroBinding mb;
-                    mb.paramId = sm.paramId;
-                    mb.label = sm.label;
-                    mb.value = sm.currentValue;
-                    mb.defaultValue = sm.defaultValue;
-                    np.slot.macros.push_back(std::move(mb));
-                }
-
-                auto* inner = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
-                if (inner) {
-                    np.slot.path = inner->path();
-                    np.slot.bundleFileName = inner->bundleFileName();
-                    np.slot.classGuid = inner->classGuid();
-                    np.slot.clapId = inner->clapId();
-                    if (dynamic_cast<plugins::Vst3PluginInstance*>(inner)) {
-                        np.slot.type = "VST3";
-                    } else if (dynamic_cast<plugins::ClapPluginInstance*>(inner)) {
-                        np.slot.type = "CLAP";
-                    } else {
-                        np.slot.type = "BuiltIn";
-                    }
-                    np.slot.state = inner->saveState();
-                }
+                captureSlotToPreset(slot, np.slot);
                 scene.nodes.push_back(std::move(np));
             }
         } else if (node->type() == audio::NodeType::ParallelSplitMerge) {
@@ -260,36 +344,7 @@ ScenePreset SceneManager::captureGraphSnapshot(audio::GraphEngine& graph, const 
                         if (!bSlot) continue;
 
                         PluginSlotPreset sp;
-                        sp.name = bSlot->name();
-                        sp.bypassed = bSlot->isBypassed();
-                        sp.dryWet = bSlot->dryWet();
-                        sp.inputGainDb = bSlot->inputGainDb();
-                        sp.outputGainDb = bSlot->outputGainDb();
-
-                        for (const auto& sm : bSlot->macros()) {
-                            PluginSlotPreset::MacroBinding mb;
-                            mb.paramId = sm.paramId;
-                            mb.label = sm.label;
-                            mb.value = sm.currentValue;
-                            mb.defaultValue = sm.defaultValue;
-                            sp.macros.push_back(std::move(mb));
-                        }
-
-                        auto* inner = dynamic_cast<plugins::IPluginInstance*>(bSlot->innerNode());
-                        if (inner) {
-                            sp.path = inner->path();
-                            sp.bundleFileName = inner->bundleFileName();
-                            sp.classGuid = inner->classGuid();
-                            sp.clapId = inner->clapId();
-                            if (dynamic_cast<plugins::Vst3PluginInstance*>(inner)) {
-                                sp.type = "VST3";
-                            } else if (dynamic_cast<plugins::ClapPluginInstance*>(inner)) {
-                                sp.type = "CLAP";
-                            } else {
-                                sp.type = "BuiltIn";
-                            }
-                            sp.state = inner->saveState();
-                        }
+                        captureSlotToPreset(bSlot, sp);
                         bp.slots.push_back(std::move(sp));
                     }
                     np.branches.push_back(std::move(bp));
@@ -359,29 +414,7 @@ bool SceneManager::applyGraphSnapshotInPlace(const ScenePreset& scene, audio::Gr
             auto* slot = dynamic_cast<audio::PluginSlot*>(node);
             if (!slot) continue;
             auto* inner = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
-            const auto& sp = np.slot;
-            slot->setBypassed(sp.bypassed);
-            slot->setDryWet(sp.dryWet);
-            slot->setInputGainDb(sp.inputGainDb);
-            slot->setOutputGainDb(sp.outputGainDb);
-            if (!sp.state.empty() && inner) {
-                inner->loadState(sp.state);
-            }
-            if (!sp.macros.empty()) {
-                for (size_t m = 0; m < sp.macros.size() && m < 4; ++m) {
-                    const auto& mb = sp.macros[m];
-                    auto& sm = slot->macros()[m];
-                    sm.paramId = mb.paramId;
-                    sm.label = mb.label;
-                    sm.defaultValue = mb.defaultValue;
-                    sm.currentValue = mb.value;
-                    sm.bound = true;
-                    slot->setParameter(mb.paramId, mb.value);
-                    if (inner) {
-                        inner->setParameterValue(mb.paramId, mb.value);
-                    }
-                }
-            }
+            applyPresetToSlot(np.slot, slot, inner);
         } else if (np.kind == NodePreset::Kind::ParallelBlock) {
             auto* block = dynamic_cast<audio::ParallelSplitMergeBlock*>(node);
             if (!block) continue;
@@ -399,29 +432,7 @@ bool SceneManager::applyGraphSnapshotInPlace(const ScenePreset& scene, audio::Gr
                     auto* bSlot = branch->getSlot(s);
                     if (!bSlot) continue;
                     auto* bInner = dynamic_cast<plugins::IPluginInstance*>(bSlot->innerNode());
-                    const auto& sp = bp.slots[s];
-                    bSlot->setBypassed(sp.bypassed);
-                    bSlot->setDryWet(sp.dryWet);
-                    bSlot->setInputGainDb(sp.inputGainDb);
-                    bSlot->setOutputGainDb(sp.outputGainDb);
-                    if (!sp.state.empty() && bInner) {
-                        bInner->loadState(sp.state);
-                    }
-                    if (!sp.macros.empty()) {
-                        for (size_t m = 0; m < sp.macros.size() && m < 4; ++m) {
-                            const auto& mb = sp.macros[m];
-                            auto& sm = bSlot->macros()[m];
-                            sm.paramId = mb.paramId;
-                            sm.label = mb.label;
-                            sm.defaultValue = mb.defaultValue;
-                            sm.currentValue = mb.value;
-                            sm.bound = true;
-                            bSlot->setParameter(mb.paramId, mb.value);
-                            if (bInner) {
-                                bInner->setParameterValue(mb.paramId, mb.value);
-                            }
-                        }
-                    }
+                    applyPresetToSlot(bp.slots[s], bSlot, bInner);
                 }
             }
         }
@@ -449,6 +460,7 @@ bool SceneManager::applyGraphSnapshot(const ScenePreset& scene, audio::GraphEngi
         } else if (np.kind == NodePreset::Kind::ParallelBlock) {
             auto block = std::make_unique<audio::ParallelSplitMergeBlock>();
             block->prepare(graph.sampleRate(), graph.maxBlockSize());
+            block->setBlend(np.branchBlend);
             for (const auto& bp : np.branches) {
                 auto* branch = block->addBranch(bp.name);
                 branch->prepare(graph.sampleRate(), graph.maxBlockSize());
@@ -741,6 +753,11 @@ static void serializePreset(std::ostream& os, const ScenePreset& p, const std::s
                 os << "node_" << n << "_m_" << m << "_lbl=" << mb.label << "\n";
                 os << "node_" << n << "_m_" << m << "_val=" << mb.value << "\n";
                 os << "node_" << n << "_m_" << m << "_def=" << mb.defaultValue << "\n";
+                os << "node_" << n << "_m_" << m << "_min=" << mb.minValue << "\n";
+                os << "node_" << n << "_m_" << m << "_max=" << mb.maxValue << "\n";
+                os << "node_" << n << "_m_" << m << "_bnd=" << (mb.bound ? "1" : "0") << "\n";
+                os << "node_" << n << "_m_" << m << "_mix=" << (mb.isSlotMix ? "1" : "0") << "\n";
+                os << "node_" << n << "_m_" << m << "_trm=" << (mb.isSlotTrim ? "1" : "0") << "\n";
             }
         } else {
             os << "node_" << n << "_branchBlend=" << node.branchBlend << "\n";
@@ -776,6 +793,11 @@ static void serializePreset(std::ostream& os, const ScenePreset& p, const std::s
                         os << "node_" << n << "_b_" << b << "_s_" << s << "_m_" << m << "_lbl=" << mb.label << "\n";
                         os << "node_" << n << "_b_" << b << "_s_" << s << "_m_" << m << "_val=" << mb.value << "\n";
                         os << "node_" << n << "_b_" << b << "_s_" << s << "_m_" << m << "_def=" << mb.defaultValue << "\n";
+                        os << "node_" << n << "_b_" << b << "_s_" << s << "_m_" << m << "_min=" << mb.minValue << "\n";
+                        os << "node_" << n << "_b_" << b << "_s_" << s << "_m_" << m << "_max=" << mb.maxValue << "\n";
+                        os << "node_" << n << "_b_" << b << "_s_" << s << "_m_" << m << "_bnd=" << (mb.bound ? "1" : "0") << "\n";
+                        os << "node_" << n << "_b_" << b << "_s_" << s << "_m_" << m << "_mix=" << (mb.isSlotMix ? "1" : "0") << "\n";
+                        os << "node_" << n << "_b_" << b << "_s_" << s << "_m_" << m << "_trm=" << (mb.isSlotTrim ? "1" : "0") << "\n";
                     }
                 }
             }
@@ -827,6 +849,26 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
         }
     }
 
+    auto parseMacros = [](const std::unordered_map<std::string, std::string>& kv,
+                          const std::string& pfx,
+                          std::vector<PluginSlotPreset::MacroBinding>& outMacros) {
+        size_t numMacros = kv.count(pfx + "numMacros") ? praccy::utils::parseInteger<size_t>(kv.at(pfx + "numMacros"), 0) : 0;
+        for (size_t m = 0; m < numMacros; ++m) {
+            std::string mpfx = pfx + "m_" + std::to_string(m) + "_";
+            PluginSlotPreset::MacroBinding mb;
+            mb.paramId = kv.count(mpfx + "id") ? praccy::utils::parseInteger<uint32_t>(kv.at(mpfx + "id"), 0) : 0;
+            mb.label = kv.count(mpfx + "lbl") ? kv.at(mpfx + "lbl") : "";
+            mb.value = kv.count(mpfx + "val") ? praccy::utils::parseFloat(kv.at(mpfx + "val"), 0.0f) : 0.0f;
+            mb.defaultValue = kv.count(mpfx + "def") ? praccy::utils::parseFloat(kv.at(mpfx + "def"), 0.0f) : 0.0f;
+            mb.minValue = kv.count(mpfx + "min") ? praccy::utils::parseFloat(kv.at(mpfx + "min"), 0.0f) : 0.0f;
+            mb.maxValue = kv.count(mpfx + "max") ? praccy::utils::parseFloat(kv.at(mpfx + "max"), 1.0f) : 1.0f;
+            mb.bound = kv.count(mpfx + "bnd") && kv.at(mpfx + "bnd") == "1";
+            mb.isSlotMix = kv.count(mpfx + "mix") && kv.at(mpfx + "mix") == "1";
+            mb.isSlotTrim = kv.count(mpfx + "trm") && kv.at(mpfx + "trm") == "1";
+            outMacros.push_back(std::move(mb));
+        }
+    };
+
     auto parsePreset = [&](const std::unordered_map<std::string, std::string>& kv) -> ScenePreset {
         ScenePreset sp;
         auto itName = kv.find("name");
@@ -853,16 +895,7 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
                 if (kv.count(pfx + "state")) {
                     np.slot.state = hexToBytes(kv.at(pfx + "state"));
                 }
-                size_t numMacros = kv.count(pfx + "numMacros") ? praccy::utils::parseInteger<size_t>(kv.at(pfx + "numMacros"), 0) : 0;
-                for (size_t m = 0; m < numMacros; ++m) {
-                    std::string mpfx = pfx + "m_" + std::to_string(m) + "_";
-                    PluginSlotPreset::MacroBinding mb;
-                    mb.paramId = kv.count(mpfx + "id") ? praccy::utils::parseInteger<uint32_t>(kv.at(mpfx + "id"), 0) : 0;
-                    mb.label = kv.count(mpfx + "lbl") ? kv.at(mpfx + "lbl") : "";
-                    mb.value = kv.count(mpfx + "val") ? praccy::utils::parseFloat(kv.at(mpfx + "val"), 0.0f) : 0.0f;
-                    mb.defaultValue = kv.count(mpfx + "def") ? praccy::utils::parseFloat(kv.at(mpfx + "def"), 0.0f) : 0.0f;
-                    np.slot.macros.push_back(std::move(mb));
-                }
+                parseMacros(kv, pfx, np.slot.macros);
             } else {
                 np.kind = NodePreset::Kind::ParallelBlock;
                 np.branchBlend = kv.count(pfx + "branchBlend") ? praccy::utils::parseFloat(kv.at(pfx + "branchBlend"), 0.0f) : 0.0f;
@@ -894,16 +927,7 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
                         if (kv.count(spfx + "state")) {
                             sl.state = hexToBytes(kv.at(spfx + "state"));
                         }
-                        size_t numMacros = kv.count(spfx + "numMacros") ? praccy::utils::parseInteger<size_t>(kv.at(spfx + "numMacros"), 0) : 0;
-                        for (size_t m = 0; m < numMacros; ++m) {
-                            std::string mpfx = spfx + "m_" + std::to_string(m) + "_";
-                            PluginSlotPreset::MacroBinding mb;
-                            mb.paramId = kv.count(mpfx + "id") ? praccy::utils::parseInteger<uint32_t>(kv.at(mpfx + "id"), 0) : 0;
-                            mb.label = kv.count(mpfx + "lbl") ? kv.at(mpfx + "lbl") : "";
-                            mb.value = kv.count(mpfx + "val") ? praccy::utils::parseFloat(kv.at(mpfx + "val"), 0.0f) : 0.0f;
-                            mb.defaultValue = kv.count(mpfx + "def") ? praccy::utils::parseFloat(kv.at(mpfx + "def"), 0.0f) : 0.0f;
-                            sl.macros.push_back(std::move(mb));
-                        }
+                        parseMacros(kv, spfx, sl.macros);
                         bp.slots.push_back(std::move(sl));
                     }
                     np.branches.push_back(std::move(bp));

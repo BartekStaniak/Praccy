@@ -1,6 +1,7 @@
 #pragma once
 
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <string>
 #include <cmath>
 #include <algorithm>
@@ -73,7 +74,12 @@ inline bool DrawHardwareKnob(
         if (!io.MouseDown[0]) {
             s_suppressResetId = 0;
         } else {
-            *value = std::clamp(defaultVal, minVal, maxVal);
+            const float clampedDef = std::clamp(defaultVal, minVal, maxVal);
+            if (*value != clampedDef) {
+                *value = clampedDef;
+                valueChanged = true;
+                ImGui::MarkItemEdited(knobId);
+            }
         }
     } else if (isActive) {
         // Shift key enables 4x finer adjustment resolution for precision tuning
@@ -84,14 +90,19 @@ inline bool DrawHardwareKnob(
         // Drag DOWN (positive MouseDelta.y) -> turns left (decreases value)
         const float delta = -io.MouseDelta.y * speed;
         if (delta != 0.0f) {
-            *value = std::clamp(*value + delta, minVal, maxVal);
-            valueChanged = true;
+            const float newVal = std::clamp(*value + delta, minVal, maxVal);
+            if (newVal != *value) {
+                *value = newVal;
+                valueChanged = true;
+                ImGui::MarkItemEdited(knobId);
+            }
         }
     }
 
     if (isHovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         *value = std::clamp(defaultVal, minVal, maxVal);
         s_suppressResetId = knobId;
+        ImGui::MarkItemEdited(knobId);
         ImGui::ClearActiveID();
         valueChanged = true;
     }
@@ -101,8 +112,14 @@ inline bool DrawHardwareKnob(
         const float speedMult = io.KeyShift ? 0.02f : 0.05f;
         const float range = (maxVal - minVal);
         const float delta = io.MouseWheel * speedMult * (range != 0.0f ? range : 1.0f);
-        *value = std::clamp(*value + delta, minVal, maxVal);
-        valueChanged = true;
+        const float newVal = std::clamp(*value + delta, minVal, maxVal);
+        if (newVal != *value) {
+            *value = newVal;
+            valueChanged = true;
+            if (ImGui::GetActiveID() == knobId || ImGui::GetActiveID() == 0) {
+                ImGui::MarkItemEdited(knobId);
+            }
+        }
     }
 
     // 2. Normalization & Angles

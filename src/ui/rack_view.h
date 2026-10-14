@@ -84,6 +84,8 @@ private:
     void cycleAdjacentScenePreset(int delta);
     void initMacrosForSlot(audio::PluginSlot* slot);
     void syncMacrosFromGraph();
+    void refreshGuiParamBaseline(audio::PluginSlot* slot);
+    void pollPluginGuiEdits(bool forceFlushPending = false);
     void moveSlot(int srcIdx, int srcBlockIdx, int srcBranchIdx, int dstIdx, int dstBlockIdx, int dstBranchIdx);
 
     audio::GraphEngine& m_graph;
@@ -136,6 +138,11 @@ private:
     state::UndoManager m_undoManager;
     audio::RetroactiveRiffBuffer m_riffBuffer;
     std::unordered_map<audio::PluginSlot*, std::array<DeviceMacro, 4>> m_slotMacros;
+    std::unordered_map<audio::PluginSlot*, std::vector<float>> m_guiParamBaseline;
+    audio::PluginSlot* m_pendingGuiEditSlot{nullptr};
+    std::string m_pendingGuiEditTargetKey;
+    std::string m_pendingGuiEditDesc;
+    bool m_guiEditWasMouseDown{false};
 
     bool m_midiMapMode{false};
     bool m_keyMapMode{false};

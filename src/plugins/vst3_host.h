@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include <mutex>
+#include <unordered_map>
 #include <windows.h>
 #include <utility>
 #include "vst3_param_queue.h"
@@ -53,6 +55,12 @@ public:
 
     [[nodiscard]] Steinberg::IPlugView* plugView() const noexcept { return m_plugView; }
 
+    // Invoked by PraccyComponentHandler when the user edits parameters in the VST3 GUI
+    void onGuiBeginEdit(Steinberg::Vst::ParamID paramId) noexcept;
+    void onGuiPerformEdit(Steinberg::Vst::ParamID paramId, Steinberg::Vst::ParamValue valueNormalized) noexcept;
+    void onGuiEndEdit(Steinberg::Vst::ParamID paramId) noexcept;
+    void onGuiRestartComponent(Steinberg::int32 flags) noexcept;
+
 private:
     Vst3PluginInstance();
 
@@ -77,6 +85,10 @@ private:
     FastParameterChanges m_inputParamChanges;
     moodycamel::ReaderWriterQueue<std::pair<Steinberg::Vst::ParamID, double>> m_paramQueue{128};
     std::atomic<DWORD> m_audioThreadId{0};
+    std::atomic<bool> m_suppressHandlerCallbacks{false};
+
+    mutable std::mutex m_paramCacheMutex;
+    mutable std::unordered_map<uint32_t, float> m_paramCache;
 
     struct Impl;
     std::unique_ptr<Impl> m_impl;
