@@ -21,6 +21,7 @@
 #include "tools/quick_looper.h"
 #include "state/scene_manager.h"
 #include "state/app_config.h"
+#include "plugins/plugin_scanner.h"
 #include "ui/update_checker.h"
 #include "ui/design_tokens.h"
 #include "ui/ui_helpers.h"
@@ -28,6 +29,7 @@
 #include "ui/widgets/device_badges.h"
 #include "ui/widgets/rotary_knob.h"
 #include "ui/widgets/strobe_tuner.h"
+#include "ui/modals/tuner_settings_modal.h"
 #include <imgui_internal.h>
 #include "utils/parse_utils.h"
 #include "utils/archive_utils.h"
@@ -175,6 +177,103 @@ void testTunerPitchDetection() {
     assert(resE.noteName == "E2");
     assert(std::abs(resE.frequencyHz - 82.41f) < 2.0f);
 
+    // 1. Test Pitch Standard (Middle A / A4 Reference change to 432 Hz)
+    tuner.setA4Reference(432.0f);
+    assert(std::abs(tuner.a4Reference() - 432.0f) < 0.01f);
+
+    for (size_t i = 0; i < sineWave.size(); ++i) {
+        double phase = 2.0 * std::numbers::pi * 432.0 * (static_cast<double>(i) / sampleRate);
+        sineWave[i] = static_cast<float>(std::sin(phase) * 0.7);
+    }
+    tuner.process(sineWave.data(), static_cast<uint32_t>(sineWave.size()));
+    auto res432 = tuner.currentResult();
+    assert(res432.confidence == true);
+    assert(res432.noteNumber == 69); // A4
+    assert(res432.noteName == "A4");
+    assert(std::abs(res432.frequencyHz - 432.0f) < 2.0f);
+    assert(std::abs(res432.centDeviation) < 5.0f); // Exactly 0 cents relative to A4=432Hz
+
+    // Restore to standard 440 Hz
+    tuner.setA4Reference(440.0f);
+    assert(std::abs(tuner.a4Reference() - 440.0f) < 0.01f);
+
+    // 2. Test Tuner On/Off Toggle
+    tuner.setEnabled(false);
+    assert(!tuner.isEnabled());
+    auto resOff = tuner.currentResult();
+    assert(!resOff.confidence);
+    assert(resOff.frequencyHz == 0.0f);
+    assert(resOff.noteName == "--");
+    tuner.setEnabled(true);
+    assert(tuner.isEnabled());
+
+    // 3. Test Guitar String Counts (6, 7, 8, 9 strings)
+    tools::TunerConfig cfg;
+    cfg.setInstrument(tools::InstrumentType::Guitar);
+    assert(cfg.minStrings() == 6);
+    assert(cfg.maxStrings() == 9);
+    for (int s = 6; s <= 9; ++s) {
+        cfg.setStringCount(s);
+        assert(cfg.stringCount == s);
+        assert(static_cast<int>(cfg.stringMidiNotes.size()) == s);
+    }
+
+    // 4. Test Bass String Counts (4, 5, 6 strings)
+    cfg.setInstrument(tools::InstrumentType::Bass);
+    assert(cfg.minStrings() == 4);
+    assert(cfg.maxStrings() == 6);
+    for (int s = 4; s <= 6; ++s) {
+        cfg.setStringCount(s);
+        assert(cfg.stringCount == s);
+        assert(static_cast<int>(cfg.stringMidiNotes.size()) == s);
+    }
+
+    // 5. Test Other Electric Stringed Instruments
+    cfg.setInstrument(tools::InstrumentType::ElectricMandolin);
+    assert(cfg.minStrings() == 4 && cfg.maxStrings() == 8);
+    cfg.setInstrument(tools::InstrumentType::ElectricBowed);
+    assert(cfg.minStrings() == 4 && cfg.maxStrings() == 5);
+    cfg.setInstrument(tools::InstrumentType::ElectricUkulele);
+    assert(cfg.minStrings() == 4 && cfg.maxStrings() == 4);
+    cfg.setInstrument(tools::InstrumentType::ElectricBanjo);
+    assert(cfg.minStrings() == 4 && cfg.maxStrings() == 5);
+    cfg.setInstrument(tools::InstrumentType::LapSteel);
+    assert(cfg.minStrings() == 6 && cfg.maxStrings() == 8);
+
+    // 6. Test Common Presets (Root + Type: Drop D, DADGAD, Open D)
+    cfg.setInstrument(tools::InstrumentType::Guitar);
+    cfg.setStringCount(6);
+    // Drop D (Root D = index 2)
+    cfg.setTuningPreset(tools::TuningType::Drop, 2);
+    // String 6 (lowest, index 5) should be D2 (38), String 1 (highest, index 0) should be E4 (64)
+    assert(cfg.stringMidiNotes[5] == 38);
+    assert(cfg.stringMidiNotes[0] == 64);
+
+    // DADGAD
+    cfg.setTuningPreset(tools::TuningType::DADGAD, 2);
+    assert(cfg.stringMidiNotes[5] == 38); // D2
+    assert(cfg.stringMidiNotes[0] == 62); // D4
+
+    // Open D
+    cfg.setTuningPreset(tools::TuningType::OpenD, 2);
+    assert(cfg.stringMidiNotes[5] == 38); // D2
+    assert(cfg.stringMidiNotes[0] == 62); // D4
+
+    // 7. Test Custom Tuning
+    cfg.setCustomStringNote(0, 64); // E4
+    cfg.setCustomStringNote(1, 59); // B3
+    cfg.setCustomStringNote(2, 55); // G3
+    cfg.setCustomStringNote(3, 50); // D3
+    cfg.setCustomStringNote(4, 45); // A2
+    cfg.setCustomStringNote(5, 40); // E2
+    assert(cfg.mode == tools::TuningMode::Custom);
+    auto strInfo = cfg.getStringInfoList();
+    assert(strInfo.size() == 6);
+    assert(strInfo[0].noteName == "E4");
+    assert(strInfo[5].noteName == "E2");
+    assert(std::abs(strInfo[0].targetFreqHz - 329.63f) < 0.5f);
+    assert(std::abs(strInfo[5].targetFreqHz - 82.41f) < 0.5f);
+
     std::cout << "PASSED\n";
 }
 
@@ -239,6 +338,26 @@ void testSceneManager() {
     assert(slot1 != nullptr);
     assert(slot1->dryWet() == 0.25f);
     assert(slot1->isBypassed() == true);
+
+    // Test preset category management
+    scenes.savePresetChain("Test High Gain Lead", engine);
+    scenes.setPresetCategory("Test High Gain Lead", "High Gain Metal");
+    assert(scenes.presetCategory("Test High Gain Lead") == "High Gain Metal");
+
+    // Test custom category creation & listing
+    scenes.setPresetCategory("Test High Gain Lead", "Prog Metal");
+    assert(scenes.presetCategory("Test High Gain Lead") == "Prog Metal");
+    auto cats = scenes.allPresetCategories();
+    assert(std::find(cats.begin(), cats.end(), "Prog Metal") != cats.end());
+
+    // Test persistence across save/load file
+    std::string tempPresetsFile = (std::filesystem::temp_directory_path() / "test_presets_cat.ini").string();
+    scenes.saveToFile(tempPresetsFile);
+
+    state::SceneManager loadedScenes;
+    loadedScenes.loadFromFile(tempPresetsFile);
+    assert(loadedScenes.presetCategory("Test High Gain Lead") == "Prog Metal");
+    std::filesystem::remove(tempPresetsFile);
 
     std::cout << "PASSED\n";
 }
@@ -306,6 +425,26 @@ void testAppConfigPersistence() {
     cfg.metronomeBpm = 135.0f;
     cfg.rackViewMode = state::AppConfig::RackViewMode::Modular;
     cfg.customPluginPaths = {"D:\\VSTPlugins", "E:\\MyAudio"};
+    cfg.scannedPlugins.push_back(state::ScannedPluginEntry{
+        .name = "Pro-Q 3",
+        .path = "C:\\VST3\\FabFilter Pro-Q 3.vst3",
+        .type = "VST3",
+        .vendor = "FabFilter",
+        .category = "Equalizer",
+        .bundleFileName = "FabFilter Pro-Q 3.vst3",
+        .classGuid = "12345678",
+        .clapId = ""
+    });
+    cfg.scannedPlugins.push_back(state::ScannedPluginEntry{
+        .name = "Diva",
+        .path = "C:\\CLAP\\Diva.clap",
+        .type = "CLAP",
+        .vendor = "u-he",
+        .category = "Audio FX",
+        .bundleFileName = "Diva.clap",
+        .classGuid = "",
+        .clapId = "com.u-he.diva"
+    });
 
     assert(cfg.save(testPath) == true);
 
@@ -318,9 +457,85 @@ void testAppConfigPersistence() {
     assert(std::abs(loaded.metronomeBpm - 135.0f) < 1e-4f);
     assert(loaded.rackViewMode == state::AppConfig::RackViewMode::Modular);
     assert(loaded.customPluginPaths.size() >= 2);
+    assert(loaded.scannedPlugins.size() == 2);
+    assert(loaded.scannedPlugins[0].name == "Pro-Q 3");
+    assert(loaded.scannedPlugins[0].type == "VST3");
+    assert(loaded.scannedPlugins[0].category == "Equalizer");
+    assert(loaded.scannedPlugins[1].name == "Diva");
+    assert(loaded.scannedPlugins[1].type == "CLAP");
+    assert(loaded.scannedPlugins[1].clapId == "com.u-he.diva");
 
     std::remove(testPath.c_str());
 
+    std::cout << "PASSED\n";
+}
+
+void testPluginScannerPersistence() {
+    std::cout << "[TEST] PluginScanner Scanned Plugins & Type Tag Persistence... ";
+
+    const std::string testIni = "test_plugin_scanner_temp.ini";
+    std::remove(testIni.c_str());
+
+    // Session 1: Scan / add plugins with distinct types and categories, then save
+    {
+        plugins::PluginScanner scanner(testIni);
+        plugins::PluginDescriptor vstDesc{
+            .name = "FabFilter Pro-Q 3",
+            .path = "C:\\Program Files\\Common Files\\VST3\\FabFilter Pro-Q 3.vst3",
+            .type = plugins::PluginType::VST3,
+            .vendor = "FabFilter",
+            .category = "Equalizer",
+            .bundleFileName = "FabFilter Pro-Q 3.vst3",
+            .classGuid = "56535451-7565-7279-0000-000000000000",
+            .clapId = ""
+        };
+        plugins::PluginDescriptor clapDesc{
+            .name = "u-he Diva",
+            .path = "C:\\Program Files\\Common Files\\CLAP\\Diva.clap",
+            .type = plugins::PluginType::CLAP,
+            .vendor = "u-he",
+            .category = "Audio FX",
+            .bundleFileName = "Diva.clap",
+            .classGuid = "",
+            .clapId = "com.u-he.diva"
+        };
+        scanner.addPlugin(vstDesc);
+        scanner.addPlugin(clapDesc);
+        scanner.setCustomCategory("FabFilter Pro-Q 3", "Dynamic EQ");
+        scanner.toggleFavorite("FabFilter Pro-Q 3");
+
+        scanner.saveToAppConfig(testIni);
+    }
+
+    // Session 2: Fresh instance (simulating restart), load from saved configuration
+    {
+        plugins::PluginScanner scanner2(testIni);
+
+        auto plugins = scanner2.scannedPlugins();
+        // 3 built-in effects + 2 restored scanned plugins = 5 total
+        assert(plugins.size() == 5);
+
+        // Verify VST3 plugin retained across sessions with its type tag and custom category
+        const auto* pVst = scanner2.resolvePlugin("FabFilter Pro-Q 3");
+        assert(pVst != nullptr);
+        assert(pVst->type == plugins::PluginType::VST3);
+        assert(pVst->typeString() == "VST3");
+        assert(pVst->vendor == "FabFilter");
+        assert(scanner2.getPluginCategory("FabFilter Pro-Q 3") == "Dynamic EQ");
+        assert(scanner2.isFavorite("FabFilter Pro-Q 3"));
+        assert(pVst->bundleFileName == "FabFilter Pro-Q 3.vst3");
+
+        // Verify CLAP plugin retained across sessions with its type tag and category
+        const auto* pClap = scanner2.resolvePlugin("u-he Diva");
+        assert(pClap != nullptr);
+        assert(pClap->type == plugins::PluginType::CLAP);
+        assert(pClap->typeString() == "CLAP");
+        assert(pClap->vendor == "u-he");
+        assert(pClap->category == "Audio FX");
+        assert(pClap->clapId == "com.u-he.diva");
+    }
+
+    std::remove(testIni.c_str());
     std::cout << "PASSED\n";
 }
 
@@ -2081,6 +2296,26 @@ void testMilestone3PracticeSuiteAndStrobeTuner() {
         ui::DrawStrobeTunerModule(exactInTune, 240.0f, 64.0f);
         ui::DrawStrobeTunerModule(flatResult, 240.0f, 64.0f);
 
+        // Verify DrawStrobeTuner with isEnabled=false
+        ui::DrawStrobeTuner(unconfident, ImVec2(500, 100), 30.0f, nullptr, false);
+
+        // Verify DrawStrobeTunerModule with active InstrumentTuner and settings callback
+        tools::InstrumentTuner testTuner(2048);
+        testTuner.prepare(48000.0);
+        bool settingsOpened = false;
+        ui::DrawStrobeTunerModule(exactInTune, 260.0f, 64.0f, &testTuner, [&]() {
+            settingsOpened = true;
+        });
+
+        // Verify TunerSettingsModal renders properly
+        ui::TunerSettingsModal modal(testTuner);
+        assert(!modal.isOpen());
+        modal.open();
+        assert(modal.isOpen());
+        modal.render();
+        modal.close();
+        assert(!modal.isOpen());
+
         ImGui::End();
         ImGui::Render();
 
@@ -2240,6 +2475,151 @@ void testDawInteropSecurityAndOverflowRejection() {
     std::cout << "PASSED\n";
 }
 
+void testDynamicSampleRateAndBufferSizeUpdates() {
+    std::cout << "[TEST] Dynamic Sample Rate & Buffer Size Updates... ";
+
+    // 1. AsioManager safety without active driver
+    {
+        audio::AsioManager asio;
+        assert(!asio.isLoaded());
+        assert(!asio.isRunning());
+        assert(!asio.checkHardwareChanges());
+        assert(!asio.setSampleRate(96000.0));
+        assert(!asio.setBufferSize(128));
+        assert(!asio.canSampleRate(48000.0));
+    }
+
+    // 2. Real-time DSP Pill formatting verification across standard sample rates & buffer sizes
+    {
+        const struct {
+            double sr;
+            int bufSize;
+            const char* expectedSrSubstr;
+        } cases[] = {
+            { 44100.0,  128, "44.1 kHz" },
+            { 48000.0,  256, "48 kHz"   },
+            { 88200.0,  512, "88.2 kHz" },
+            { 96000.0,   64, "96 kHz"   },
+            { 176400.0, 1024, "176.4 kHz"},
+            { 192000.0, 2048, "192 kHz"  }
+        };
+
+        for (const auto& c : cases) {
+            const char* srFormat = (std::fmod(c.sr, 1000.0) == 0.0) ? "%.0f kHz" : "%.1f kHz";
+            char srBuf[32];
+            std::snprintf(srBuf, sizeof(srBuf), srFormat, c.sr / 1000.0);
+            assert(std::string(srBuf) == c.expectedSrSubstr);
+
+            const double latencyMs = (c.sr > 0.0) ? (static_cast<double>(c.bufSize) / c.sr * 1000.0) : 0.0;
+            assert(latencyMs > 0.0 && latencyMs < 100.0);
+
+            char statusText[160];
+            std::snprintf(statusText, sizeof(statusText), "ACTIVE  |  %s  |  %d spls (%.1f ms)  |  DSP: 12%%",
+                          srBuf, c.bufSize, latencyMs);
+            assert(std::string(statusText).find(c.expectedSrSubstr) != std::string::npos);
+        }
+    }
+
+    // 3. Dynamic multi-rate GraphEngine & Practice Tools re-preparation
+    {
+        audio::GraphEngine graph;
+        tools::InstrumentTuner tuner(2048);
+        tools::Metronome metronome;
+        tools::AudioPlayer player;
+        tools::QuickLooper looper;
+
+        auto slot = std::make_unique<audio::PluginSlot>(std::make_unique<plugins::OverdriveEffect>());
+        graph.addSerialNode(std::move(slot));
+
+        const double rates[] = { 44100.0, 48000.0, 96000.0, 88200.0 };
+        const uint32_t sizes[] = { 512, 128, 64, 2048 };
+
+        for (size_t i = 0; i < 4; ++i) {
+            const double sr = rates[i];
+            const uint32_t bs = sizes[i];
+
+            // Dynamic re-preparation with newly configured rate & buffer size
+            graph.prepare(sr, bs);
+            tuner.prepare(sr, 4096);
+            metronome.prepare(sr);
+            player.prepare(sr);
+            looper.prepare(sr);
+
+            audio::OwnedAudioBuffer inBuf(2, bs);
+            audio::OwnedAudioBuffer outBuf(2, bs);
+            auto inView = inBuf.view(bs);
+            auto outView = outBuf.view(bs);
+
+            for (uint32_t ch = 0; ch < 2; ++ch) {
+                for (uint32_t s = 0; s < bs; ++s) {
+                    inView.channel(ch)[s] = 0.3f * std::sin(2.0f * 3.14159265f * 440.0f * s / static_cast<float>(sr));
+                }
+            }
+            outView.clear();
+
+            graph.process(inView, outView);
+
+            // Verify non-zero, finite processed audio across buffer size and sample rate mutations
+            float maxAbs = 0.0f;
+            for (uint32_t ch = 0; ch < 2; ++ch) {
+                for (uint32_t s = 0; s < bs; ++s) {
+                    float v = outView.channel(ch)[s];
+                    assert(!std::isnan(v));
+                    assert(!std::isinf(v));
+                    maxAbs = std::max(maxAbs, std::abs(v));
+                }
+            }
+            assert(maxAbs > 0.0f);
+        }
+    }
+
+    std::cout << "PASSED\n";
+}
+
+void testParallelBranchSplitNoDuplicateAndCleanDelete() {
+    std::cout << "[TEST] Parallel Branch Split Single Slot & Clean Deletion... ";
+    audio::GraphEngine engine;
+    engine.prepare(48000.0, 512);
+
+    auto slot = std::make_unique<audio::PluginSlot>(std::make_unique<plugins::OverdriveEffect>());
+    engine.addSerialNode(std::move(slot));
+
+    audio::OwnedAudioBuffer inBuf(2, 512);
+    audio::OwnedAudioBuffer outBuf(2, 512);
+    auto inView = inBuf.view(512);
+    auto outView = outBuf.view(512);
+
+    // 1. Process block to ensure audio is actively running
+    engine.process(inView, outView);
+
+    // 2. Split serial node into parallel while audio is active
+    engine.splitSerialNodeIntoParallel(0);
+    engine.process(inView, outView);
+
+    auto* block = dynamic_cast<audio::ParallelSplitMergeBlock*>(engine.getNode(0));
+    assert(block != nullptr);
+    auto* branchA = block->getBranch(0);
+    assert(branchA != nullptr);
+
+    // CRITICAL: Slot must NOT be duplicated into the next slot in the branch!
+    assert(branchA->numSlots() == 1);
+    assert(branchA->getSlot(0) != nullptr);
+    assert(branchA->getSlot(0)->name() == "Praccy Drive");
+
+    // 3. Delete slot from Branch A
+    branchA->removeSlot(0);
+    engine.process(inView, outView);
+    branchA->collectReclaimedSlots();
+
+    // Verify Branch A now cleanly has 0 slots
+    assert(branchA->numSlots() == 0);
+
+    // 4. Continue audio processing to verify no null dereferences or memory faults
+    engine.process(inView, outView);
+
+    std::cout << "PASSED\n";
+}
+
 int main() {
     std::cout << "===========================================\n";
     std::cout << "   PRACCY CORE AUDIO ENGINE TEST SUITE   \n";
@@ -2253,6 +2633,7 @@ int main() {
     testSceneManager();
     testGraphEngineDynamicTopology();
     testAppConfigPersistence();
+    testPluginScannerPersistence();
     testParallelBlockBlendAndDissolve();
     testQuickLooper();
     testAudioPlayer();
@@ -2282,9 +2663,11 @@ int main() {
     testStereoBypassRampSymmetry();
     testColorTokenFloatConversion();
     testDawInteropSecurityAndOverflowRejection();
+    testDynamicSampleRateAndBufferSizeUpdates();
+    testParallelBranchSplitNoDuplicateAndCleanDelete();
 
     std::cout << "===========================================\n";
-    std::cout << "   ALL TESTS PASSED SUCCESSFULLY! (37/37)  \n";
+    std::cout << "   ALL TESTS PASSED SUCCESSFULLY! (40/40)  \n";
     std::cout << "===========================================\n";
     return 0;
 }

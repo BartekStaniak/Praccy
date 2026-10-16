@@ -372,8 +372,10 @@ void InstrumentTuner::detectPitchYin() {
         return;
     }
 
-    // Convert to MIDI Note number (A4 = 440 Hz = note 69)
-    const float midiNoteExact = 69.0f + 12.0f * std::log2(freq / 440.0f);
+    // Convert to MIDI Note number (A4 = dynamic pitch standard reference)
+    const float a4Ref = m_a4Reference.load(std::memory_order_relaxed);
+    const float safeA4 = (a4Ref >= 300.0f && a4Ref <= 600.0f) ? a4Ref : 440.0f;
+    const float midiNoteExact = 69.0f + 12.0f * std::log2(freq / safeA4);
     const int roundedNote = static_cast<int>(std::round(midiNoteExact));
     const float cents = (midiNoteExact - static_cast<float>(roundedNote)) * 100.0f;
 
@@ -396,6 +398,15 @@ void InstrumentTuner::publishResult(bool hasPitch, float freq, int note, float c
 
 TunerResult InstrumentTuner::currentResult() const {
     TunerResult result;
+    if (!m_enabled.load(std::memory_order_relaxed)) {
+        result.confidence = false;
+        result.noteName = "--";
+        result.frequencyHz = 0.0f;
+        result.centDeviation = 0.0f;
+        result.matchedStringIndex = -1;
+        return result;
+    }
+
     bool hasPitch = false;
     float freq = 0.0f;
     int note = 0;
@@ -432,6 +443,30 @@ TunerResult InstrumentTuner::currentResult() const {
     const int noteIndex = (result.noteNumber % 12 + 12) % 12;
     const int octave = (result.noteNumber / 12) - 1;
     result.noteName = std::string(NOTE_NAMES[noteIndex]) + std::to_string(octave);
+
+    // Match against current instrument string tunings
+    const float a4Ref = m_a4Reference.load(std::memory_order_relaxed);
+    const float safeA4 = (a4Ref >= 300.0f && a4Ref <= 600.0f) ? a4Ref : 440.0f;
+    int bestStringIdx = -1;
+    float bestCentsDiff = 9999.0f;
+    float bestTargetFreq = 0.0f;
+
+    for (size_t i = 0; i < m_config.stringMidiNotes.size(); ++i) {
+        int strMidi = m_config.stringMidiNotes[i];
+        float strTargetFreq = safeA4 * std::pow(2.0f, (static_cast<float>(strMidi) - 69.0f) / 12.0f);
+        float centsDiff = 1200.0f * std::log2(freq / strTargetFreq);
+        if (std::abs(centsDiff) < std::abs(bestCentsDiff)) {
+            bestCentsDiff = centsDiff;
+            bestStringIdx = static_cast<int>(i);
+            bestTargetFreq = strTargetFreq;
+        }
+    }
+
+    if (bestStringIdx >= 0 && std::abs(bestCentsDiff) <= 120.0f) {
+        result.matchedStringIndex = bestStringIdx;
+        result.targetFrequencyHz = bestTargetFreq;
+        result.stringCentDeviation = bestCentsDiff;
+    }
 
     return result;
 }

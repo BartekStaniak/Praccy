@@ -4,6 +4,7 @@
 #include "design_tokens.h"
 #include "theme.h"
 #include "ui_helpers.h"
+#include "../version.h"
 #include "../plugins/builtin_dsp.h"
 #include "../plugins/clap_host.h"
 #include "../plugins/vst3_host.h"
@@ -19,6 +20,7 @@
 #include <cstdio>
 #include <algorithm>
 #include <regex>
+#include <iostream>
 #include <filesystem>
 #include <ctime>
 
@@ -207,10 +209,43 @@ RackView::RackView(audio::GraphEngine& graph,
       m_scanner(scanner),
       m_pluginBrowserModal(std::make_unique<PluginBrowserModal>(scanner, graph)),
       m_settingsModal(std::make_unique<SettingsModal>(asio, scanner, [this]() { m_pluginBrowserModal->open(); })),
-      m_practiceToolsModal(std::make_unique<PracticeToolsModal>(looper, player)) {
+      m_practiceToolsModal(std::make_unique<PracticeToolsModal>(looper, player)),
+      m_tunerSettingsModal(std::make_unique<TunerSettingsModal>(tuner)) {
     state::AppConfig cfg;
     cfg.load();
     m_cachedConfig = cfg;
+
+    // Restore Tuner Configuration
+    m_tuner.setEnabled(cfg.tunerEnabled);
+    m_tuner.setA4Reference(cfg.tunerA4Reference);
+    {
+        tools::TunerConfig tcfg;
+        tcfg.instrument = static_cast<tools::InstrumentType>(std::clamp(cfg.tunerInstrument, 0, static_cast<int>(tools::InstrumentType::Count) - 1));
+        tcfg.stringCount = cfg.tunerStringCount;
+        tcfg.mode = static_cast<tools::TuningMode>(cfg.tunerTuningMode);
+        tcfg.tuningType = static_cast<tools::TuningType>(std::clamp(cfg.tunerTuningType, 0, static_cast<int>(tools::TuningType::Count) - 1));
+        tcfg.rootNoteIndex = cfg.tunerRootNote;
+        tcfg.a4ReferenceHz = cfg.tunerA4Reference;
+        tcfg.applyPreset();
+
+        if (tcfg.mode == tools::TuningMode::Custom && !cfg.tunerCustomStrings.empty()) {
+            std::stringstream ss(cfg.tunerCustomStrings);
+            std::string item;
+            std::vector<int> customNotes;
+            while (std::getline(ss, item, ',')) {
+                if (!item.empty()) {
+                    try {
+                        customNotes.push_back(std::stoi(item));
+                    } catch (...) {}
+                }
+            }
+            if (customNotes.size() == static_cast<size_t>(tcfg.stringCount)) {
+                tcfg.stringMidiNotes = customNotes;
+            }
+        }
+        m_tuner.setConfig(tcfg);
+    }
+
     m_favoritePresets = cfg.favoritePresets;
     if (m_favoritePresets.empty()) {
         auto avail = m_scenes.savedPresetNames();
@@ -246,14 +281,26 @@ RackView::RackView(audio::GraphEngine& graph,
                                state::UndoActionType::SceneSwitch);
 
     m_settingsModal->setOnDriverChanged([this](double sRate, uint32_t bufSize) {
-        m_graph.prepare(sRate, bufSize);
-        m_tuner.prepare(sRate, 4096);
-        m_metronome.prepare(sRate);
-        m_player.prepare(sRate);
-        m_looper.prepare(sRate);
-        m_riffBuffer.prepare(sRate, static_cast<int>(m_cachedConfig.retroactiveBufferMinutes));
-        m_asio.start();
+        applyAudioSettings(sRate, bufSize);
     });
+}
+
+void RackView::applyAudioSettings(double sRate, uint32_t bufSize) {
+    if (sRate <= 0.0) sRate = 48000.0;
+    if (bufSize == 0) bufSize = 256;
+    m_asio.stop();
+    if (m_asio.canSampleRate(sRate)) {
+        m_asio.setSampleRate(sRate);
+    }
+    double actualSr = m_asio.currentSampleRate();
+    if (actualSr <= 0.0) actualSr = sRate;
+    m_graph.prepare(actualSr, bufSize);
+    m_tuner.prepare(actualSr, 4096);
+    m_metronome.prepare(actualSr);
+    m_player.prepare(actualSr);
+    m_looper.prepare(actualSr);
+    m_riffBuffer.prepare(actualSr, static_cast<int>(m_cachedConfig.retroactiveBufferMinutes));
+    m_asio.start(bufSize);
 }
 
 bool RackView::isPresetFavorite(const std::string& name) const {
@@ -274,7 +321,12 @@ void RackView::toggleFavoritePreset(const std::string& name) {
 }
 
 void RackView::render() {
+    if (m_asio.checkHardwareChanges()) {
+        applyAudioSettings(m_asio.currentSampleRate(), static_cast<uint32_t>(m_asio.currentBufferSize()));
+    }
+
     ThumbnailManager::instance().update();
+
     pollPluginGuiEdits(false);
 
     if (m_expandPulseTimer > 0.0f) {
@@ -435,9 +487,13 @@ void RackView::render() {
         renderUpdateModal();
         m_settingsModal->render();
         m_practiceToolsModal->render();
+        if (m_tunerSettingsModal) m_tunerSettingsModal->render();
         m_exportDawModal.render(m_scenes, m_graph);
         renderPresetBrowserModal();
         renderFloatingHudToast();
+        if (m_showHotkeyLegend || ImGui::GetIO().KeyAlt) {
+            renderHotkeyLegendOverlay();
+        }
     }
     ImGui::End();
     ImGui::PopStyleVar();
@@ -447,20 +503,19 @@ bool RackView::renderStatusPill(bool isRunning, const char* statusText) {
     if (!statusText) return false;
 
     const ImVec2 textSize = ImGui::CalcTextSize(statusText);
+    const float pillH = Metrics::pillHeight();
     const float pillW = textSize.x + 36.0f;
-    const float pillH = 22.0f;
-    const float frameH = ImGui::GetFrameHeight();
-    const float offsetY = std::max(0.0f, (frameH - pillH) * 0.5f);
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
 
-    const ImVec2 screenPos = ImGui::GetCursorScreenPos();
-    const ImVec2 pos(screenPos.x, screenPos.y + offsetY);
-
-    bool clicked = ImGui::InvisibleButton("##DspStatusPill", ImVec2(pillW, frameH));
+    bool clicked = ImGui::InvisibleButton("##DspStatusPill", ImVec2(pillW, pillH));
     bool hovered = ImGui::IsItemHovered();
     bool held = ImGui::IsItemActive();
 
     if (clicked) {
         resetDspDropouts();
+    }
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Right) || (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))) {
+        if (m_settingsModal) m_settingsModal->open();
     }
 
     uint32_t drops = m_dspDropouts ? m_dspDropouts->load(std::memory_order_relaxed) : 0;
@@ -468,9 +523,9 @@ bool RackView::renderStatusPill(bool isRunning, const char* statusText) {
     if (hovered) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
         if (drops > 0) {
-            ImGui::SetTooltip("Real-time DSP Load %% & Dropout Meter\nDropouts: %u\nClick to reset dropout counter", drops);
+            ImGui::SetTooltip("Real-time DSP Load %% & Dropout Meter\nDropouts: %u\nClick to reset dropout counter\nDouble-click to open Audio Settings", drops);
         } else {
-            ImGui::SetTooltip("Real-time DSP Load %% & Dropout Meter\nClick to reset dropout counter");
+            ImGui::SetTooltip("Real-time DSP Load %% & Dropout Meter\nClick to reset dropout counter\nDouble-click to open Audio Settings");
         }
     }
 
@@ -493,11 +548,12 @@ bool RackView::renderStatusPill(bool isRunning, const char* statusText) {
         borderCol = tokens.borders.cardFaulted;
     }
 
-    dl->AddRectFilled(pos, ImVec2(pos.x + pillW, pos.y + pillH), bgCol, 11.0f);
-    dl->AddRect(pos, ImVec2(pos.x + pillW, pos.y + pillH), borderCol, 11.0f);
+    const float radius = pillH * 0.5f;
+    dl->AddRectFilled(pos, ImVec2(pos.x + pillW, pos.y + pillH), bgCol, radius);
+    dl->AddRect(pos, ImVec2(pos.x + pillW, pos.y + pillH), borderCol, radius);
 
     // Glowing LED Dot
-    ImVec2 dotCenter(pos.x + 12.0f, pos.y + (pillH * 0.5f));
+    ImVec2 dotCenter(pos.x + 14.0f, pos.y + (pillH * 0.5f));
     if (isRunning) {
         if (drops > 0) {
             dl->AddCircleFilled(dotCenter, 6.0f, static_cast<ImU32>(tokens.signal.meterWarning.withAlpha(80.0f / 255.0f)));
@@ -511,7 +567,7 @@ bool RackView::renderStatusPill(bool isRunning, const char* statusText) {
     }
 
     // Text Label inside pill
-    ImVec2 textPos(pos.x + 24.0f, pos.y + ((pillH - textSize.y) * 0.5f));
+    ImVec2 textPos(pos.x + 26.0f, pos.y + ((pillH - textSize.y) * 0.5f));
     ImU32 textCol;
     if (isRunning) {
         if (drops > 0) {
@@ -554,7 +610,9 @@ void RackView::renderPracticeRibbon() {
         {
             auto result = m_tuner.currentResult();
             const float availW = ImGui::GetContentRegionAvail().x;
-            DrawStrobeTunerModule(result, availW, modH - 12.0f);
+            DrawStrobeTunerModule(result, availW, modH - 12.0f, &m_tuner, [this]() {
+                if (m_tunerSettingsModal) m_tunerSettingsModal->open();
+            });
         }
         ImGui::EndChild();
 
@@ -792,7 +850,7 @@ void RackView::renderPracticeRibbon() {
 
 void RackView::renderSceneBar() {
     const auto& tokens = themeTokens();
-    const float barBtnH = 26.0f;
+    const float barBtnH = Metrics::buttonHeight();
     const float fontSize = ImGui::GetFontSize();
     const float padY = std::max(0.0f, (barBtnH - fontSize) * 0.5f);
     const float padX = ImGui::GetStyle().FramePadding.x;
@@ -809,12 +867,12 @@ void RackView::renderSceneBar() {
 
     auto userPresets = m_scenes.savedPresetNames();
     const float actionsCompactW = (kGroupDividerSpacing * 2.0f + 6.0f) + ImGui::CalcTextSize("Actions \xE2\x96\xBE").x + padX * 2.0f;
-    const float fullActionsW = (kGroupDividerSpacing * 2.0f + 6.0f) + ImGui::CalcTextSize("Save Scene").x + ImGui::CalcTextSize("Save Preset As...").x + ImGui::CalcTextSize("Export DAW...").x + ImGui::CalcTextSize("Preset Browser...").x + 10.0f * padX + 4.0f * kBtnSpacing + (userPresets.empty() ? 0.0f : (130.0f + kBtnSpacing));
+    const float fullActionsW = (kGroupDividerSpacing * 2.0f + 6.0f) + ImGui::CalcTextSize("Save Changes").x + ImGui::CalcTextSize("Save Preset As...").x + ImGui::CalcTextSize("Export DAW...").x + ImGui::CalcTextSize("Preset Browser...").x + 10.0f * padX + 4.0f * kBtnSpacing + (userPresets.empty() ? 0.0f : (130.0f + kBtnSpacing));
 
     const float favLabelW = ImGui::CalcTextSize("FAVORITES:").x + kLabelSpacing;
     const bool isCompact = (availTotalW - favLabelW - (abSectionW + undoRedoSectionW + fullActionsW) < 220.0f);
     const float reservedRightW = (isCompact ? (abSectionW + undoRedoSectionW + actionsCompactW) : (abSectionW + undoRedoSectionW + fullActionsW)) + 16.0f;
-    const float maxFavAreaW = std::max(180.0f, availTotalW - favLabelW - reservedRightW);
+    const float maxFavAreaW = std::max(140.0f, availTotalW - favLabelW - reservedRightW);
 
     float totalFavContentW = 0.0f;
     if (m_favoritePresets.empty()) {
@@ -826,7 +884,8 @@ void RackView::renderSceneBar() {
         }
     }
 
-    const bool needsFavScroll = (totalFavContentW > maxFavAreaW);
+    const bool collapseFavsToDropdown = (maxFavAreaW < 220.0f);
+    const bool needsFavScroll = !collapseFavsToDropdown && (totalFavContentW > maxFavAreaW);
     const float favAreaW = needsFavScroll ? maxFavAreaW : totalFavContentW;
     const float favChildH = needsFavScroll ? (barBtnH + 6.0f) : barBtnH;
 
@@ -836,59 +895,17 @@ void RackView::renderSceneBar() {
     ImGui::TextColored(tokens.text.secondary.vec4, "FAVORITES:");
     ImGui::SameLine(0, kLabelSpacing);
 
-    // Scrollable Horizontal Favorites Container
-    ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, 5.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarRounding, 3.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    ImGui::PushStyleColor(ImGuiCol_ScrollbarBg, tokens.surfaces.scrollbarBg.vec4);
-    ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, tokens.borders.focus.vec4);
-    ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered, tokens.signal.active.vec4);
-    ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive, tokens.surfaces.sceneActiveEmerald.vec4);
-
-    ImGuiWindowFlags favFlags = ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollWithMouse;
-    if (needsFavScroll) {
-        favFlags |= ImGuiWindowFlags_HorizontalScrollbar;
-    } else {
-        favFlags |= ImGuiWindowFlags_NoScrollbar;
-    }
-
-    ImGui::BeginChild("FavPresetsScroll", ImVec2(favAreaW, favChildH), false, favFlags);
-
-    if (ImGui::IsWindowHovered()) {
-        float wheel = ImGui::GetIO().MouseWheel;
-        if (wheel != 0.0f) {
-            ImGui::SetScrollX(ImGui::GetScrollX() - wheel * 45.0f);
-        }
-    }
-
-    if (m_favoritePresets.empty()) {
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(tokens.text.muted.vec4, "(No favorites)");
-        ImGui::SameLine(0, 6.0f);
-        if (CenteredButton("+ Browse Presets", ImVec2(0, barBtnH))) {
-            m_showPresetBrowserModal = true;
-        }
-    } else {
-        for (size_t i = 0; i < m_favoritePresets.size(); ++i) {
-            const auto& favName = m_favoritePresets[i];
-            if (i > 0) {
-                ImGui::SameLine(0, kBtnSpacing);
-            }
-
-            bool isActive = (m_auditionedPreset == favName);
-            {
-                ScopedStyleColor favGuard({
-                    {ImGuiCol_Button, tokens.surfaces.sceneActiveEmerald.vec4},
-                    {ImGuiCol_Border, tokens.borders.focus.vec4},
-                    {ImGuiCol_Text, tokens.text.primary.vec4}
-                }, isActive);
-
-                std::string btnLabel = favName + "##FavBtn_" + std::to_string(i);
-                if (CenteredButton(btnLabel.c_str(), ImVec2(0, barBtnH))) {
-                    if (m_midiMapMode) {
-                        m_midi.startLearning(midi::BindingTargetType::SceneSelect, -1, -1, static_cast<int>(i));
-                        triggerHudToast("MIDI LEARN: SCENE " + std::to_string(i + 1));
-                    } else {
+    if (collapseFavsToDropdown) {
+        std::string comboPreview = m_auditionedPreset.empty() ? "Favorites..." : m_auditionedPreset;
+        ImGui::SetNextItemWidth(std::max(120.0f, maxFavAreaW));
+        if (ImGui::BeginCombo("##FavPresetsDropdown", comboPreview.c_str())) {
+            if (m_favoritePresets.empty()) {
+                ImGui::TextDisabled("No favorites added");
+            } else {
+                for (size_t i = 0; i < m_favoritePresets.size(); ++i) {
+                    const auto& favName = m_favoritePresets[i];
+                    bool isSelected = (m_auditionedPreset == favName);
+                    if (ImGui::Selectable(favName.c_str(), isSelected)) {
                         if (m_scenes.loadPresetChain(favName, m_graph)) {
                             m_auditionedPreset = favName;
                             syncMacrosFromGraph();
@@ -902,27 +919,104 @@ void RackView::renderSceneBar() {
                     }
                 }
             }
-
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Preset Chain: %s\nClick to load (10ms crossfade)\nRight-click to manage", favName.c_str());
+            ImGui::Separator();
+            if (ImGui::Selectable("+ Browse Presets...")) {
+                m_showPresetBrowserModal = true;
             }
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Quick Favorites (Collapses to dropdown on smaller displays)");
+        }
+    } else {
+        // Scrollable Horizontal Favorites Container
+        ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, 5.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarRounding, 3.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ScrollbarBg, tokens.surfaces.scrollbarBg.vec4);
+        ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, tokens.borders.focus.vec4);
+        ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered, tokens.signal.active.vec4);
+        ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive, tokens.surfaces.sceneActiveEmerald.vec4);
 
-            std::string ctxId = "FavCtx_" + std::to_string(i);
-            if (ImGui::BeginPopupContextItem(ctxId.c_str())) {
-                if (ImGui::MenuItem("Remove from Favorites")) {
-                    toggleFavoritePreset(favName);
-                }
-                if (ImGui::MenuItem("Preset Browser...")) {
-                    m_showPresetBrowserModal = true;
-                }
-                ImGui::EndPopup();
+        ImGuiWindowFlags favFlags = ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollWithMouse;
+        if (needsFavScroll) {
+            favFlags |= ImGuiWindowFlags_HorizontalScrollbar;
+        } else {
+            favFlags |= ImGuiWindowFlags_NoScrollbar;
+        }
+
+        ImGui::BeginChild("FavPresetsScroll", ImVec2(favAreaW, favChildH), false, favFlags);
+
+        if (ImGui::IsWindowHovered()) {
+            float wheel = ImGui::GetIO().MouseWheel;
+            if (wheel != 0.0f) {
+                ImGui::SetScrollX(ImGui::GetScrollX() - wheel * 45.0f);
             }
         }
-    }
 
-    ImGui::EndChild();
-    ImGui::PopStyleColor(4);
-    ImGui::PopStyleVar(3);
+        if (m_favoritePresets.empty()) {
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(tokens.text.muted.vec4, "(No favorites)");
+            ImGui::SameLine(0, 6.0f);
+            if (CenteredButton("+ Browse Presets", ImVec2(0, barBtnH))) {
+                m_showPresetBrowserModal = true;
+            }
+        } else {
+            for (size_t i = 0; i < m_favoritePresets.size(); ++i) {
+                const auto& favName = m_favoritePresets[i];
+                if (i > 0) {
+                    ImGui::SameLine(0, kBtnSpacing);
+                }
+
+                bool isActive = (m_auditionedPreset == favName);
+                {
+                    ScopedStyleColor favGuard({
+                        {ImGuiCol_Button, tokens.surfaces.sceneActiveEmerald.vec4},
+                        {ImGuiCol_Border, tokens.borders.focus.vec4},
+                        {ImGuiCol_Text, tokens.text.primary.vec4}
+                    }, isActive);
+
+                    std::string btnLabel = favName + "##FavBtn_" + std::to_string(i);
+                    if (CenteredButton(btnLabel.c_str(), ImVec2(0, barBtnH))) {
+                        if (m_midiMapMode) {
+                            m_midi.startLearning(midi::BindingTargetType::SceneSelect, -1, -1, static_cast<int>(i));
+                            triggerHudToast("MIDI LEARN: SCENE " + std::to_string(i + 1));
+                        } else {
+                            if (m_scenes.loadPresetChain(favName, m_graph)) {
+                                m_auditionedPreset = favName;
+                                syncMacrosFromGraph();
+                                m_undoManager.pushSnapshot(
+                                    state::SceneManager::captureGraphSnapshot(m_graph, "Preset: " + favName),
+                                    "Preset: " + favName,
+                                    state::UndoActionType::SceneSwitch
+                                );
+                                triggerHudToast("Loaded " + favName);
+                            }
+                        }
+                    }
+                }
+
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Preset Chain: %s\nClick to load (10ms crossfade)\nRight-click to manage", favName.c_str());
+                }
+
+                std::string ctxId = "FavCtx_" + std::to_string(i);
+                if (ImGui::BeginPopupContextItem(ctxId.c_str())) {
+                    if (ImGui::MenuItem("Remove from Favorites")) {
+                        toggleFavoritePreset(favName);
+                    }
+                    if (ImGui::MenuItem("Preset Browser...")) {
+                        m_showPresetBrowserModal = true;
+                    }
+                    ImGui::EndPopup();
+                }
+            }
+        }
+
+        ImGui::EndChild();
+        ImGui::PopStyleColor(4);
+        ImGui::PopStyleVar(3);
+    }
 
     // Instant A/B Tone Snapshot Comparison Toggle
     ImGui::SameLine(0, kGroupDividerSpacing);
@@ -1067,10 +1161,14 @@ void RackView::renderSceneBar() {
             ImGui::OpenPopup("SceneActionsOverflowPopup");
         }
         if (ImGui::BeginPopup("SceneActionsOverflowPopup")) {
-            if (ImGui::MenuItem("Save Scene")) {
-                m_scenes.captureCurrentScene(m_scenes.activeSceneIndex(), m_graph);
-                const auto* cur = m_scenes.getScene(m_scenes.activeSceneIndex());
-                triggerHudToast("Saved to " + (cur ? cur->name : "Scene"));
+            if (ImGui::MenuItem("Save Changes")) {
+                if (!m_auditionedPreset.empty()) {
+                    m_scenes.savePresetChain(m_auditionedPreset, m_graph);
+                    triggerHudToast("Updated preset: " + m_auditionedPreset);
+                } else {
+                    m_showSavePresetModal = true;
+                    m_presetNameBuffer[0] = '\0';
+                }
             }
             if (ImGui::MenuItem("Save Preset As...")) {
                 m_showSavePresetModal = true;
@@ -1105,13 +1203,21 @@ void RackView::renderSceneBar() {
             ImGui::EndPopup();
         }
     } else {
-        if (CenteredButton("Save Scene", ImVec2(0, barBtnH))) {
-            m_scenes.captureCurrentScene(m_scenes.activeSceneIndex(), m_graph);
-            const auto* cur = m_scenes.getScene(m_scenes.activeSceneIndex());
-            triggerHudToast("Saved to " + (cur ? cur->name : "Scene"));
+        if (CenteredButton("Save Changes", ImVec2(0, barBtnH))) {
+            if (!m_auditionedPreset.empty()) {
+                m_scenes.savePresetChain(m_auditionedPreset, m_graph);
+                triggerHudToast("Updated preset: " + m_auditionedPreset);
+            } else {
+                m_showSavePresetModal = true;
+                m_presetNameBuffer[0] = '\0';
+            }
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Save current plugin chain into active scene preset");
+            if (!m_auditionedPreset.empty()) {
+                ImGui::SetTooltip("Save current plugin chain changes to active preset '%s'", m_auditionedPreset.c_str());
+            } else {
+                ImGui::SetTooltip("Save current plugin chain as a new preset");
+            }
         }
 
         ImGui::SameLine(0, kBtnSpacing);
@@ -1166,20 +1272,21 @@ void RackView::renderSceneBar() {
         ImGuiIO& io = ImGui::GetIO();
         ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
         ImGui::SetNextWindowSize(ImVec2(360, 150), ImGuiCond_Appearing);
-        if (ImGui::Begin("Save Preset Chain##Modal", &m_showSavePresetModal, ImGuiWindowFlags_NoCollapse)) {
+        if (ImGui::Begin("Save Preset Chain##Modal", &m_showSavePresetModal, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar)) {
             ImGui::Text("Enter preset name:");
             ImGui::SetNextItemWidth(-1);
             ImGui::InputText("##NewPresetNameInput", m_presetNameBuffer, sizeof(m_presetNameBuffer));
             ImGui::Spacing();
-            if (CenteredButton("Save", ImVec2(100, 26))) {
+            if (CenteredButton("Save", ImVec2(100, Metrics::buttonHeight()))) {
                 if (m_presetNameBuffer[0] != '\0') {
                     m_scenes.savePresetChain(m_presetNameBuffer, m_graph);
+                    m_auditionedPreset = m_presetNameBuffer;
                     triggerHudToast(std::string("Preset '") + m_presetNameBuffer + "' saved!");
                     m_showSavePresetModal = false;
                 }
             }
             ImGui::SameLine();
-            if (CenteredButton("Cancel", ImVec2(80, 26))) {
+            if (CenteredButton("Cancel", ImVec2(80, Metrics::buttonHeight()))) {
                 m_showSavePresetModal = false;
             }
             ImGui::End();
@@ -1360,14 +1467,14 @@ void RackView::renderSignalRack() {
     ImGui::SetCursorPos(ImVec2(currentX, serialCardY));
     ImGui::BeginGroup();
     ImGui::PushStyleColor(ImGuiCol_ChildBg, static_cast<ImVec4>(tokens.surfaces.cardBg));
-    ImGui::BeginChild("OutputDestNode", ImVec2(100.0f, cardH), true);
-    renderBadgePill("OUTPUT", tokens.surfaces.branchABg, tokens.borders.branchABorder, tokens.text.badgeVst3, 22.0f);
+    ImGui::BeginChild("OutputDestNode", ImVec2(100.0f, cardH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    renderBadgePill("OUTPUT", tokens.surfaces.branchABg, tokens.borders.branchABorder, tokens.text.badgeVst3, Metrics::pillHeight());
     ImGui::Spacing();
     ImGui::TextDisabled("To ASIO");
     ImGui::Spacing();
-    renderMeter("FinalL", m_graph.outputMeter().peakLeft(), 14, 120);
+    renderMeter("FinalL", m_graph.outputMeter().peakLeft(), 14, 115);
     ImGui::SameLine(0, 6);
-    renderMeter("FinalR", m_graph.outputMeter().peakRight(), 14, 120);
+    renderMeter("FinalR", m_graph.outputMeter().peakRight(), 14, 115);
     ImGui::EndChild();
     ImGui::PopStyleColor();
     ImGui::EndGroup();
@@ -1394,8 +1501,9 @@ void RackView::renderInputCard(float cardY) {
     const auto& tokens = themeTokens();
     ImGui::BeginGroup();
     ImGui::PushStyleColor(ImGuiCol_ChildBg, static_cast<ImVec4>(tokens.surfaces.cardBg));
-    ImGui::BeginChild("InputGainNode", ImVec2(180, 224), true);
-    renderBadgePill("INPUT", tokens.surfaces.branchABg, tokens.borders.branchABorder, tokens.text.badgeVst3, 22.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 6.0f));
+    ImGui::BeginChild("InputGainNode", ImVec2(180, 224), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    renderBadgePill("INPUT", tokens.surfaces.branchABg, tokens.borders.branchABorder, tokens.text.badgeVst3, Metrics::pillHeight());
     ImGui::Spacing();
 
     // Input Channel Routing Selector (Mono/Stereo)
@@ -1426,14 +1534,14 @@ void RackView::renderInputCard(float cardY) {
 
     ImGui::Spacing();
     float inGain = m_graph.inputGainDb();
-    if (ResettableVSliderFloat("##InGain", ImVec2(24, 115), &inGain, -24.0f, +24.0f, 0.0f, "")) {
+    if (ResettableVSliderFloat("##InGain", ImVec2(24, 108), &inGain, -24.0f, +24.0f, 0.0f, "")) {
         m_graph.setInputGainDb(inGain);
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Input Gain (Double-click to reset 0 dB)");
     ImGui::SameLine(0, 8);
-    renderMeter("InL", m_graph.inputMeter().peakLeft(), 10, 115);
+    renderMeter("InL", m_graph.inputMeter().peakLeft(), 10, 108);
     ImGui::SameLine(0, 4);
-    renderMeter("InR", m_graph.inputMeter().peakRight(), 10, 115);
+    renderMeter("InR", m_graph.inputMeter().peakRight(), 10, 108);
 
     ImGui::SameLine(0, 8);
     ImGui::BeginGroup();
@@ -1442,6 +1550,7 @@ void RackView::renderInputCard(float cardY) {
     ImGui::EndGroup();
 
     ImGui::EndChild();
+    ImGui::PopStyleVar();
     ImGui::PopStyleColor();
     ImGui::EndGroup();
 }
@@ -1481,6 +1590,9 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
     ImGui::BeginGroup();
     const auto& tokens = themeTokens();
     auto* pluginInst = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
+    if (pluginInst) {
+        pluginInst->handleMainThreadCallbacks();
+    }
     const bool isFaulted = pluginInst && pluginInst->isFaulted();
     const bool isMissing = slot->innerNode() && slot->innerNode()->isMissing();
     const bool bypassed = slot->isBypassed();
@@ -1623,7 +1735,12 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             if (m_dspTweakSlot == slot) m_dspTweakSlot = nullptr;
             if (m_expandedSlot == slot) m_expandedSlot = nullptr;
             if (m_pendingGuiEditSlot == slot) m_pendingGuiEditSlot = nullptr;
+            if (m_focusedSlot == slot) {
+                m_focusedSlot = nullptr;
+                m_focusedSlotIndex = -1;
+            }
             m_guiParamBaseline.erase(slot);
+            m_slotMacros.erase(slot);
             if (branchIndex == -1) {
                 m_graph.removeSerialNode(slotIndex);
             } else {
@@ -1695,59 +1812,64 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                         tokens.signal.active.withAlpha(0.22f), 6.5f, 0, 2.0f);
         }
 
-        // Invisible button to capture clicks over the entire preview area
-        ImGui::SetCursorScreenPos(previewPos);
-        char previewBtnId[64];
-        std::snprintf(previewBtnId, sizeof(previewBtnId), "##GuiPreview_%d_%d_%d", slotIndex, blockIndex, branchIndex);
-        bool previewClicked = ImGui::InvisibleButton(previewBtnId, ImVec2(previewW, previewH));
-        bool isPreviewHovered = ImGui::IsItemHovered();
+        // Invisible button to capture clicks over the entire preview area (only when active)
+        bool previewClicked = false;
+        bool isPreviewHovered = false;
+        if (!isFaulted && !isMissing) {
+            ImGui::SetCursorScreenPos(previewPos);
+            char previewBtnId[64];
+            std::snprintf(previewBtnId, sizeof(previewBtnId), "##GuiPreview_%d_%d_%d", slotIndex, blockIndex, branchIndex);
+            previewClicked = ImGui::InvisibleButton(previewBtnId, ImVec2(previewW, previewH));
+            isPreviewHovered = ImGui::IsItemHovered();
 
-        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
-            CardDragPayload payload{slotIndex, blockIndex, branchIndex};
-            ImGui::SetDragDropPayload("RACK_CARD_PAYLOAD", &payload, sizeof(payload));
-            const char* loc = (branchIndex == -1) ? "Rack" : (branchIndex == 0 ? "Branch A" : "Branch B");
-            ImGui::Text("Moving %s (%s, Slot %d)", slot->name().c_str(), loc, slotIndex + 1);
-            ImGui::EndDragDropSource();
-        }
+            if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+                CardDragPayload payload{slotIndex, blockIndex, branchIndex};
+                ImGui::SetDragDropPayload("RACK_CARD_PAYLOAD", &payload, sizeof(payload));
+                const char* loc = (branchIndex == -1) ? "Rack" : (branchIndex == 0 ? "Branch A" : "Branch B");
+                ImGui::Text("Moving %s (%s, Slot %d)", slot->name().c_str(), loc, slotIndex + 1);
+                ImGui::EndDragDropSource();
+            }
 
-        if (isPreviewHovered && !isFaulted && !isMissing) {
-            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            if (isPreviewHovered) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            }
         }
 
         // Preview rendering:
         if (isMissing) {
             const char* missTitle = "MISSING PLUGIN";
             ImVec2 tSz = ImGui::CalcTextSize(missTitle);
-            dl->AddText(ImVec2(previewPos.x + (previewW - tSz.x) * 0.5f, previewPos.y + 8.0f),
+            dl->AddText(ImVec2(previewPos.x + (previewW - tSz.x) * 0.5f, previewPos.y + 4.0f),
                         tokens.signal.faulted, missTitle);
 
             const char* missSub = "Dry signal pass-through active";
             ImVec2 sSz = ImGui::CalcTextSize(missSub);
-            dl->AddText(ImVec2(previewPos.x + (previewW - sSz.x) * 0.5f, previewPos.y + 24.0f),
+            dl->AddText(ImVec2(previewPos.x + (previewW - sSz.x) * 0.5f, previewPos.y + 18.0f),
                         tokens.text.secondary, missSub);
 
-            ImGui::SetCursorScreenPos(ImVec2(previewPos.x + (previewW - 140.0f) * 0.5f, previewPos.y + 34.0f));
+            ImGui::SetCursorScreenPos(ImVec2(previewPos.x + (previewW - 140.0f) * 0.5f, previewPos.y + 33.0f));
             char replaceBtnId[48];
             std::snprintf(replaceBtnId, sizeof(replaceBtnId), "FIND REPLACEMENT##%d_%d_%d", slotIndex, blockIndex, branchIndex);
-            if (ImGui::Button(replaceBtnId, ImVec2(140.0f, 20.0f))) {
+            if (ImGui::Button(replaceBtnId, ImVec2(140.0f, 18.0f))) {
                 m_pluginBrowserModal->open(blockIndex, branchIndex);
             }
         } else if (isFaulted) {
             const char* crashTitle = "PLUGIN CRASH ISOLATED";
             ImVec2 tSz = ImGui::CalcTextSize(crashTitle);
-            dl->AddText(ImVec2(previewPos.x + (previewW - tSz.x) * 0.5f, previewPos.y + 8.0f),
+            dl->AddText(ImVec2(previewPos.x + (previewW - tSz.x) * 0.5f, previewPos.y + 4.0f),
                         tokens.signal.faulted, crashTitle);
 
             const char* crashSub = "Dry signal pass-through active";
             ImVec2 sSz = ImGui::CalcTextSize(crashSub);
-            dl->AddText(ImVec2(previewPos.x + (previewW - sSz.x) * 0.5f, previewPos.y + 24.0f),
+            dl->AddText(ImVec2(previewPos.x + (previewW - sSz.x) * 0.5f, previewPos.y + 18.0f),
                         tokens.text.secondary, crashSub);
 
-            ImGui::SetCursorScreenPos(ImVec2(previewPos.x + (previewW - 130.0f) * 0.5f, previewPos.y + 32.0f));
+            ImGui::SetCursorScreenPos(ImVec2(previewPos.x + (previewW - 130.0f) * 0.5f, previewPos.y + 33.0f));
             char reloadBtnId[48];
             std::snprintf(reloadBtnId, sizeof(reloadBtnId), "RELOAD PLUGIN##%d_%d_%d", slotIndex, blockIndex, branchIndex);
-            if (ImGui::Button(reloadBtnId, ImVec2(130.0f, 20.0f))) {
+            if (ImGui::Button(reloadBtnId, ImVec2(130.0f, 18.0f))) {
                 pluginInst->resetFault();
+                slot->reset();
             }
         } else {
             // Stylized vector hardware faceplate badge
@@ -2082,7 +2204,12 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             if (m_dspTweakSlot == slot) m_dspTweakSlot = nullptr;
             if (m_expandedSlot == slot) m_expandedSlot = nullptr;
             if (m_pendingGuiEditSlot == slot) m_pendingGuiEditSlot = nullptr;
+            if (m_focusedSlot == slot) {
+                m_focusedSlot = nullptr;
+                m_focusedSlotIndex = -1;
+            }
             m_guiParamBaseline.erase(slot);
+            m_slotMacros.erase(slot);
             if (branchIndex == -1) {
                 m_graph.removeSerialNode(slotIndex);
             } else {
@@ -2328,28 +2455,10 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
             if (ImGui::IsItemHovered()) ImGui::SetTooltip(min0 ? "Maximise Branch A" : "Minimise Branch A");
 
             ImGui::SameLine(0, 4);
-
-            char delPopup0[32];
-            std::snprintf(delPopup0, sizeof(delPopup0), "DelConfirmBr0_%d", blockIndex);
             if (renderCenteredDeleteButton("##delBr0", ImVec2(24, 24))) {
-                ImGui::OpenPopup(delPopup0);
+                pendingDissolveKeepBranch = 1;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete Branch A (Branch B will be kept in rack)");
-
-            if (ImGui::BeginPopup(delPopup0)) {
-                ImGui::TextColored(tokens.text.error.vec4, "Delete Branch A?");
-                ImGui::TextDisabled("Branch B plugins will be moved into the rack.");
-                ImGui::Spacing();
-                if (ImGui::Button("Delete Branch", ImVec2(110, 24))) {
-                    pendingDissolveKeepBranch = 1;
-                    ImGui::CloseCurrentPopup();
-                }
-                ImGui::SameLine();
-                if (ImGui::Button("Cancel", ImVec2(60, 24))) {
-                    ImGui::CloseCurrentPopup();
-                }
-                ImGui::EndPopup();
-            }
 
             // If not minimized, render slots and internal wiring
             if (!min0) {
@@ -2536,28 +2645,10 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
             if (ImGui::IsItemHovered()) ImGui::SetTooltip(min1 ? "Maximise Branch B" : "Minimise Branch B");
 
             ImGui::SameLine(0, 4);
-
-            char delPopup1[32];
-            std::snprintf(delPopup1, sizeof(delPopup1), "DelConfirmBr1_%d", blockIndex);
             if (renderCenteredDeleteButton("##delBr1", ImVec2(24, 24))) {
-                ImGui::OpenPopup(delPopup1);
+                pendingDissolveKeepBranch = 0;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete Branch B (Branch A will be kept in rack)");
-
-            if (ImGui::BeginPopup(delPopup1)) {
-                ImGui::TextColored(tokens.text.error.vec4, "Delete Branch B?");
-                ImGui::TextDisabled("Branch A plugins will be moved into the rack.");
-                ImGui::Spacing();
-                if (ImGui::Button("Delete Branch", ImVec2(110, 24))) {
-                    pendingDissolveKeepBranch = 0;
-                    ImGui::CloseCurrentPopup();
-                }
-                ImGui::SameLine();
-                if (ImGui::Button("Cancel", ImVec2(60, 24))) {
-                    ImGui::CloseCurrentPopup();
-                }
-                ImGui::EndPopup();
-            }
 
             // If not minimized, render slots and internal wiring
             if (!min1) {
@@ -2681,8 +2772,15 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
             for (size_t s = 0; s < delBr->numSlots(); ++s) {
                 auto* slot = delBr->getSlot(s);
                 if (slot) {
+                    if (m_dspTweakSlot == slot) m_dspTweakSlot = nullptr;
+                    if (m_expandedSlot == slot) m_expandedSlot = nullptr;
                     if (m_pendingGuiEditSlot == slot) m_pendingGuiEditSlot = nullptr;
+                    if (m_focusedSlot == slot) {
+                        m_focusedSlot = nullptr;
+                        m_focusedSlotIndex = -1;
+                    }
                     m_guiParamBaseline.erase(slot);
+                    m_slotMacros.erase(slot);
                     auto* pInst = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
                     if (pInst) plugins::PluginWindowManager::instance().closePluginWindow(pInst);
                 }
@@ -2711,7 +2809,7 @@ void RackView::renderBottomBar() {
             {ImGuiCol_ButtonHovered, tokens.surfaces.buttonBgHovered.vec4},
             {ImGuiCol_Text, tokens.text.primary.vec4}
         });
-        if (CenteredButton("Settings", ImVec2(80.0f, 26.0f))) {
+        if (CenteredButton("Settings", ImVec2(80.0f, Metrics::buttonHeight()))) {
             m_settingsModal->open();
         }
     }
@@ -2724,7 +2822,7 @@ void RackView::renderBottomBar() {
     bool toolsActive = m_practiceToolsModal && m_practiceToolsModal->isOpen();
     {
         ScopedStyleColor toolsGuard(ImGuiCol_Button, tokens.surfaces.buttonBgActive.vec4, toolsActive);
-        if (CenteredButton("Practice Tools", ImVec2(105.0f, 26.0f))) {
+        if (CenteredButton("Practice Tools", ImVec2(105.0f, Metrics::buttonHeight()))) {
             m_practiceToolsModal->toggle();
         }
     }
@@ -2739,7 +2837,7 @@ void RackView::renderBottomBar() {
             {ImGuiCol_ButtonHovered, tokens.surfaces.buttonBgHovered.vec4},
             {ImGuiCol_Text, tokens.text.accent.vec4}
         });
-        if (CenteredButton("★ Save Last Riff", ImVec2(125.0f, 26.0f))) {
+        if (CenteredButton("★ Save Last Riff", ImVec2(125.0f, Metrics::buttonHeight()))) {
             saveLastRiff();
         }
     }
@@ -2754,7 +2852,7 @@ void RackView::renderBottomBar() {
             {ImGuiCol_Border, tokens.borders.mapModeViolet.vec4}
         }, m_midiMapMode);
 
-        if (CenteredButton("MIDI Map", ImVec2(75.0f, 26.0f))) {
+        if (CenteredButton("MIDI Map", ImVec2(75.0f, Metrics::buttonHeight()))) {
             m_midiMapMode = !m_midiMapMode;
             if (m_midiMapMode) m_keyMapMode = false;
             triggerHudToast(m_midiMapMode ? "MIDI MAP MODE: ACTIVE" : "MIDI MAP MODE: OFF");
@@ -2771,7 +2869,7 @@ void RackView::renderBottomBar() {
             {ImGuiCol_Border, tokens.borders.mapModeViolet.vec4}
         }, m_keyMapMode);
 
-        if (CenteredButton("Key Map", ImVec2(75.0f, 26.0f))) {
+        if (CenteredButton("Key Map", ImVec2(75.0f, Metrics::buttonHeight()))) {
             m_keyMapMode = !m_keyMapMode;
             if (m_keyMapMode) m_midiMapMode = false;
             triggerHudToast(m_keyMapMode ? "KEY MAP MODE: ACTIVE" : "KEY MAP MODE: OFF");
@@ -2804,27 +2902,66 @@ void RackView::renderBottomBar() {
 
     char statusText[160];
     if (m_asio.isRunning()) {
+        const char* srFormat = (std::fmod(sr, 1000.0) == 0.0) ? "%.0f kHz" : "%.1f kHz";
+        char srBuf[32];
+        std::snprintf(srBuf, sizeof(srBuf), srFormat, sr / 1000.0);
+
         if (drops > 0) {
-            std::snprintf(statusText, sizeof(statusText), "ACTIVE  |  %.0f kHz  |  %d spls (%.1f ms)  |  DSP: %.0f%%  |  DROPS: %u",
-                          sr / 1000.0, bufSize, latencyMs, dspLoad, drops);
+            std::snprintf(statusText, sizeof(statusText), "ACTIVE  |  %s  |  %d spls (%.1f ms)  |  DSP: %.0f%%  |  DROPS: %u",
+                          srBuf, bufSize, latencyMs, dspLoad, drops);
         } else {
-            std::snprintf(statusText, sizeof(statusText), "ACTIVE  |  %.0f kHz  |  %d spls (%.1f ms)  |  DSP: %.0f%%",
-                          sr / 1000.0, bufSize, latencyMs, dspLoad);
+            std::snprintf(statusText, sizeof(statusText), "ACTIVE  |  %s  |  %d spls (%.1f ms)  |  DSP: %.0f%%",
+                          srBuf, bufSize, latencyMs, dspLoad);
         }
     } else {
         std::snprintf(statusText, sizeof(statusText), "STOPPED");
     }
 
     const float pillW = ImGui::CalcTextSize(statusText).x + 36.0f;
+    const float hotkeyBtnW = 28.0f;
+    const float spacingBetween = 8.0f;
     const float availW = ImGui::GetContentRegionAvail().x;
     const float rightMargin = 14.0f;
+    const float totalRightW = pillW + hotkeyBtnW + spacingBetween + rightMargin;
 
-    if (availW > pillW + rightMargin) {
-        ImGui::SameLine(ImGui::GetCursorPosX() + availW - pillW - rightMargin);
+    if (availW > totalRightW) {
+        ImGui::SameLine(ImGui::GetCursorPosX() + availW - totalRightW);
     } else {
-        ImGui::SameLine(0, 12);
+        ImGui::SameLine(0, 8);
     }
 
+    // Hotkey button with vector keyboard glyph immediately to the left of DSP pill
+    const bool isLegendVisible = m_showHotkeyLegend || ImGui::GetIO().KeyAlt;
+    {
+        ScopedStyleColor hkGuard({
+            {ImGuiCol_Button, isLegendVisible ? tokens.text.accent.vec4 : tokens.surfaces.buttonBg.vec4},
+            {ImGuiCol_Border, isLegendVisible ? tokens.borders.focus.vec4 : tokens.borders.subtle.vec4}
+        });
+        if (CenteredButton("##HotkeyLegendToggleBtn", ImVec2(hotkeyBtnW, Metrics::kButtonHeight))) {
+            m_showHotkeyLegend = !m_showHotkeyLegend;
+        }
+
+        // Draw crisp vector keyboard glyph inside button
+        ImVec2 btnMin = ImGui::GetItemRectMin();
+        ImVec2 btnMax = ImGui::GetItemRectMax();
+        ImVec2 center((btnMin.x + btnMax.x) * 0.5f, (btnMin.y + btnMax.y) * 0.5f);
+        ImU32 glyphColor = isLegendVisible ? tokens.text.inverse.u32 : tokens.text.primary.u32;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+
+        // Keyboard frame
+        dl->AddRect(ImVec2(center.x - 7.5f, center.y - 5.0f), ImVec2(center.x + 7.5f, center.y + 5.0f), glyphColor, 1.5f, 0, 1.2f);
+        // Keys row 1
+        dl->AddLine(ImVec2(center.x - 5.0f, center.y - 2.5f), ImVec2(center.x - 3.0f, center.y - 2.5f), glyphColor, 1.0f);
+        dl->AddLine(ImVec2(center.x - 1.0f, center.y - 2.5f), ImVec2(center.x + 1.0f, center.y - 2.5f), glyphColor, 1.0f);
+        dl->AddLine(ImVec2(center.x + 3.0f, center.y - 2.5f), ImVec2(center.x + 5.0f, center.y - 2.5f), glyphColor, 1.0f);
+        // Spacebar
+        dl->AddLine(ImVec2(center.x - 4.0f, center.y + 2.0f), ImVec2(center.x + 4.0f, center.y + 2.0f), glyphColor, 1.2f);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Keyboard Shortcuts & Hotkey Legend (Hold Alt or Click to Toggle)");
+    }
+
+    ImGui::SameLine(0, spacingBetween);
     renderStatusPill(m_asio.isRunning(), statusText);
 }
 
@@ -2962,12 +3099,8 @@ void RackView::renderUpdateModal() {
     ImGui::SetNextWindowSize(ImVec2(520, 390), ImGuiCond_Appearing);
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
 
-    if (ImGui::BeginPopupModal("Praccy Updates##Modal", &m_showUpdateModal, ImGuiWindowFlags_NoResize)) {
-        ImGui::TextColored(tokens.text.accent.vec4, "PRACCY UPDATE MANAGER");
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        ImGui::Text("Installed Version: %s", "v2.5-beta4");
+    if (ImGui::BeginPopupModal("Praccy Updates##Modal", &m_showUpdateModal, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
+        ImGui::Text("Installed Version: %s", praccy::kVersionString);
         ImGui::Spacing();
 
         // Option to enable beta builds from dev branch
@@ -3128,16 +3261,24 @@ void RackView::renderPresetBrowserModal() {
     if (!m_showPresetBrowserModal) return;
     const auto& tokens = themeTokens();
 
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    const float initW = vp ? std::clamp(vp->Size.x * 0.70f, 680.0f, 1050.0f) : 740.0f;
+    const float initH = vp ? std::clamp(vp->Size.y * 0.72f, 480.0f, 800.0f) : 520.0f;
+
     ImGui::OpenPopup("Preset Chain Browser##Modal");
-    ImGui::SetNextWindowSize(ImVec2(720, 500), ImGuiCond_Appearing);
-    ImGui::SetNextWindowSizeConstraints(ImVec2(600, 400), ImVec2(1400, 900));
-    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(initW, initH), ImGuiCond_Appearing);
+    if (vp) {
+        ImGui::SetNextWindowSizeConstraints(ImVec2(600, 400), ImVec2(vp->Size.x * 0.95f, vp->Size.y * 0.95f));
+    }
+    ImGui::SetNextWindowPos(vp ? vp->GetCenter() : ImVec2(100.0f, 100.0f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
 
-    if (ImGui::BeginPopupModal("Preset Chain Browser##Modal", &m_showPresetBrowserModal, ImGuiWindowFlags_None)) {
-        ImGui::TextColored(tokens.text.accent.vec4, "PRESET CHAIN BROWSER");
-        ImGui::Separator();
-        ImGui::Spacing();
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, tokens.surfaces.popupBg.vec4);
+    ImGui::PushStyleColor(ImGuiCol_Border, tokens.borders.subtle.vec4);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, Spec::kModalCornerRadius);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Spec::kModalWindowPadding, Spec::kModalWindowPadding));
 
+    if (ImGui::BeginPopupModal("Preset Chain Browser##Modal", &m_showPresetBrowserModal, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
         // Search-as-you-type fuzzy filter
         ImGui::AlignTextToFramePadding();
         ImGui::TextColored(tokens.text.muted.vec4, "SEARCH:");
@@ -3147,44 +3288,58 @@ void RackView::renderPresetBrowserModal() {
         ImGui::InputTextWithHint("##PresetSearchInput", "Search presets by name or tone profile...", m_presetSearchFilter, sizeof(m_presetSearchFilter));
 
         ImGui::SameLine();
-        if (CenteredButton("Clear##ClearFilter", ImVec2(70, ImGui::GetFrameHeight()))) {
+        if (CenteredButton("Clear##ClearFilter", ImVec2(70, Metrics::buttonHeight()))) {
             m_presetSearchFilter[0] = '\0';
         }
 
         ImGui::Spacing();
 
-        // Sound Profile Filter Tags
-        const char* categories[] = {
-            "ALL",
-            "HIGH GAIN METAL",
-            "GLASSY CLEAN",
-            "AMBIENT FX",
-            "EDGE OF BREAKUP",
-            "FAVORITES *"
-        };
-        const int numCategories = sizeof(categories) / sizeof(categories[0]);
+        // Dynamic Sound Profile Filter Tags (ALL, then FAVORITES *, then categories; scrollable if needed)
+        std::vector<std::string> catPills = { "ALL", "FAVORITES *" };
+        auto allCats = m_scenes.allPresetCategories();
+        for (const auto& c : allCats) {
+            std::string upperC = c;
+            std::transform(upperC.begin(), upperC.end(), upperC.begin(),
+                           [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+            if (std::find(catPills.begin(), catPills.end(), upperC) == catPills.end()) {
+                catPills.push_back(upperC);
+            }
+        }
 
-        for (int c = 0; c < numCategories; ++c) {
-            bool isSelected = (m_selectedCategoryTagIndex == c);
+        const float pillsChildH = Metrics::buttonHeight() + 6.0f;
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+        ImGui::BeginChild("##CategoryPillsScroll", ImVec2(0.0f, pillsChildH), false, ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_HorizontalScrollbar);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, Metrics::buttonHeight() * 0.5f);
+        for (size_t c = 0; c < catPills.size(); ++c) {
+            bool isSelected = (m_selectedCategoryTagIndex == static_cast<int>(c));
             ScopedStyleColor btnGuard(ImGuiCol_Button, isSelected ? tokens.surfaces.buttonBgActive.vec4 : tokens.surfaces.buttonBg.vec4);
             ScopedStyleColor borderGuard(ImGuiCol_Border, isSelected ? tokens.borders.focus.vec4 : tokens.borders.subtle.vec4);
 
-            if (CenteredButton(categories[c])) {
-                m_selectedCategoryTagIndex = c;
+            if (CenteredButton(catPills[c].c_str(), ImVec2(0.0f, Metrics::buttonHeight()))) {
+                m_selectedCategoryTagIndex = static_cast<int>(c);
             }
 
-            if (c < numCategories - 1) {
+            if (c + 1 < catPills.size()) {
                 ImGui::SameLine(0, 6);
             }
         }
+        ImGui::PopStyleVar();
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
 
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
 
-        // Preset Table inside scrollable child
-        const float footerHeight = 44.0f;
+        // Preset Table inside scrollable child zone (3 columns: Fav, Name, Category)
+        const float footerHeight = Metrics::kFooterHeight;
         const float tableHeight = ImGui::GetContentRegionAvail().y - footerHeight;
+
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, tokens.surfaces.cardBg.vec4);
+        ImGui::PushStyleColor(ImGuiCol_Border, tokens.borders.subtle.vec4);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, Spec::kCornerRadius);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 6.0f));
 
         if (ImGui::BeginChild("PresetListChild", ImVec2(0, tableHeight), true)) {
             auto presetNames = m_scenes.savedPresetNames();
@@ -3196,23 +3351,31 @@ void RackView::renderPresetBrowserModal() {
 
             int displayedCount = 0;
 
-            if (ImGui::BeginTable("PresetTable", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
-                ImGui::TableSetupColumn("Fav", ImGuiTableColumnFlags_WidthFixed, 38.0f);
-                ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 0.42f);
-                ImGui::TableSetupColumn("Category", ImGuiTableColumnFlags_WidthStretch, 0.32f);
-                ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, Spec::tableCellPadding());
+            if (ImGui::BeginTable("PresetTable", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+                ImGui::TableSetupColumn("Fav", ImGuiTableColumnFlags_WidthFixed, 42.0f);
+                ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 0.58f);
+                ImGui::TableSetupColumn("Category", ImGuiTableColumnFlags_WidthStretch, 0.42f);
                 ImGui::TableHeadersRow();
 
                 for (const auto& pName : presetNames) {
-                    std::string category = detectPresetSoundProfile(pName);
+                    std::string category = m_scenes.presetCategory(pName);
+                    if (category.empty()) {
+                        category = detectPresetSoundProfile(pName);
+                    }
                     bool isFav = isPresetFavorite(pName);
 
                     // Category Filter Check
-                    if (m_selectedCategoryTagIndex == 1 && category != "High Gain Metal") continue;
-                    if (m_selectedCategoryTagIndex == 2 && category != "Glassy Clean") continue;
-                    if (m_selectedCategoryTagIndex == 3 && category != "Ambient FX") continue;
-                    if (m_selectedCategoryTagIndex == 4 && category != "Edge of Breakup") continue;
-                    if (m_selectedCategoryTagIndex == 5 && !isFav) continue;
+                    if (m_selectedCategoryTagIndex == 1) {
+                        // Option 1 is Favorites
+                        if (!isFav) continue;
+                    } else if (m_selectedCategoryTagIndex >= 2 && m_selectedCategoryTagIndex < static_cast<int>(catPills.size())) {
+                        std::string targetCat = catPills[m_selectedCategoryTagIndex];
+                        std::string catUpper = category;
+                        std::transform(catUpper.begin(), catUpper.end(), catUpper.begin(),
+                                       [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+                        if (catUpper != targetCat) continue;
+                    }
 
                     // Text Search Check
                     if (!filterLower.empty()) {
@@ -3230,29 +3393,68 @@ void RackView::renderPresetBrowserModal() {
                     }
 
                     displayedCount++;
-                    ImGui::TableNextRow();
+                    ImGui::TableNextRow(ImGuiTableRowFlags_None, Spec::tableRowHeight());
 
-                    // Column 0: Favorite Star
+                    bool isAuditioned = (m_auditionedPreset == pName);
+                    if (isAuditioned) {
+                        ImU32 highlightCol = tokens.surfaces.cardBgSelected.u32;
+                        ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, highlightCol);
+                        ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, highlightCol);
+                    }
+
+                    // Column 0: Row Click Target & Favorite Star
                     ImGui::TableNextColumn();
+                    const ImVec2 cellStart = ImGui::GetCursorPos();
+
+                    std::string selectId = "##SelectPresetRow_" + std::to_string(displayedCount);
+                    if (ImGui::Selectable(selectId.c_str(), false, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap, ImVec2(0.0f, 0.0f))) {
+                        if (m_scenes.loadPresetChain(pName, m_graph)) {
+                            m_auditionedPreset = pName;
+                            syncMacrosFromGraph();
+                            m_undoManager.pushSnapshot(
+                                state::SceneManager::captureGraphSnapshot(m_graph, "Preset: " + pName),
+                                "Preset: " + pName,
+                                state::UndoActionType::SceneSwitch
+                            );
+                            triggerHudToast("Loaded preset: " + pName);
+                        }
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Click to load preset (10ms crossfade)");
+                    }
+
+                    if (isAuditioned) {
+                        ImVec2 rMin = ImGui::GetItemRectMin();
+                        ImVec2 rMax = ImGui::GetItemRectMax();
+                        ImDrawList* dl = ImGui::GetWindowDrawList();
+                        dl->AddRectFilled(rMin, ImVec2(rMin.x + 3.5f, rMax.y), tokens.borders.focus.u32, 1.5f);
+                    }
+
+                    // Reset cursor back to start of cell so star is on the SAME row as the text and category
+                    ImGui::SetCursorPos(cellStart);
+                    Spec::alignTableCellCenter(20.0f, Spec::tableRowHeight());
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 6.0f);
                     std::string starId = "##Fav_" + pName;
-                    if (renderCenteredStarButton(starId.c_str(), ImVec2(24, 22), isFav)) {
+                    if (renderCenteredStarButton(starId.c_str(), ImVec2(20.0f, 20.0f), isFav)) {
                         toggleFavoritePreset(pName);
                     }
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip(isFav ? "Remove from Favorites" : "Add to Favorites");
                     }
 
-                    // Column 1: Preset Name
+                    // Column 1: Preset Name (Vertically centered)
                     ImGui::TableNextColumn();
-                    bool isAuditioned = (m_auditionedPreset == pName);
+                    Spec::alignTableCellCenter(ImGui::GetFontSize(), Spec::tableRowHeight());
                     if (isAuditioned) {
-                        ImGui::TextColored(tokens.signal.active.vec4, "> %s", pName.c_str());
+                        ImGui::TextColored(tokens.text.accent.vec4, "%s", pName.c_str());
                     } else {
-                        ImGui::TextColored(tokens.text.primary.vec4, "%s", pName.c_str());
+                        ImGui::TextUnformatted(pName.c_str());
                     }
 
-                    // Column 2: Category Badge
+                    // Column 2: Category Badge (Vertically centered)
                     ImGui::TableNextColumn();
+                    const float badgeH = Spec::tableBadgeHeight();
+                    Spec::alignTableCellCenter(badgeH, Spec::tableRowHeight());
                     ImU32 badgeBorder = tokens.borders.subtle.u32;
                     ImU32 badgeText = tokens.text.secondary.u32;
                     if (category == "High Gain Metal") {
@@ -3269,25 +3471,42 @@ void RackView::renderPresetBrowserModal() {
                         badgeBorder = tokens.signal.overdubbing.u32;
                     }
 
-                    renderBadgePill(category.c_str(), tokens.surfaces.cardBg.u32, badgeBorder, badgeText, 20.0f);
+                    renderBadgePill(category.c_str(), tokens.surfaces.cardBg.u32, badgeBorder, badgeText, badgeH);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Category: %s\nRight-click to change or create new category", category.c_str());
+                    }
 
-                    // Column 3: One-Click Audition / Load
-                    ImGui::TableNextColumn();
-                    std::string btnId = "Audition##" + pName;
-                    if (CenteredButton(btnId.c_str(), ImVec2(90, 22))) {
-                        if (m_scenes.loadPresetChain(pName, m_graph)) {
-                            m_auditionedPreset = pName;
-                            syncMacrosFromGraph();
-                            m_undoManager.pushSnapshot(
-                                state::SceneManager::captureGraphSnapshot(m_graph, "Preset: " + pName),
-                                "Preset: " + pName,
-                                state::UndoActionType::SceneSwitch
-                            );
-                            triggerHudToast("Loaded preset: " + pName);
+                    std::string catPopupId = "##CatPopup_" + pName;
+                    if (ImGui::BeginPopupContextItem(catPopupId.c_str())) {
+                        ImGui::TextColored(tokens.text.accent.vec4, "Set Category for '%s':", pName.c_str());
+                        ImGui::Separator();
+                        auto availableCats = m_scenes.allPresetCategories();
+                        for (const auto& catItem : availableCats) {
+                            bool isCurrent = (category == catItem);
+                            if (ImGui::MenuItem(catItem.c_str(), nullptr, isCurrent)) {
+                                m_scenes.setPresetCategory(pName, catItem);
+                                triggerHudToast("Updated '" + pName + "' category to: " + catItem);
+                            }
                         }
+                        ImGui::Separator();
+                        ImGui::TextDisabled("New Category:");
+                        static char s_newCatBuffer[64] = "";
+                        ImGui::SetNextItemWidth(160.0f);
+                        ImGui::InputTextWithHint("##NewCatInput", "Category Name...", s_newCatBuffer, sizeof(s_newCatBuffer));
+                        ImGui::SameLine();
+                        if (CenteredButton("+ Add", ImVec2(50, Metrics::buttonHeight()))) {
+                            if (s_newCatBuffer[0] != '\0') {
+                                m_scenes.setPresetCategory(pName, s_newCatBuffer);
+                                triggerHudToast("Created and set category: " + std::string(s_newCatBuffer));
+                                s_newCatBuffer[0] = '\0';
+                                ImGui::CloseCurrentPopup();
+                            }
+                        }
+                        ImGui::EndPopup();
                     }
                 }
                 ImGui::EndTable();
+                ImGui::PopStyleVar();
             }
 
             if (displayedCount == 0) {
@@ -3296,16 +3515,21 @@ void RackView::renderPresetBrowserModal() {
             }
         }
         ImGui::EndChild();
+        ImGui::PopStyleVar(3);
+        ImGui::PopStyleColor(2);
 
         ImGui::Separator();
         ImGui::Spacing();
-        if (CenteredButton("Close", ImVec2(90, 26))) {
+        if (CenteredButton("Close", ImVec2(90, Metrics::buttonHeight()))) {
             m_showPresetBrowserModal = false;
             ImGui::CloseCurrentPopup();
         }
 
         ImGui::EndPopup();
     }
+
+    ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor(2);
 }
 
 
@@ -3385,15 +3609,19 @@ void RackView::saveLastRiff() {
     stagingL.resize(capturedFrames);
     stagingR.resize(capturedFrames);
 
-    std::string userProfile = "";
-    const char* up = std::getenv("USERPROFILE");
-    if (up && *up) {
-        userProfile = up;
+    std::filesystem::path riffDir;
+    if (!m_cachedConfig.riffDirectory.empty()) {
+        riffDir = m_cachedConfig.riffDirectory;
     } else {
-        userProfile = ".";
+        std::string userProfile = "";
+        const char* up = std::getenv("USERPROFILE");
+        if (up && *up) {
+            userProfile = up;
+        } else {
+            userProfile = ".";
+        }
+        riffDir = std::filesystem::path(userProfile) / "Documents" / "Praccy" / "Riffs";
     }
-
-    std::filesystem::path riffDir = std::filesystem::path(userProfile) / "Documents" / "Praccy" / "Riffs";
     try {
         std::filesystem::create_directories(riffDir);
     } catch (...) {}
@@ -3546,7 +3774,7 @@ void RackView::refreshGuiParamBaseline(audio::PluginSlot* slot) {
     baseline.resize(nParams);
     for (size_t p = 0; p < nParams; ++p) {
         auto desc = pInst->getParameterDesc(p);
-        baseline[p] = pInst->getParameterValue(desc.id);
+        baseline[p] = desc.currentValue;
     }
 }
 
@@ -3568,16 +3796,21 @@ void RackView::pollPluginGuiEdits(bool forceFlushPending) {
             refreshGuiParamBaseline(slot);
         }
 
+        if (hasGuiEdit && editedParamId != 0xFFFFFFFFu) {
+            float curVal = pluginInst->getParameterValue(editedParamId);
+            slot->setParameter(editedParamId, curVal);
+        }
+
         // Also detect parameter changes made directly inside an open plugin GUI window
-        // even if the plugin does not invoke IComponentHandler::performEdit/endEdit.
-        if ((isWindowOpen || hasGuiEdit) && !ImGui::IsAnyItemActive()) {
+        // or when an all-parameters change event (e.g. preset change) was signaled.
+        if ((isWindowOpen || (hasGuiEdit && editedParamId == 0xFFFFFFFFu)) && !ImGui::IsAnyItemActive()) {
             auto& baseline = m_guiParamBaseline[slot];
             if (baseline.size() != nParams) {
                 refreshGuiParamBaseline(slot);
             } else {
                 for (size_t p = 0; p < nParams; ++p) {
                     auto desc = pluginInst->getParameterDesc(p);
-                    const float curVal = pluginInst->getParameterValue(desc.id);
+                    const float curVal = desc.currentValue;
                     if (std::abs(curVal - baseline[p]) > 1e-4f) {
                         baseline[p] = curVal;
                         slot->setParameter(desc.id, curVal);
@@ -3893,6 +4126,89 @@ void RackView::moveSlot(int srcIdx, int srcBlockIdx, int srcBranchIdx,
         "Move " + slotName,
         state::UndoActionType::StructuralMutation
     );
+}
+
+void RackView::renderHotkeyLegendOverlay() {
+    const auto& tokens = themeTokens();
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    if (!vp) return;
+
+    const float overlayW = 440.0f;
+    const ImVec2 anchorPos(vp->Pos.x + vp->Size.x - 14.0f,
+                           vp->Pos.y + vp->Size.y - 42.0f);
+
+    ImGui::SetNextWindowPos(anchorPos, ImGuiCond_Always, ImVec2(1.0f, 1.0f));
+    ImGui::SetNextWindowSize(ImVec2(overlayW, 0.0f), ImGuiCond_Always);
+
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, tokens.surfaces.popupBg.vec4);
+    ImGui::PushStyleColor(ImGuiCol_Border, tokens.borders.focus.vec4);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.5f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.0f, 12.0f));
+
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar |
+                                   ImGuiWindowFlags_NoResize |
+                                   ImGuiWindowFlags_NoMove |
+                                   ImGuiWindowFlags_NoScrollbar |
+                                   ImGuiWindowFlags_NoFocusOnAppearing |
+                                   ImGuiWindowFlags_AlwaysAutoResize;
+
+    if (ImGui::Begin("##HotkeyLegendOverlayWindow", nullptr, flags)) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(tokens.text.accent.vec4, "KEYBOARD SHORTCUTS");
+
+        ImGui::SameLine();
+        ImGui::TextDisabled("(Hold Alt or toggle ⌨)");
+
+        if (m_showHotkeyLegend) {
+            ImGui::SameLine(ImGui::GetWindowWidth() - 32.0f);
+            if (ImGui::SmallButton("x")) {
+                m_showHotkeyLegend = false;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Dismiss Hotkey Legend");
+            }
+        }
+
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        auto renderKeyRow = [&](const char* keys, const char* desc) {
+            ImGui::TableNextRow(ImGuiTableRowFlags_None, Spec::tableCompactRowHeight());
+            ImGui::TableNextColumn();
+            Spec::alignTableCellCenter(ImGui::GetFontSize(), Spec::tableCompactRowHeight());
+            if (g_fontMono) ImGui::PushFont(g_fontMono);
+            ImGui::TextColored(tokens.text.accent.vec4, "%s", keys);
+            if (g_fontMono) ImGui::PopFont();
+            ImGui::TableNextColumn();
+            Spec::alignTableCellCenter(ImGui::GetFontSize(), Spec::tableCompactRowHeight());
+            ImGui::TextUnformatted(desc);
+        };
+
+        if (ImGui::BeginTable("##HotkeyTable", 2, ImGuiTableFlags_None)) {
+            ImGui::TableSetupColumn("Key", ImGuiTableColumnFlags_WidthFixed, 140.0f);
+            ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthStretch);
+
+            renderKeyRow("Ctrl + Z", "Undo last parameter or slot edit");
+            renderKeyRow("Ctrl + Y / Shift+Z", "Redo last action");
+            renderKeyRow("Ctrl + Shift + R", "Save retroactive riff (WAV)");
+            renderKeyRow("Ctrl + P / Q", "Spotlight plugin browser & search");
+            renderKeyRow("Ctrl + E", "Export signal chain as DAW preset");
+            renderKeyRow("Ctrl + M", "Toggle MIDI learn mapping mode");
+            renderKeyRow("Ctrl + K", "Toggle key mapping mode");
+            renderKeyRow("1 - 8", "Recall preset scenes 1 through 8");
+            renderKeyRow("[  /  ]", "Switch adjacent preset scene");
+            renderKeyRow("0", "Bypass / activate selected plugin");
+            renderKeyRow("Esc", "Close active popup / cancel mode");
+            renderKeyRow("Alt", "Hold to show this shortcut legend");
+
+            ImGui::EndTable();
+        }
+    }
+    ImGui::End();
+
+    ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor(2);
 }
 
 } // namespace praccy::ui

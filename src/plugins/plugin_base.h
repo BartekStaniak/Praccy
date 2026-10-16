@@ -122,6 +122,7 @@ public:
         m_faulted.store(false, std::memory_order_release);
         m_faultReason.store(nullptr, std::memory_order_release);
     }
+    virtual void handleMainThreadCallbacks() noexcept {}
 
 protected:
     std::atomic<bool> m_faulted{false};

@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <algorithm>
+#include "tuner_settings.h"
 
 namespace praccy::tools {
 
@@ -18,6 +19,9 @@ struct TunerResult {
     std::string noteName;      // e.g. "E2", "A2", "D3", "G3", "B3", "E4"
     float centDeviation{0.0f}; // [-50.0, +50.0] cents
     bool confidence{false};
+    int matchedStringIndex{-1}; // 0-indexed string (0 = String 1), -1 if none
+    float targetFrequencyHz{0.0f};
+    float stringCentDeviation{0.0f};
 };
 
 /**
@@ -87,6 +91,22 @@ public:
     [[nodiscard]] bool isEnabled() const noexcept { return m_enabled.load(std::memory_order_relaxed); }
     void setEnabled(bool enabled) noexcept { m_enabled.store(enabled, std::memory_order_relaxed); }
 
+    void setA4Reference(float freqHz) noexcept {
+        float clamped = std::clamp(freqHz, 300.0f, 600.0f);
+        m_a4Reference.store(clamped, std::memory_order_relaxed);
+        m_config.a4ReferenceHz = clamped;
+    }
+    [[nodiscard]] float a4Reference() const noexcept {
+        return m_a4Reference.load(std::memory_order_relaxed);
+    }
+
+    void setConfig(const TunerConfig& cfg) {
+        m_config = cfg;
+        m_a4Reference.store(cfg.a4ReferenceHz, std::memory_order_relaxed);
+    }
+    [[nodiscard]] const TunerConfig& config() const noexcept { return m_config; }
+    [[nodiscard]] TunerConfig& config() noexcept { return m_config; }
+
 private:
     void workerLoop();
     void detectPitchYin();
@@ -96,6 +116,8 @@ private:
     uint32_t m_maxBlockSize{4096};
     double m_sampleRate{48000.0};
     std::atomic<bool> m_enabled{true};
+    std::atomic<float> m_a4Reference{440.0f};
+    TunerConfig m_config;
 
     // Lock-free ingestion ring buffer
     AudioRingBuffer m_ringBuffer;

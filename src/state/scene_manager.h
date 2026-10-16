@@ -79,6 +79,7 @@ struct NodePreset {
 
 struct ScenePreset {
     std::string name;
+    std::string category;               // e.g. "High Gain Metal", "Glassy Clean", or custom category
     std::string sourceDawName{"Praccy"}; // "Praccy", "Reaper", "Ableton", "Bitwig", "StudioOne"
 
     // Host Transport Context (for tempo-synced delays, tremolos, and modulations)
@@ -106,6 +107,9 @@ public:
     bool loadPresetChain(const std::string& name, audio::GraphEngine& graph);
     [[nodiscard]] std::vector<std::string> savedPresetNames() const;
     [[nodiscard]] const ScenePreset* findUserPreset(const std::string& name) const;
+    [[nodiscard]] std::string presetCategory(const std::string& name) const;
+    void setPresetCategory(const std::string& name, const std::string& category);
+    [[nodiscard]] std::vector<std::string> allPresetCategories() const;
 
     [[nodiscard]] int activeSceneIndex() const noexcept { return m_activeSceneIndex; }
     void setActiveSceneIndex(int idx) noexcept { m_activeSceneIndex = idx; }

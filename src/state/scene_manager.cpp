@@ -53,8 +53,7 @@ static void captureSlotToPreset(audio::PluginSlot* slot, PluginSlotPreset& sp) {
         sp.paramValues.reserve(nParams);
         for (size_t p = 0; p < nParams; ++p) {
             auto desc = inner->getParameterDesc(p);
-            float val = inner->getParameterValue(desc.id);
-            sp.paramValues.push_back(PluginSlotPreset::ParamValue{desc.id, val});
+            sp.paramValues.push_back(PluginSlotPreset::ParamValue{desc.id, desc.currentValue});
         }
     }
 
@@ -94,12 +93,15 @@ static void applyPresetToSlot(const PluginSlotPreset& sp, audio::PluginSlot* slo
 
     if (!sp.state.empty() && inner) {
         inner->loadState(sp.state);
+    } else if (!sp.paramValues.empty() && inner) {
+        for (const auto& pv : sp.paramValues) {
+            inner->setParameterValue(pv.paramId, pv.value);
+        }
     }
 
-    if (!sp.paramValues.empty() && inner) {
+    if (!sp.paramValues.empty()) {
         for (const auto& pv : sp.paramValues) {
             slot->setParameter(pv.paramId, pv.value);
-            inner->setParameterValue(pv.paramId, pv.value);
         }
     }
 
@@ -511,7 +513,13 @@ void SceneManager::savePresetChain(const std::string& name, audio::GraphEngine& 
         return p.name == name;
     });
 
+    std::string existingCat;
+    if (it != m_userPresets.end()) {
+        existingCat = it->category;
+    }
+
     ScenePreset newPreset = captureGraphSnapshot(graph, name);
+    newPreset.category = existingCat;
     if (it != m_userPresets.end()) {
         *it = std::move(newPreset);
     } else {
@@ -578,6 +586,44 @@ const ScenePreset* SceneManager::findUserPreset(const std::string& name) const {
     return nullptr;
 }
 
+std::string SceneManager::presetCategory(const std::string& name) const {
+    for (const auto& p : m_userPresets) {
+        if (p.name == name) {
+            return p.category;
+        }
+    }
+    return "";
+}
+
+void SceneManager::setPresetCategory(const std::string& name, const std::string& category) {
+    for (auto& p : m_userPresets) {
+        if (p.name == name) {
+            p.category = category;
+            saveToFile();
+            return;
+        }
+    }
+}
+
+std::vector<std::string> SceneManager::allPresetCategories() const {
+    std::vector<std::string> cats = {
+        "High Gain Metal",
+        "Glassy Clean",
+        "Ambient FX",
+        "Edge of Breakup"
+    };
+    for (const auto& p : m_userPresets) {
+        if (!p.category.empty()) {
+            bool found = false;
+            for (const auto& c : cats) {
+                if (c == p.category) { found = true; break; }
+            }
+            if (!found) cats.push_back(p.category);
+        }
+    }
+    return cats;
+}
+
 void SceneManager::initializeDefaultUserPresets() {
     // Purge obsolete raw test presets ("ss", "aa", "b") from prior iterations
     m_userPresets.erase(std::remove_if(m_userPresets.begin(), m_userPresets.end(), [](const ScenePreset& p) {
@@ -601,6 +647,7 @@ void SceneManager::initializeDefaultUserPresets() {
     {
         ScenePreset p;
         p.name = "Modern High Gain Djent";
+        p.category = "High Gain Metal";
         p.nodes.push_back(NodePreset{
             .kind = NodePreset::Kind::Plugin,
             .slot = PluginSlotPreset{.name = "Praccy Drive", .path = "builtin://drive", .type = "BuiltIn", .dryWet = 1.0f}
@@ -616,6 +663,7 @@ void SceneManager::initializeDefaultUserPresets() {
     {
         ScenePreset p;
         p.name = "California Glassy Clean";
+        p.category = "Glassy Clean";
         p.nodes.push_back(NodePreset{
             .kind = NodePreset::Kind::Plugin,
             .slot = PluginSlotPreset{.name = "Praccy Amp Sim", .path = "builtin://amp", .type = "BuiltIn", .dryWet = 1.0f}
@@ -631,6 +679,7 @@ void SceneManager::initializeDefaultUserPresets() {
     {
         ScenePreset p;
         p.name = "Edge of Breakup Crunch";
+        p.category = "Edge of Breakup";
         p.nodes.push_back(NodePreset{
             .kind = NodePreset::Kind::Plugin,
             .slot = PluginSlotPreset{.name = "Praccy Drive", .path = "builtin://drive", .type = "BuiltIn", .dryWet = 0.60f}
@@ -646,6 +695,7 @@ void SceneManager::initializeDefaultUserPresets() {
     {
         ScenePreset p;
         p.name = "Post-Rock Ambient FX";
+        p.category = "Ambient FX";
         NodePreset split;
         split.kind = NodePreset::Kind::ParallelBlock;
         BranchPreset bA;
@@ -664,6 +714,7 @@ void SceneManager::initializeDefaultUserPresets() {
     {
         ScenePreset p;
         p.name = "Heavy Metal Shred Lead";
+        p.category = "High Gain Metal";
         p.nodes.push_back(NodePreset{
             .kind = NodePreset::Kind::Plugin,
             .slot = PluginSlotPreset{.name = "Praccy Drive", .path = "builtin://drive", .type = "BuiltIn", .dryWet = 0.90f}
@@ -683,6 +734,7 @@ void SceneManager::initializeDefaultUserPresets() {
     {
         ScenePreset p;
         p.name = "Liquid Chime Clean";
+        p.category = "Glassy Clean";
         p.nodes.push_back(NodePreset{
             .kind = NodePreset::Kind::Plugin,
             .slot = PluginSlotPreset{.name = "Praccy Amp Sim", .path = "builtin://amp", .type = "BuiltIn", .dryWet = 1.0f}
@@ -698,6 +750,7 @@ void SceneManager::initializeDefaultUserPresets() {
     {
         ScenePreset p;
         p.name = "Texas Blues Overdrive";
+        p.category = "Edge of Breakup";
         p.nodes.push_back(NodePreset{
             .kind = NodePreset::Kind::Plugin,
             .slot = PluginSlotPreset{.name = "Praccy Drive", .path = "builtin://drive", .type = "BuiltIn", .dryWet = 0.45f}
@@ -713,6 +766,7 @@ void SceneManager::initializeDefaultUserPresets() {
     {
         ScenePreset p;
         p.name = "Cosmic Wash Shimmer";
+        p.category = "Ambient FX";
         p.nodes.push_back(NodePreset{
             .kind = NodePreset::Kind::Plugin,
             .slot = PluginSlotPreset{.name = "Praccy Amp Sim", .path = "builtin://amp", .type = "BuiltIn", .dryWet = 1.0f}
@@ -728,6 +782,9 @@ void SceneManager::initializeDefaultUserPresets() {
 static void serializePreset(std::ostream& os, const ScenePreset& p, const std::string& sectionPrefix) {
     os << "[" << sectionPrefix << "]\n";
     os << "name=" << p.name << "\n";
+    if (!p.category.empty()) {
+        os << "category=" << p.category << "\n";
+    }
     os << "numNodes=" << p.nodes.size() << "\n";
     for (size_t n = 0; n < p.nodes.size(); ++n) {
         const auto& node = p.nodes[n];
@@ -873,6 +930,8 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
         ScenePreset sp;
         auto itName = kv.find("name");
         if (itName != kv.end()) sp.name = itName->second;
+        auto itCat = kv.find("category");
+        if (itCat != kv.end()) sp.category = itCat->second;
         auto itNodes = kv.find("numNodes");
         size_t count = (itNodes != kv.end()) ? praccy::utils::parseInteger<size_t>(itNodes->second, 0) : 0;
 

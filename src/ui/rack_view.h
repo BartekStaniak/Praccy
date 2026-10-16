@@ -12,6 +12,7 @@
 #include "modals/plugin_browser_modal.h"
 #include "modals/settings_modal.h"
 #include "modals/practice_tools_modal.h"
+#include "modals/tuner_settings_modal.h"
 #include "modals/export_daw_chain_modal.h"
 #include "../state/undo_manager.h"
 #include "../audio/retroactive_buffer.h"
@@ -66,6 +67,8 @@ public:
     state::AppConfig::RackViewMode getRackViewMode() const noexcept { return m_rackViewMode; }
     void setRackViewMode(state::AppConfig::RackViewMode mode) noexcept { m_rackViewMode = mode; }
 
+    void applyAudioSettings(double sampleRate, uint32_t bufferSize);
+
 private:
     bool renderStatusPill(bool isRunning, const char* statusText);
     void renderPracticeRibbon();
@@ -80,6 +83,7 @@ private:
     void renderUpdateModal();
     void renderFloatingHudToast();
     void renderPresetBrowserModal();
+    void renderHotkeyLegendOverlay();
 
     void cycleAdjacentScenePreset(int delta);
     void initMacrosForSlot(audio::PluginSlot* slot);
@@ -101,6 +105,7 @@ private:
     std::unique_ptr<PluginBrowserModal> m_pluginBrowserModal;
     std::unique_ptr<SettingsModal> m_settingsModal;
     std::unique_ptr<PracticeToolsModal> m_practiceToolsModal;
+    std::unique_ptr<TunerSettingsModal> m_tunerSettingsModal;
     ExportDawChainModal m_exportDawModal;
 
     std::atomic<float>* m_dspLoadPercent{nullptr};
@@ -146,6 +151,7 @@ private:
 
     bool m_midiMapMode{false};
     bool m_keyMapMode{false};
+    bool m_showHotkeyLegend{false};
     audio::PluginSlot* m_focusedSlot{nullptr};
     int m_focusedSlotIndex{-1};
     state::AppConfig::RackViewMode m_rackViewMode{state::AppConfig::RackViewMode::Modular};

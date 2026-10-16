@@ -81,6 +81,8 @@ private:
     HWND m_guiParentHwnd{nullptr};
     double m_sampleRate{48000.0};
     uint32_t m_maxBlockSize{256};
+    mutable int m_preferredWidth{850};
+    mutable int m_preferredHeight{600};
 
     FastParameterChanges m_inputParamChanges;
     moodycamel::ReaderWriterQueue<std::pair<Steinberg::Vst::ParamID, double>> m_paramQueue{128};
@@ -88,6 +90,8 @@ private:
     std::atomic<bool> m_suppressHandlerCallbacks{false};
 
     mutable std::mutex m_paramCacheMutex;
+    mutable std::vector<PluginParameterDesc> m_paramDescs;
+    mutable std::unordered_map<uint32_t, size_t> m_paramIdToIndex;
     mutable std::unordered_map<uint32_t, float> m_paramCache;
 
     struct Impl;

@@ -16,6 +16,32 @@ bool CLAP_ABI clapOutputEventsTryPush(const clap_output_events_t* list, const cl
     return true;
 }
 
+struct Win32TimerRecord {
+    ClapPluginInstance* instance{nullptr};
+    clap_id clapTimerId{0};
+    UINT_PTR timerId{0};
+};
+
+std::mutex s_timerMutex;
+std::unordered_map<UINT_PTR, Win32TimerRecord> s_win32Timers;
+clap_id s_nextClapTimerId = 1;
+
+VOID CALLBACK clapTimerCallback(HWND /*hwnd*/, UINT /*uMsg*/, UINT_PTR idEvent, DWORD /*dwTime*/) {
+    ClapPluginInstance* inst = nullptr;
+    clap_id cTimerId = 0;
+    {
+        std::lock_guard<std::mutex> lock(s_timerMutex);
+        auto it = s_win32Timers.find(idEvent);
+        if (it != s_win32Timers.end()) {
+            inst = it->second.instance;
+            cTimerId = it->second.clapTimerId;
+        }
+    }
+    if (inst) {
+        inst->fireTimer(cTimerId);
+    }
+}
+
 } // anonymous namespace
 
 const void* ClapPluginInstance::clapHostGetExtension(const clap_host* /*host*/, const char* extensionId) {
@@ -34,17 +60,191 @@ const void* ClapPluginInstance::clapHostGetExtension(const clap_host* /*host*/, 
         };
         return &s_hostState;
     }
+    if (std::strcmp(extensionId, CLAP_EXT_THREAD_CHECK) == 0) {
+        static const clap_host_thread_check s_hostThreadCheck{
+            &ClapPluginInstance::clapHostThreadCheckIsMainThread,
+            &ClapPluginInstance::clapHostThreadCheckIsAudioThread
+        };
+        return &s_hostThreadCheck;
+    }
+    if (std::strcmp(extensionId, CLAP_EXT_AUDIO_PORTS) == 0) {
+        static const clap_host_audio_ports s_hostAudioPorts{
+            &ClapPluginInstance::clapHostAudioPortsIsRescanFlagSupported,
+            &ClapPluginInstance::clapHostAudioPortsRescan
+        };
+        return &s_hostAudioPorts;
+    }
+    if (std::strcmp(extensionId, CLAP_EXT_LATENCY) == 0) {
+        static const clap_host_latency s_hostLatency{
+            &ClapPluginInstance::clapHostLatencyChanged
+        };
+        return &s_hostLatency;
+    }
+    if (std::strcmp(extensionId, CLAP_EXT_LOG) == 0) {
+        static const clap_host_log s_hostLog{
+            &ClapPluginInstance::clapHostLog
+        };
+        return &s_hostLog;
+    }
+    if (std::strcmp(extensionId, CLAP_EXT_GUI) == 0) {
+        static const clap_host_gui s_hostGui{
+            &ClapPluginInstance::clapHostGuiResizeHintsChanged,
+            &ClapPluginInstance::clapHostGuiRequestResize,
+            &ClapPluginInstance::clapHostGuiRequestShow,
+            &ClapPluginInstance::clapHostGuiRequestHide,
+            &ClapPluginInstance::clapHostGuiClosed
+        };
+        return &s_hostGui;
+    }
+    if (std::strcmp(extensionId, CLAP_EXT_TIMER_SUPPORT) == 0) {
+        static const clap_host_timer_support s_hostTimer{
+            &ClapPluginInstance::clapHostRegisterTimer,
+            &ClapPluginInstance::clapHostUnregisterTimer
+        };
+        return &s_hostTimer;
+    }
     return nullptr;
 }
 
 void ClapPluginInstance::clapHostRequestRestart(const clap_host* host) {
     if (!host || !host->host_data) return;
     auto* self = static_cast<ClapPluginInstance*>(host->host_data);
+    self->m_restartRequested.store(true, std::memory_order_release);
     self->notifyGuiParamEdited(0xFFFFFFFFu, true);
 }
 
 void ClapPluginInstance::clapHostRequestProcess(const clap_host* /*host*/) {}
-void ClapPluginInstance::clapHostRequestCallback(const clap_host* /*host*/) {}
+
+void ClapPluginInstance::clapHostRequestCallback(const clap_host* host) {
+    if (!host || !host->host_data) return;
+    auto* self = static_cast<ClapPluginInstance*>(host->host_data);
+    if (GetCurrentThreadId() == self->m_mainThreadId) {
+        if (self->m_plugin && self->m_plugin->on_main_thread) {
+            safeCallPlugin([&]() {
+                self->m_plugin->on_main_thread(self->m_plugin);
+            });
+        }
+    } else {
+        self->m_callbackRequested.store(true, std::memory_order_release);
+    }
+}
+
+bool CLAP_ABI ClapPluginInstance::clapHostThreadCheckIsMainThread(const clap_host_t* host) {
+    if (!host || !host->host_data) return false;
+    auto* self = static_cast<ClapPluginInstance*>(host->host_data);
+    return GetCurrentThreadId() == self->m_mainThreadId;
+}
+
+bool CLAP_ABI ClapPluginInstance::clapHostThreadCheckIsAudioThread(const clap_host_t* host) {
+    if (!host || !host->host_data) return false;
+    auto* self = static_cast<ClapPluginInstance*>(host->host_data);
+    return GetCurrentThreadId() == self->m_audioThreadId.load(std::memory_order_relaxed);
+}
+
+bool CLAP_ABI ClapPluginInstance::clapHostAudioPortsIsRescanFlagSupported(const clap_host_t* /*host*/, uint32_t /*flag*/) {
+    return false;
+}
+
+void CLAP_ABI ClapPluginInstance::clapHostAudioPortsRescan(const clap_host_t* /*host*/, uint32_t /*flags*/) {}
+
+void CLAP_ABI ClapPluginInstance::clapHostLatencyChanged(const clap_host_t* host) {
+    if (!host || !host->host_data) return;
+    auto* self = static_cast<ClapPluginInstance*>(host->host_data);
+    if (self->m_latencyExt && self->m_plugin && self->m_isActivated) {
+        self->m_latencySamples = self->m_latencyExt->get(self->m_plugin);
+    }
+}
+
+void CLAP_ABI ClapPluginInstance::clapHostLog(const clap_host_t* /*host*/, clap_log_severity severity, const char* msg) {
+    if (severity >= CLAP_LOG_WARNING) {
+        std::cerr << "[CLAP Log] " << (msg ? msg : "") << std::endl;
+    }
+}
+
+void CLAP_ABI ClapPluginInstance::clapHostGuiResizeHintsChanged(const clap_host_t* /*host*/) {}
+
+bool CLAP_ABI ClapPluginInstance::clapHostGuiRequestResize(const clap_host_t* host, uint32_t width, uint32_t height) {
+    if (!host || !host->host_data) return false;
+    auto* self = static_cast<ClapPluginInstance*>(host->host_data);
+    if (self->m_guiParentHwnd && IsWindow(self->m_guiParentHwnd)) {
+        RECT wr = {0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
+        AdjustWindowRectEx(&wr, WS_OVERLAPPEDWINDOW, FALSE, WS_EX_APPWINDOW | WS_EX_TOPMOST);
+        SetWindowPos(self->m_guiParentHwnd, nullptr, 0, 0, wr.right - wr.left, wr.bottom - wr.top, SWP_NOMOVE | SWP_NOZORDER);
+        return true;
+    }
+    return false;
+}
+
+bool CLAP_ABI ClapPluginInstance::clapHostGuiRequestShow(const clap_host_t* /*host*/) { return true; }
+bool CLAP_ABI ClapPluginInstance::clapHostGuiRequestHide(const clap_host_t* /*host*/) { return true; }
+void CLAP_ABI ClapPluginInstance::clapHostGuiClosed(const clap_host_t* /*host*/, bool /*was_destroyed*/) {}
+
+bool CLAP_ABI ClapPluginInstance::clapHostRegisterTimer(const clap_host_t* host, uint32_t period_ms, clap_id* timer_id) {
+    if (!host || !host->host_data || !timer_id) return false;
+    auto* self = static_cast<ClapPluginInstance*>(host->host_data);
+    UINT period = std::max(10u, period_ms);
+    UINT_PTR tid = SetTimer(nullptr, 0, period, &clapTimerCallback);
+    if (!tid) return false;
+
+    clap_id cId = 0;
+    {
+        std::lock_guard<std::mutex> lock(s_timerMutex);
+        cId = s_nextClapTimerId++;
+        s_win32Timers[tid] = Win32TimerRecord{self, cId, tid};
+        self->m_activeTimers[cId] = tid;
+    }
+    *timer_id = cId;
+    return true;
+}
+
+bool CLAP_ABI ClapPluginInstance::clapHostUnregisterTimer(const clap_host_t* host, clap_id timer_id) {
+    if (!host || !host->host_data) return false;
+    auto* self = static_cast<ClapPluginInstance*>(host->host_data);
+    std::lock_guard<std::mutex> lock(s_timerMutex);
+    auto it = self->m_activeTimers.find(timer_id);
+    if (it != self->m_activeTimers.end()) {
+        KillTimer(nullptr, it->second);
+        s_win32Timers.erase(it->second);
+        self->m_activeTimers.erase(it);
+        return true;
+    }
+    return false;
+}
+
+void ClapPluginInstance::fireTimer(clap_id timerId) {
+    if (m_timerExt && m_plugin && !m_faulted.load(std::memory_order_relaxed)) {
+        safeCallPlugin([&]() {
+            m_timerExt->on_timer(m_plugin, timerId);
+        });
+    }
+}
+
+void ClapPluginInstance::handleMainThreadCallbacks() noexcept {
+    if (m_restartRequested.exchange(false, std::memory_order_acq_rel)) {
+        if (m_plugin && m_isActivated) {
+            safeCallPlugin([&]() {
+                if (m_isProcessing.load(std::memory_order_acquire)) {
+                    m_plugin->stop_processing(m_plugin);
+                    m_isProcessing.store(false, std::memory_order_release);
+                }
+                m_plugin->deactivate(m_plugin);
+                m_isActivated = false;
+                if (m_sampleRate > 0.0 && m_maxBlockSize > 0) {
+                    if (m_plugin->activate(m_plugin, m_sampleRate, 1, m_maxBlockSize)) {
+                        m_isActivated = true;
+                    }
+                }
+            });
+        }
+    }
+    if (m_callbackRequested.exchange(false, std::memory_order_acq_rel)) {
+        if (m_plugin && m_plugin->on_main_thread) {
+            safeCallPlugin([&]() {
+                m_plugin->on_main_thread(m_plugin);
+            });
+        }
+    }
+}
 
 void CLAP_ABI ClapPluginInstance::clapHostParamsRescan(const clap_host_t* host, clap_param_rescan_flags flags) {
     if (!host || !host->host_data) return;
@@ -96,6 +296,11 @@ void ClapPluginInstance::onPluginOutputEvent(const clap_event_header_t* event) n
 
 void ClapPluginInstance::flushPendingParamsIfStopped() {
     if (!m_plugin || !m_paramsExt || !m_paramsExt->flush || m_faulted.load(std::memory_order_relaxed)) {
+        return;
+    }
+    // According to CLAP specification [active ? audio-thread : main-thread]:
+    // If active, flush MUST NOT be called from main thread.
+    if (m_isActivated) {
         return;
     }
     if (m_isProcessing.load(std::memory_order_acquire)) {
@@ -181,6 +386,13 @@ std::unique_ptr<ClapPluginInstance> ClapPluginInstance::loadFromFile(const std::
         return nullptr;
     }
 
+    if (!clap_version_is_compatible(entry->clap_version)) {
+        std::cerr << "Incompatible CLAP version in: " << path << "\n";
+        entry->deinit();
+        FreeLibrary(hLib);
+        return nullptr;
+    }
+
     auto instance = std::unique_ptr<ClapPluginInstance>(new ClapPluginInstance());
     instance->m_libraryModule = hLib;
     instance->m_entry = entry;
@@ -190,6 +402,7 @@ std::unique_ptr<ClapPluginInstance> ClapPluginInstance::loadFromFile(const std::
     instance->m_name = desc->name ? desc->name : "CLAP Plugin";
     instance->m_vendor = desc->vendor ? desc->vendor : "Unknown";
     instance->m_version = desc->version ? desc->version : "1.0.0";
+    instance->m_mainThreadId = GetCurrentThreadId();
 
     instance->m_host.clap_version = CLAP_VERSION;
     instance->m_host.host_data = instance.get();
@@ -223,9 +436,12 @@ std::unique_ptr<ClapPluginInstance> ClapPluginInstance::loadFromFile(const std::
     instance->m_paramsExt = static_cast<const clap_plugin_params*>(instance->m_plugin->get_extension(instance->m_plugin, CLAP_EXT_PARAMS));
     instance->m_stateExt = static_cast<const clap_plugin_state*>(instance->m_plugin->get_extension(instance->m_plugin, CLAP_EXT_STATE));
     instance->m_latencyExt = static_cast<const clap_plugin_latency*>(instance->m_plugin->get_extension(instance->m_plugin, CLAP_EXT_LATENCY));
+    instance->m_audioPortsExt = static_cast<const clap_plugin_audio_ports*>(instance->m_plugin->get_extension(instance->m_plugin, CLAP_EXT_AUDIO_PORTS));
+    instance->m_timerExt = static_cast<const clap_plugin_timer_support*>(instance->m_plugin->get_extension(instance->m_plugin, CLAP_EXT_TIMER_SUPPORT));
 
-    if (instance->m_latencyExt) {
-        instance->m_latencySamples = instance->m_latencyExt->get(instance->m_plugin);
+    if (instance->m_audioPortsExt && instance->m_audioPortsExt->count) {
+        instance->m_numAudioInputs = instance->m_audioPortsExt->count(instance->m_plugin, true);
+        instance->m_numAudioOutputs = instance->m_audioPortsExt->count(instance->m_plugin, false);
     }
 
     if (instance->m_paramsExt) {
@@ -245,6 +461,14 @@ std::unique_ptr<ClapPluginInstance> ClapPluginInstance::loadFromFile(const std::
 
 ClapPluginInstance::~ClapPluginInstance() {
     closeGui();
+    {
+        std::lock_guard<std::mutex> lock(s_timerMutex);
+        for (auto& [cId, tid] : m_activeTimers) {
+            KillTimer(nullptr, tid);
+            s_win32Timers.erase(tid);
+        }
+        m_activeTimers.clear();
+    }
     if (m_plugin) {
         if (m_isProcessing.load(std::memory_order_acquire)) {
             m_plugin->stop_processing(m_plugin);
@@ -268,6 +492,8 @@ ClapPluginInstance::~ClapPluginInstance() {
 }
 
 void ClapPluginInstance::prepare(double sampleRate, uint32_t maxBlockSize) {
+    m_sampleRate = sampleRate;
+    m_maxBlockSize = maxBlockSize;
     if (m_plugin) {
         if (m_isProcessing.load(std::memory_order_acquire)) {
             m_plugin->stop_processing(m_plugin);
@@ -280,7 +506,7 @@ void ClapPluginInstance::prepare(double sampleRate, uint32_t maxBlockSize) {
         if (m_plugin->activate(m_plugin, sampleRate, 1, maxBlockSize)) {
             m_isActivated = true;
         }
-        if (m_latencyExt) {
+        if (m_latencyExt && m_latencyExt->get && m_isActivated) {
             m_latencySamples = m_latencyExt->get(m_plugin);
         }
     }
@@ -326,11 +552,11 @@ void ClapPluginInstance::process(audio::AudioProcessContext& ctx) {
     processData.steady_time = -1;
     processData.frames_count = numSamples;
     processData.transport = nullptr;
-    processData.audio_inputs = &inBuf;
-    processData.audio_outputs = &outBuf;
-    processData.audio_inputs_count = 1;
-    processData.audio_outputs_count = 1;
-    processData.in_events = (m_eventBuffer.count > 0) ? &inEvs : nullptr;
+    processData.audio_inputs = (m_numAudioInputs > 0 && inCh > 0) ? &inBuf : nullptr;
+    processData.audio_outputs = (m_numAudioOutputs > 0 && outCh > 0) ? &outBuf : nullptr;
+    processData.audio_inputs_count = (m_numAudioInputs > 0 && inCh > 0) ? 1 : 0;
+    processData.audio_outputs_count = (m_numAudioOutputs > 0 && outCh > 0) ? 1 : 0;
+    processData.in_events = &inEvs;
     processData.out_events = &outEvs;
 
     DWORD exCode = 0;
@@ -506,8 +732,17 @@ void ClapPluginInstance::closeGui() {
 void ClapPluginInstance::getPreferredSize(int& width, int& height) const {
     if (m_guiExt && m_plugin && !m_faulted.load(std::memory_order_relaxed)) {
         safeCallPlugin([&]() {
+            if (!m_guiCreated) {
+                if (m_guiExt->is_api_supported && !m_guiExt->is_api_supported(m_plugin, CLAP_WINDOW_API_WIN32, false)) {
+                    return;
+                }
+                if (m_guiExt->create && !m_guiExt->create(m_plugin, CLAP_WINDOW_API_WIN32, false)) {
+                    return;
+                }
+                const_cast<ClapPluginInstance*>(this)->m_guiCreated = true;
+            }
             uint32_t w = 850, h = 600;
-            if (m_guiExt->get_size(m_plugin, &w, &h)) {
+            if (m_guiExt->get_size && m_guiExt->get_size(m_plugin, &w, &h)) {
                 if (w > 100 && h > 100) {
                     width = static_cast<int>(w);
                     height = static_cast<int>(h);
@@ -515,6 +750,20 @@ void ClapPluginInstance::getPreferredSize(int& width, int& height) const {
             }
         });
     }
+}
+
+void ClapPluginInstance::resetFault() noexcept {
+    std::pair<clap_id, double> dummy;
+    while (m_paramQueue.try_dequeue(dummy)) {}
+    while (m_guiOutParamQueue.try_dequeue(dummy)) {}
+    m_eventBuffer.clear();
+    m_isProcessing.store(false, std::memory_order_release);
+    if (m_plugin) {
+        safeCallPlugin([&]() {
+            m_plugin->reset(m_plugin);
+        });
+    }
+    IPluginInstance::resetFault();
 }
 
 std::vector<uint8_t> ClapPluginInstance::saveState() const {

@@ -9,6 +9,10 @@
 #include <atomic>
 #include <thread>
 
+namespace praccy::state {
+struct AppConfig;
+}
+
 namespace praccy::plugins {
 
 enum class PluginType {
@@ -48,7 +52,7 @@ enum class PluginSortMode {
 
 class PluginScanner {
 public:
-    PluginScanner();
+    explicit PluginScanner(const std::string& configPath = "");
     ~PluginScanner();
 
     void scanAll();
@@ -60,6 +64,12 @@ public:
     [[nodiscard]] std::vector<PluginDescriptor> scannedPlugins() const;
     [[nodiscard]] size_t numPlugins() const;
     [[nodiscard]] bool isScanning() const noexcept { return m_isScanning.load(); }
+
+    void addPlugin(const PluginDescriptor& desc);
+    void saveToAppConfig(const std::string& customPath = "") const;
+    void loadFromAppConfig(const std::string& customPath = "");
+    void exportToConfig(state::AppConfig& cfg) const;
+    void loadFromConfig(const state::AppConfig& cfg);
 
     [[nodiscard]] bool isFavorite(const std::string& nameOrPath) const;
     void toggleFavorite(const std::string& nameOrPath);
@@ -99,6 +109,7 @@ private:
     std::atomic<bool> m_isScanning{false};
     std::atomic<bool> m_shouldStop{false};
     std::thread m_scanThread;
+    std::string m_configPath;
 };
 
 } // namespace praccy::plugins

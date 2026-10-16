@@ -193,17 +193,17 @@ void PracticeToolsModal::renderLooperTab() {
         actionLabel = "Record [New Loop]";
     }
 
-    if (CenteredButton(actionLabel, ImVec2(180, 32))) {
+    if (CenteredButton(actionLabel, ImVec2(180, Metrics::buttonHeight()))) {
         m_looper.triggerAction();
     }
 
     ImGui::SameLine(0, 10);
-    if (CenteredButton("Stop", ImVec2(80, 32))) {
+    if (CenteredButton("Stop", ImVec2(80, Metrics::buttonHeight()))) {
         m_looper.stop();
     }
 
     ImGui::SameLine(0, 10);
-    if (CenteredButton("Clear", ImVec2(80, 32))) {
+    if (CenteredButton("Clear", ImVec2(80, Metrics::buttonHeight()))) {
         m_looper.clear();
     }
 
@@ -214,14 +214,14 @@ void PracticeToolsModal::renderLooperTab() {
     const bool canRedo = m_looper.canRedo();
 
     if (!canUndo) ImGui::BeginDisabled();
-    if (CenteredButton("Undo Layer", ImVec2(96, 26))) {
+    if (CenteredButton("Undo Layer", ImVec2(96, Metrics::buttonHeight()))) {
         m_looper.undo();
     }
     if (!canUndo) ImGui::EndDisabled();
 
     ImGui::SameLine(0, 8);
     if (!canRedo) ImGui::BeginDisabled();
-    if (CenteredButton("Redo Layer", ImVec2(96, 26))) {
+    if (CenteredButton("Redo Layer", ImVec2(96, Metrics::buttonHeight()))) {
         m_looper.redo();
     }
     if (!canRedo) ImGui::EndDisabled();
@@ -266,7 +266,7 @@ void PracticeToolsModal::renderBackingTrackTab() {
     ImGui::SetNextItemWidth(inputW);
     ImGui::InputTextWithHint("##AudioTrackPath", "Path to .wav file or drag-and-drop onto Praccy...", m_audioFilePathBuffer, sizeof(m_audioFilePathBuffer));
     ImGui::SameLine(0, 8);
-    if (CenteredButton("Load", ImVec2(70, 24))) {
+    if (CenteredButton("Load", ImVec2(70, Metrics::buttonHeight()))) {
         if (m_audioFilePathBuffer[0] != '\0') {
             m_player.loadWavFile(m_audioFilePathBuffer);
         }
@@ -311,17 +311,17 @@ void PracticeToolsModal::renderBackingTrackTab() {
         // Transport Controls
         bool isPlaying = m_player.isPlaying();
         if (isPlaying) {
-            if (CenteredButton("Pause##Player", ImVec2(90, 28))) {
+            if (CenteredButton("Pause##Player", ImVec2(90, Metrics::buttonHeight()))) {
                 m_player.pause();
             }
         } else {
-            if (CenteredButton("Play##Player", ImVec2(90, 28))) {
+            if (CenteredButton("Play##Player", ImVec2(90, Metrics::buttonHeight()))) {
                 m_player.play();
             }
         }
 
         ImGui::SameLine(0, 10);
-        if (CenteredButton("Stop##Player", ImVec2(80, 28))) {
+        if (CenteredButton("Stop##Player", ImVec2(80, Metrics::buttonHeight()))) {
             m_player.stop();
         }
 
@@ -361,7 +361,7 @@ void PracticeToolsModal::renderBackingTrackTab() {
         if (g_fontMono) ImGui::PopFont();
 
         ImGui::SameLine(0, 16);
-        if (CenteredButton("Reset Loop Points", ImVec2(130, 22))) {
+        if (CenteredButton("Reset Loop Points", ImVec2(130, Metrics::buttonHeight()))) {
             m_loopStart = 0.0f;
             m_loopEnd = 1.0f;
             m_player.setLoopPoints(0.0f, 1.0f);
@@ -536,20 +536,29 @@ void PracticeToolsModal::renderOverviewWaveformStrip(float stripWidth, float str
 void PracticeToolsModal::render() {
     if (!m_isOpen) return;
 
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    const float initW = vp ? std::clamp(vp->Size.x * 0.70f, 740.0f, 1050.0f) : 760.0f;
+    const float initH = vp ? std::clamp(vp->Size.y * 0.72f, 540.0f, 760.0f) : 560.0f;
+
     ImGui::OpenPopup("Practice Tools##Modal");
-    ImGui::SetNextWindowSize(ImVec2(740, 520), ImGuiCond_Appearing);
-    ImGui::SetNextWindowSizeConstraints(ImVec2(620, 440), ImVec2(1600, 1000));
-    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(initW, initH), ImGuiCond_Appearing);
+    if (vp) {
+        ImGui::SetNextWindowSizeConstraints(ImVec2(640.0f, 460.0f), ImVec2(vp->Size.x * 0.95f, vp->Size.y * 0.95f));
+    }
+    ImGui::SetNextWindowPos(vp ? vp->GetCenter() : ImVec2(100.0f, 100.0f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
 
-    if (ImGui::BeginPopupModal("Practice Tools##Modal", &m_isOpen, ImGuiWindowFlags_None)) {
-        const auto& tokens = themeTokens();
-        ImGui::TextColored(tokens.text.accent.vec4, "PRACTICE SUITE");
-        ImGui::Separator();
-        ImGui::Spacing();
+    const auto& tokens = themeTokens();
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, tokens.surfaces.popupBg.vec4);
+    ImGui::PushStyleColor(ImGuiCol_Border, tokens.borders.subtle.vec4);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, Spec::kModalCornerRadius);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Spec::kModalWindowPadding, Spec::kModalWindowPadding));
 
-        const float footerHeight = 44.0f;
+    if (ImGui::BeginPopupModal("Practice Tools##Modal", &m_isOpen, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
+        const float footerHeight = Metrics::kFooterHeight;
         const float contentHeight = ImGui::GetContentRegionAvail().y - footerHeight;
 
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
         if (ImGui::BeginChild("PracticeToolsContentRegion", ImVec2(0, contentHeight), false)) {
             if (ImGui::BeginTabBar("PracticeToolsTabs")) {
                 if (ImGui::BeginTabItem("Quick Looper")) {
@@ -564,16 +573,20 @@ void PracticeToolsModal::render() {
             }
         }
         ImGui::EndChild();
+        ImGui::PopStyleColor();
 
         ImGui::Separator();
         ImGui::Spacing();
-        if (CenteredButton("Close", ImVec2(90, 26))) {
+        if (CenteredButton("Close", ImVec2(90, Metrics::buttonHeight()))) {
             close();
             ImGui::CloseCurrentPopup();
         }
 
         ImGui::EndPopup();
     }
+
+    ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor(2);
 }
 
 } // namespace praccy::ui

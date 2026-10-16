@@ -7,7 +7,7 @@ if(WIN32)
     endif()
 endif()
 
-project(Praccy VERSION 2.5.0 LANGUAGES CXX C RC)
+project(Praccy VERSION 2.6.0 LANGUAGES CXX C RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -58,6 +58,7 @@ set(PRACCY_SOURCES
     src/ui/modals/plugin_browser_modal.cpp
     src/ui/modals/settings_modal.cpp
     src/ui/modals/practice_tools_modal.cpp
+    src/ui/modals/tuner_settings_modal.cpp
     src/ui/thumbnail_manager.cpp
     src/ui/update_checker.cpp
     src/ui/drag_drop_router.cpp
@@ -143,6 +144,7 @@ add_executable(test_praccy
     src/state/undo_manager.cpp
     src/ui/update_checker.cpp
     src/ui/drag_drop_router.cpp
+    src/ui/modals/tuner_settings_modal.cpp
     src/plugins/plugin_scanner.cpp
     src/utils/archive_utils.cpp
     src/utils/xml_parser.cpp
@@ -617,6 +619,36 @@ else()
 endif()
 add_test(NAME test_challenger_stage1_audio COMMAND test_challenger_stage1_audio)
 
-
-
-
+set(PRACCY_CORE_SOURCES
+    src/audio/asio_manager.cpp
+    src/audio/graph_engine.cpp
+    src/plugins/clap_host.cpp
+    src/plugins/vst3_host.cpp
+    src/plugins/plugin_window.cpp
+    src/plugins/builtin_dsp.cpp
+    src/plugins/plugin_scanner.cpp
+    src/midi/midi_manager.cpp
+    src/tools/tuner.cpp
+    src/tools/metronome.cpp
+    src/tools/audio_player.cpp
+    src/tools/quick_looper.cpp
+    src/state/scene_manager.cpp
+    src/state/app_config.cpp
+    src/state/undo_manager.cpp
+    src/ui/rack_view.cpp
+    src/ui/modals/plugin_browser_modal.cpp
+    src/ui/modals/settings_modal.cpp
+    src/ui/modals/practice_tools_modal.cpp
+    src/ui/thumbnail_manager.cpp
+    src/ui/update_checker.cpp
+    src/ui/drag_drop_router.cpp
+    src/ui/modals/export_daw_chain_modal.cpp
+    src/utils/archive_utils.cpp
+    src/utils/xml_parser.cpp
+    src/state/daw_interop/reaper_adapter.cpp
+    src/state/daw_interop/ableton_adapter.cpp
+    src/state/daw_interop/dawproject_adapter.cpp
+    src/state/daw_interop/vstpreset_adapter.cpp
+    src/state/daw_interop/universal_daw_interop_manager.cpp
+    ${THIRD_PARTY_SOURCES}
+)

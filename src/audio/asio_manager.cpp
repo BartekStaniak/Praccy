@@ -99,9 +99,15 @@ bool AsioManager::loadDriver(const AsioDriverDesc& desc, HWND windowHandle) {
 
     int32_t granularity = 0;
     m_driver->getBufferSize(&m_info.minBufferSize, &m_info.maxBufferSize, &m_info.preferredBufferSize, &granularity);
+    if (m_info.preferredBufferSize <= 0) {
+        m_info.preferredBufferSize = 256;
+    }
     m_info.currentBufferSize = m_info.preferredBufferSize;
 
     m_driver->getSampleRate(&m_info.sampleRate);
+    if (m_info.sampleRate <= 0.0) {
+        m_info.sampleRate = 48000.0;
+    }
 
     // Query channel info
     m_info.inputChannels.resize(inCh);
@@ -133,11 +139,25 @@ void AsioManager::unloadDriver() {
 
 bool AsioManager::start(int32_t bufferSize) {
     if (!m_driver) return false;
-    if (m_isRunning.load()) return true;
 
     if (bufferSize <= 0) {
-        bufferSize = m_info.preferredBufferSize;
+        bufferSize = (m_info.currentBufferSize > 0) ? m_info.currentBufferSize
+                   : (m_info.preferredBufferSize > 0 ? m_info.preferredBufferSize : 256);
     }
+    if (m_info.minBufferSize > 0 && bufferSize < m_info.minBufferSize) {
+        bufferSize = m_info.minBufferSize;
+    }
+    if (m_info.maxBufferSize > 0 && bufferSize > m_info.maxBufferSize) {
+        bufferSize = m_info.maxBufferSize;
+    }
+
+    if (m_isRunning.load(std::memory_order_relaxed)) {
+        if (m_info.currentBufferSize == bufferSize) {
+            return true;
+        }
+        stop();
+    }
+
     m_info.currentBufferSize = bufferSize;
 
     const int32_t totalChannels = m_info.numInputChannels + m_info.numOutputChannels;
@@ -211,7 +231,82 @@ void AsioManager::stop() {
 void AsioManager::openControlPanel() {
     if (m_driver) {
         m_driver->controlPanel();
+        checkHardwareChanges();
     }
+}
+
+bool AsioManager::setBufferSize(int32_t bufferSize) {
+    if (!m_driver || bufferSize <= 0) return false;
+    if (m_info.currentBufferSize == bufferSize && m_isRunning.load(std::memory_order_relaxed)) {
+        return true;
+    }
+    bool wasRunning = m_isRunning.load(std::memory_order_relaxed);
+    if (wasRunning) {
+        stop();
+    }
+    m_info.currentBufferSize = bufferSize;
+    if (wasRunning) {
+        return start(bufferSize);
+    }
+    return true;
+}
+
+bool AsioManager::setSampleRate(double sampleRate) {
+    if (!m_driver || sampleRate <= 0.0) return false;
+    if (m_driver->canSampleRate(sampleRate) != ASE_OK) return false;
+    if (std::abs(m_info.sampleRate - sampleRate) < 1.0) return true;
+
+    bool wasRunning = m_isRunning.load(std::memory_order_relaxed);
+    if (wasRunning) {
+        stop();
+    }
+    ASIOError err = m_driver->setSampleRate(sampleRate);
+    if (err == ASE_OK) {
+        m_info.sampleRate = sampleRate;
+    }
+    if (wasRunning) {
+        start(m_info.currentBufferSize);
+    }
+    return err == ASE_OK;
+}
+
+bool AsioManager::canSampleRate(double sampleRate) const noexcept {
+    if (!m_driver || sampleRate <= 0.0) return false;
+    return m_driver->canSampleRate(sampleRate) == ASE_OK;
+}
+
+bool AsioManager::checkHardwareChanges() {
+    if (!m_driver) return false;
+
+    bool changed = false;
+    double currentSr = m_info.sampleRate;
+    if (m_driver->getSampleRate(&currentSr) == ASE_OK && currentSr > 0.0) {
+        if (std::abs(currentSr - m_info.sampleRate) > 1.0) {
+            m_info.sampleRate = currentSr;
+            changed = true;
+        }
+    }
+
+    int32_t minSz = 0, maxSz = 0, prefSz = 0, gran = 0;
+    if (m_driver->getBufferSize(&minSz, &maxSz, &prefSz, &gran) == ASE_OK) {
+        m_info.minBufferSize = minSz;
+        m_info.maxBufferSize = maxSz;
+        if (prefSz > 0 && prefSz != m_info.preferredBufferSize) {
+            m_info.preferredBufferSize = prefSz;
+            m_info.currentBufferSize = prefSz;
+            changed = true;
+        }
+    }
+
+    if (m_resetRequested.exchange(false, std::memory_order_acq_rel)) {
+        if (prefSz > 0 && m_info.currentBufferSize != prefSz) {
+            m_info.currentBufferSize = prefSz;
+            m_info.preferredBufferSize = prefSz;
+        }
+        changed = true;
+    }
+
+    return changed;
 }
 
 void AsioManager::bufferSwitchCallback(int32_t doubleBufferIndex, ASIOBool directProcess) {
@@ -228,8 +323,9 @@ ASIOTime* AsioManager::bufferSwitchTimeInfoCallback(ASIOTime* params, int32_t do
 }
 
 void AsioManager::sampleRateDidChangeCallback(double sRate) {
-    if (s_instance) {
+    if (s_instance && sRate > 0.0) {
         s_instance->m_info.sampleRate = sRate;
+        s_instance->m_resetRequested.store(true, std::memory_order_release);
     }
 }
 
@@ -237,9 +333,25 @@ int32_t AsioManager::asioMessageCallback(int32_t selector, int32_t value, void* 
     switch (selector) {
         case 1: // kAsioSelectorSupported
             if (value == 2) return 1; // kAsioEngineVersion
+            if (value == 3) return 1; // kAsioResetRequest
+            if (value == 4) return 1; // kAsioBufferSizeChange
+            if (value == 7) return 1; // kAsioSupportsTimeInfo
             return 0;
         case 2: // kAsioEngineVersion
             return 2; // Host ASIO version 2.0
+        case 3: // kAsioResetRequest
+            if (s_instance) {
+                s_instance->m_resetRequested.store(true, std::memory_order_release);
+            }
+            return 1;
+        case 4: // kAsioBufferSizeChange
+            if (s_instance) {
+                if (value > 0) {
+                    s_instance->m_info.currentBufferSize = value;
+                }
+                s_instance->m_resetRequested.store(true, std::memory_order_release);
+            }
+            return 1;
         case 7: // kAsioSupportsTimeInfo
             return 1;
         default:

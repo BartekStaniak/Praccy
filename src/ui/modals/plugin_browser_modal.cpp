@@ -127,6 +127,7 @@ void PluginBrowserModal::open(int targetBlockIndex, int targetBranchIndex) {
     m_targetBlockIndex = targetBlockIndex;
     m_targetBranchIndex = targetBranchIndex;
     m_isOpen = true;
+    m_justOpened = true;
     m_needsFocus = true;
     m_scrollSelectionIntoView = true;
     m_selectedIndex = 0;
@@ -591,7 +592,9 @@ void PluginBrowserModal::render() {
 
     const float fontSize = ImGui::GetFontSize();
     const float dpiScale = std::max(1.0f, fontSize / 13.0f);
-    const ImVec2 modalSize(580.0f * dpiScale, 450.0f * dpiScale);
+    const float modalW = std::clamp(vp->Size.x * 0.55f, 620.0f * dpiScale, 860.0f * dpiScale);
+    const float modalH = std::clamp(vp->Size.y * 0.65f, 480.0f * dpiScale, 720.0f * dpiScale);
+    const ImVec2 modalSize(modalW, modalH);
 
     ImGui::SetNextWindowSize(modalSize, ImGuiCond_Always);
     ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
@@ -608,6 +611,21 @@ void PluginBrowserModal::render() {
                                   ImGuiWindowFlags_NoScrollbar;
 
     if (ImGui::Begin("##SpotlightCommandPalette", &m_isOpen, flags)) {
+        // Click outside palette closes it
+        if (m_justOpened) {
+            m_justOpened = false;
+        } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+            if (!ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows) &&
+                !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) {
+                close();
+                ImGui::End();
+                m_tabHandledThisFrame = false;
+                ImGui::PopStyleVar(3);
+                ImGui::PopStyleColor(2);
+                return;
+            }
+        }
+
         // Global shortcut Esc to close
         if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             close();
@@ -721,8 +739,9 @@ void PluginBrowserModal::render() {
         ImGui::Separator();
         ImGui::Spacing();
 
-        // Results List Container (Virtualization via ImGuiListClipper)
-        const float listHeight = 290.0f * dpiScale;
+        // Results List Container (Virtualization via ImGuiListClipper) - dynamically scales with window height
+        const float footerH = ImGui::GetTextLineHeightWithSpacing() + 14.0f * dpiScale;
+        const float listHeight = std::max(140.0f * dpiScale, ImGui::GetContentRegionAvail().y - footerH);
         const float rowH = 34.0f * dpiScale;
         ImGui::BeginChild("##PaletteResultsList", ImVec2(0.0f, listHeight), false, ImGuiWindowFlags_AlwaysVerticalScrollbar);
 

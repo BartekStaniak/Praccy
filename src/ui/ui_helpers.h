@@ -1,6 +1,7 @@
 #pragma once
 
 #include "design_tokens.h"
+#include "ui_spec.h"
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <string>
@@ -155,11 +156,12 @@ inline bool ResettableVSliderFloat(const char* label, const ImVec2& size, float*
 }
 
 inline bool CenteredButton(const char* label, const ImVec2& size = ImVec2(0, 0)) {
+    float actualH = size.y > 0.0f ? size.y : ImGui::GetFrameHeight();
     ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.5f, 0.5f));
     bool popPad = false;
-    if (size.y > 0.0f) {
+    if (actualH > 0.0f) {
         float fontH = ImGui::GetFontSize();
-        float padY = std::max(0.0f, (size.y - fontH) * 0.5f);
+        float padY = std::max(0.0f, (actualH - fontH) * 0.5f);
         float padX = ImGui::GetStyle().FramePadding.x;
         if (size.x > 0.0f) {
             float textW = ImGui::CalcTextSize(label).x;
@@ -170,7 +172,7 @@ inline bool CenteredButton(const char* label, const ImVec2& size = ImVec2(0, 0))
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(padX, padY));
         popPad = true;
     }
-    bool clicked = ImGui::Button(label, size);
+    bool clicked = ImGui::Button(label, ImVec2(size.x, actualH));
     if (popPad) ImGui::PopStyleVar();
     ImGui::PopStyleVar();
     return clicked;
@@ -392,23 +394,24 @@ inline bool renderSlidingPillToggle(const char* id, bool* value, const ImVec2& s
     return clicked;
 }
 
-inline void renderBadgePill(const char* label, ImU32 bgCol, ImU32 borderCol, ImU32 textCol, float height = 18.0f) {
+inline void renderBadgePill(const char* label, ImU32 bgCol, ImU32 borderCol, ImU32 textCol, float height = 0.0f) {
+    float actualH = (height > 0.0f) ? height : ImGui::GetFrameHeight();
     ImVec2 badgePos = ImGui::GetCursorScreenPos();
     ImVec2 textSz = ImGui::CalcTextSize(label);
-    const float padX = 6.0f;
+    const float padX = 10.0f;
     float badgeW = textSz.x + padX * 2.0f;
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 minPt = badgePos;
-    ImVec2 maxPt(badgePos.x + badgeW, badgePos.y + height);
+    ImVec2 maxPt(badgePos.x + badgeW, badgePos.y + actualH);
 
-    dl->AddRectFilled(minPt, maxPt, bgCol, height * 0.5f);
-    dl->AddRect(minPt, maxPt, borderCol, height * 0.5f, 0, 1.0f);
+    dl->AddRectFilled(minPt, maxPt, bgCol, actualH * 0.5f);
+    dl->AddRect(minPt, maxPt, borderCol, actualH * 0.5f, 0, 1.0f);
 
     float textX = badgePos.x + padX;
-    float textY = badgePos.y + (height - textSz.y) * 0.5f;
+    float textY = badgePos.y + (actualH - textSz.y) * 0.5f;
     dl->AddText(ImVec2(textX, textY), textCol, label);
-    ImGui::Dummy(ImVec2(badgeW, height));
+    ImGui::Dummy(ImVec2(badgeW, actualH));
 }
 
 inline float computeHudToastAlpha(float remainingTime, float totalDuration = 1.8f) noexcept {
@@ -420,6 +423,32 @@ inline float computeHudToastAlpha(float remainingTime, float totalDuration = 1.8
     if (remainingTime <= 0.0f) return 0.0f;
     if (remainingTime >= totalDuration) return 1.0f;
     return std::clamp(remainingTime / totalDuration, 0.0f, 1.0f);
+}
+
+
+
+inline void BeginCardFrame(const char* str_id, float height = 0.0f, const ImVec2& padding = ImVec2(Metrics::kCardPaddingX, Metrics::kCardPaddingY)) {
+    const auto& tokens = themeTokens();
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, tokens.surfaces.cardBg.vec4);
+    ImGui::PushStyleColor(ImGuiCol_Border, tokens.borders.subtle.vec4);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, Metrics::kCornerRadius);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, padding);
+
+    ImGuiChildFlags childFlags = ImGuiChildFlags_Borders;
+    ImGuiWindowFlags winFlags = ImGuiWindowFlags_None;
+    if (height <= 0.0f) {
+        childFlags |= ImGuiChildFlags_AutoResizeY;
+        winFlags |= ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
+    }
+    ImGui::BeginChild(str_id, ImVec2(0.0f, height), childFlags, winFlags);
+}
+
+inline void EndCardFrame() {
+    ImGui::EndChild();
+    ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor(2);
+    ImGui::Spacing();
 }
 
 } // namespace praccy::ui

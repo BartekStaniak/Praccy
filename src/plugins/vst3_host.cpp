@@ -7,6 +7,7 @@
 
 #include <pluginterfaces/base/ibstream.h>
 #include <pluginterfaces/vst/ivstmessage.h>
+#include <pluginterfaces/vst/ivstprocesscontext.h>
 
 namespace Steinberg {
 DEF_CLASS_IID (IPlugView)
@@ -162,6 +163,7 @@ public:
 struct Vst3PluginInstance::Impl {
     PraccyComponentHandler componentHandler;
     PraccyPlugFrame plugFrame;
+    Steinberg::Vst::ProcessContext processContext{};
 };
 
 Vst3PluginInstance::Vst3PluginInstance() : m_impl(std::make_unique<Impl>()) {
@@ -179,9 +181,13 @@ void Vst3PluginInstance::onGuiPerformEdit(Steinberg::Vst::ParamID paramId, Stein
     if (m_faulted.load(std::memory_order_relaxed)) return;
 
     const float normVal = static_cast<float>(std::clamp(valueNormalized, 0.0, 1.0));
-    if (GetCurrentThreadId() != m_audioThreadId.load(std::memory_order_relaxed)) {
+    {
         std::lock_guard<std::mutex> lock(m_paramCacheMutex);
         m_paramCache[static_cast<uint32_t>(paramId)] = normVal;
+        auto idxIt = m_paramIdToIndex.find(static_cast<uint32_t>(paramId));
+        if (idxIt != m_paramIdToIndex.end() && idxIt->second < m_paramDescs.size()) {
+            m_paramDescs[idxIt->second].currentValue = normVal;
+        }
     }
 
     // Forward GUI parameter edit to audio processor queue
@@ -195,10 +201,47 @@ void Vst3PluginInstance::onGuiEndEdit(Steinberg::Vst::ParamID paramId) noexcept 
     notifyGuiGestureEnded(static_cast<uint32_t>(paramId));
 }
 
-void Vst3PluginInstance::onGuiRestartComponent(Steinberg::int32 /*flags*/) noexcept {
+void Vst3PluginInstance::onGuiRestartComponent(Steinberg::int32 flags) noexcept {
     if (m_suppressHandlerCallbacks.load(std::memory_order_relaxed)) return;
-    setGuiEditingActive(false);
-    notifyGuiParamEdited(0xFFFFFFFFu, true);
+
+    if (flags & Steinberg::Vst::RestartFlags::kLatencyChanged) {
+        if (m_processor) {
+            m_latencySamples = m_processor->getLatencySamples();
+        }
+    }
+
+    if (flags & Steinberg::Vst::RestartFlags::kParamTitlesChanged) {
+        if (m_controller) {
+            std::lock_guard<std::mutex> lock(m_paramCacheMutex);
+            const int32_t pCount = m_controller->getParameterCount();
+            for (int32_t i = 0; i < pCount && i < static_cast<int32_t>(m_paramDescs.size()); ++i) {
+                Steinberg::Vst::ParameterInfo info{};
+                if (m_controller->getParameterInfo(i, info) == Steinberg::kResultOk) {
+                    char nameBuf[128] = {0};
+                    for (int c = 0; c < 127 && info.title[c] != 0; ++c) {
+                        nameBuf[c] = static_cast<char>(info.title[c]);
+                    }
+                    m_paramDescs[i].name = nameBuf;
+                    m_paramDescs[i].defaultValue = static_cast<float>(info.defaultNormalizedValue);
+                }
+            }
+        }
+    }
+
+    if (flags & Steinberg::Vst::RestartFlags::kParamValuesChanged) {
+        if (m_controller) {
+            std::lock_guard<std::mutex> lock(m_paramCacheMutex);
+            for (auto& desc : m_paramDescs) {
+                const double normVal = m_controller->getParamNormalized(desc.id);
+                const float fVal = static_cast<float>(normVal);
+                m_paramCache[desc.id] = fVal;
+                desc.currentValue = fVal;
+                m_paramQueue.try_enqueue({desc.id, normVal});
+            }
+        }
+        setGuiEditingActive(false);
+        notifyGuiParamEdited(0xFFFFFFFFu, true);
+    }
 }
 
 std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::string& path) {
@@ -350,41 +393,111 @@ std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::
         }
         instance->m_suppressHandlerCallbacks.store(false, std::memory_order_relaxed);
 
-        // Populate initial parameter cache
+        // Populate initial parameter cache and parameter descriptors
         const int32_t pCount = instance->m_controller->getParameterCount();
+        instance->m_paramDescs.reserve(pCount);
+        instance->m_paramIdToIndex.reserve(pCount);
+        instance->m_paramCache.reserve(pCount);
         for (int32_t i = 0; i < pCount; ++i) {
             Steinberg::Vst::ParameterInfo info{};
             if (instance->m_controller->getParameterInfo(i, info) == Steinberg::kResultOk) {
-                instance->m_paramCache[info.id] = static_cast<float>(instance->m_controller->getParamNormalized(info.id));
+                PluginParameterDesc desc;
+                desc.id = info.id;
+                char nameBuf[128] = {0};
+                for (int c = 0; c < 127 && info.title[c] != 0; ++c) {
+                    nameBuf[c] = static_cast<char>(info.title[c]);
+                }
+                desc.name = nameBuf;
+                desc.minValue = 0.0f;
+                desc.maxValue = 1.0f;
+                desc.defaultValue = static_cast<float>(info.defaultNormalizedValue);
+                float curVal = static_cast<float>(instance->m_controller->getParamNormalized(info.id));
+                desc.currentValue = curVal;
+
+                instance->m_paramIdToIndex[info.id] = instance->m_paramDescs.size();
+                instance->m_paramDescs.push_back(std::move(desc));
+                instance->m_paramCache[info.id] = curVal;
             }
         }
     }
+
+    instance->m_impl->processContext.state = Steinberg::Vst::ProcessContext::kPlaying |
+                                           Steinberg::Vst::ProcessContext::kTempoValid |
+                                           Steinberg::Vst::ProcessContext::kTimeSigValid;
+    instance->m_impl->processContext.sampleRate = instance->m_sampleRate;
+    instance->m_impl->processContext.tempo = 120.0;
+    instance->m_impl->processContext.timeSigNumerator = 4;
+    instance->m_impl->processContext.timeSigDenominator = 4;
+    instance->m_impl->processContext.projectTimeSamples = 0;
 
     return instance;
 }
 
 Vst3PluginInstance::~Vst3PluginInstance() {
     closeGui();
+
+    // 1. Disconnect connection points between component and controller
+    if (m_component && m_controller) {
+        Steinberg::Vst::IConnectionPoint* cpComp = nullptr;
+        Steinberg::Vst::IConnectionPoint* cpCtrl = nullptr;
+        m_component->queryInterface(Steinberg::Vst::IConnectionPoint::iid, reinterpret_cast<void**>(&cpComp));
+        m_controller->queryInterface(Steinberg::Vst::IConnectionPoint::iid, reinterpret_cast<void**>(&cpCtrl));
+        if (cpComp && cpCtrl) {
+            cpComp->disconnect(cpCtrl);
+            cpCtrl->disconnect(cpComp);
+        }
+        if (cpComp) cpComp->release();
+        if (cpCtrl) cpCtrl->release();
+    }
+
+    // 2. Stop audio processing and deactivate component
     if (m_processor) {
         m_processor->setProcessing(false);
     }
     if (m_component) {
         m_component->setActive(false);
-        m_component->terminate();
     }
+
+    // 3. Detach component handler from controller
     if (m_controller) {
-        m_controller->terminate();
+        m_controller->setComponentHandler(nullptr);
+    }
+
+    // 4. Check if controller and component share the same COM identity
+    bool isSingleComponent = false;
+    if (m_controller && m_component) {
+        Steinberg::Vst::IComponent* ctrlComp = nullptr;
+        if (m_controller->queryInterface(Steinberg::Vst::IComponent::iid, reinterpret_cast<void**>(&ctrlComp)) == Steinberg::kResultOk && ctrlComp) {
+            if (ctrlComp == m_component) {
+                isSingleComponent = true;
+            }
+            ctrlComp->release();
+        }
+    }
+
+    // 5. Terminate and release controller (only terminate if separate from component)
+    if (m_controller) {
+        if (!isSingleComponent) {
+            m_controller->terminate();
+        }
         m_controller->release();
         m_controller = nullptr;
     }
+
+    // 6. Release audio processor before terminating component
     if (m_processor) {
         m_processor->release();
         m_processor = nullptr;
     }
+
+    // 7. Terminate and release component
     if (m_component) {
+        m_component->terminate();
         m_component->release();
         m_component = nullptr;
     }
+
+    // 8. Cleanly invoke ExitDll and unload module
     if (m_module) {
         auto* exitDll = reinterpret_cast<ExitDllProc>(reinterpret_cast<void*>(GetProcAddress(m_module, "ExitDll")));
         if (exitDll) exitDll();
@@ -413,6 +526,15 @@ void Vst3PluginInstance::prepare(double sampleRate, uint32_t maxBlockSize) {
     m_processor->setProcessing(true);
 
     m_latencySamples = m_processor->getLatencySamples();
+
+    m_impl->processContext.state = Steinberg::Vst::ProcessContext::kPlaying |
+                                   Steinberg::Vst::ProcessContext::kTempoValid |
+                                   Steinberg::Vst::ProcessContext::kTimeSigValid;
+    m_impl->processContext.sampleRate = sampleRate;
+    m_impl->processContext.tempo = 120.0;
+    m_impl->processContext.timeSigNumerator = 4;
+    m_impl->processContext.timeSigDenominator = 4;
+    m_impl->processContext.projectTimeSamples = 0;
 }
 
 void Vst3PluginInstance::process(audio::AudioProcessContext& ctx) {
@@ -434,6 +556,9 @@ void Vst3PluginInstance::process(audio::AudioProcessContext& ctx) {
     data.processMode = Steinberg::Vst::kRealtime;
     data.symbolicSampleSize = Steinberg::Vst::kSample32;
     data.numSamples = numSamples;
+
+    m_impl->processContext.sampleRate = ctx.sampleRate > 0.0 ? ctx.sampleRate : m_sampleRate;
+    data.processContext = &m_impl->processContext;
 
     Steinberg::Vst::AudioBusBuffers inBus{};
     inBus.numChannels = ctx.input.numChannels();
@@ -459,6 +584,8 @@ void Vst3PluginInstance::process(audio::AudioProcessContext& ctx) {
         m_processor->process(data);
     }, &exCode);
 
+    m_impl->processContext.projectTimeSamples += numSamples;
+
     m_inputParamChanges.clear();
 
     if (!ok) {
@@ -472,6 +599,7 @@ void Vst3PluginInstance::reset() {
     std::pair<Steinberg::Vst::ParamID, double> dummy;
     while (m_paramQueue.try_dequeue(dummy)) {}
     m_inputParamChanges.clear();
+    m_impl->processContext.projectTimeSamples = 0;
     if (m_processor) {
         m_processor->setProcessing(false);
         m_processor->setProcessing(true);
@@ -479,30 +607,21 @@ void Vst3PluginInstance::reset() {
 }
 
 size_t Vst3PluginInstance::numParameters() const noexcept {
-    if (m_controller) {
-        return static_cast<size_t>(m_controller->getParameterCount());
-    }
-    return 0;
+    std::lock_guard<std::mutex> lock(m_paramCacheMutex);
+    return m_paramDescs.size();
 }
 
 PluginParameterDesc Vst3PluginInstance::getParameterDesc(size_t index) const {
-    PluginParameterDesc desc;
-    if (m_controller) {
-        Steinberg::Vst::ParameterInfo info{};
-        if (m_controller->getParameterInfo(static_cast<int32_t>(index), info) == Steinberg::kResultOk) {
-            desc.id = info.id;
-            char nameBuf[128] = {0};
-            for (int i = 0; i < 127 && info.title[i] != 0; ++i) {
-                nameBuf[i] = static_cast<char>(info.title[i]);
-            }
-            desc.name = nameBuf;
-            desc.minValue = 0.0f;
-            desc.maxValue = 1.0f;
-            desc.defaultValue = static_cast<float>(info.defaultNormalizedValue);
-            desc.currentValue = static_cast<float>(m_controller->getParamNormalized(info.id));
+    std::lock_guard<std::mutex> lock(m_paramCacheMutex);
+    if (index < m_paramDescs.size()) {
+        PluginParameterDesc desc = m_paramDescs[index];
+        auto it = m_paramCache.find(desc.id);
+        if (it != m_paramCache.end()) {
+            desc.currentValue = it->second;
         }
+        return desc;
     }
-    return desc;
+    return {};
 }
 
 void Vst3PluginInstance::setParameterValue(uint32_t paramId, float value) {
@@ -510,9 +629,13 @@ void Vst3PluginInstance::setParameterValue(uint32_t paramId, float value) {
 
     const float normVal = std::clamp(value, 0.0f, 1.0f);
 
-    if (GetCurrentThreadId() != m_audioThreadId.load(std::memory_order_relaxed)) {
+    {
         std::lock_guard<std::mutex> lock(m_paramCacheMutex);
         m_paramCache[paramId] = normVal;
+        auto idxIt = m_paramIdToIndex.find(paramId);
+        if (idxIt != m_paramIdToIndex.end() && idxIt->second < m_paramDescs.size()) {
+            m_paramDescs[idxIt->second].currentValue = normVal;
+        }
     }
 
     // Queue parameter change into real-time buffer for audio-thread process()
@@ -537,13 +660,6 @@ void Vst3PluginInstance::setParameterFromAudioThread(uint32_t paramId, float val
 
 float Vst3PluginInstance::getParameterValue(uint32_t paramId) const {
     if (m_faulted.load(std::memory_order_relaxed)) return 0.0f;
-    if (m_controller) {
-        float val = 0.0f;
-        safeCallPlugin([&]() {
-            val = static_cast<float>(m_controller->getParamNormalized(paramId));
-        });
-        return val;
-    }
     std::lock_guard<std::mutex> lock(m_paramCacheMutex);
     auto it = m_paramCache.find(paramId);
     return (it != m_paramCache.end()) ? it->second : 0.0f;
@@ -569,6 +685,15 @@ bool Vst3PluginInstance::openGui(HWND parentHwnd) {
 
             if (m_plugView->attached(reinterpret_cast<void*>(parentHwnd), Steinberg::kPlatformTypeHWND) == Steinberg::kResultOk) {
                 m_guiParentHwnd = parentHwnd;
+                Steinberg::ViewRect rect{};
+                if (m_plugView->getSize(&rect) == Steinberg::kResultOk) {
+                    int w = rect.right - rect.left;
+                    int h = rect.bottom - rect.top;
+                    if (w > 100 && h > 100) {
+                        m_preferredWidth = w;
+                        m_preferredHeight = h;
+                    }
+                }
             } else {
                 m_plugView->setFrame(nullptr);
             }
@@ -585,28 +710,29 @@ bool Vst3PluginInstance::openGui(HWND parentHwnd) {
 }
 
 void Vst3PluginInstance::getPreferredSize(int& width, int& height) const {
-    if (m_controller && !m_faulted.load(std::memory_order_relaxed)) {
-        Steinberg::IPlugView* view = m_plugView;
-        bool createdTemp = false;
-        if (!view) {
-            view = m_controller->createView(Steinberg::Vst::ViewType::kEditor);
-            createdTemp = true;
-        }
-        if (view) {
-            Steinberg::ViewRect rect{};
-            if (view->getSize(&rect) == Steinberg::kResultOk) {
-                int w = rect.right - rect.left;
-                int h = rect.bottom - rect.top;
-                if (w > 100 && h > 100) {
-                    width = w;
-                    height = h;
-                }
-            }
-            if (createdTemp) {
-                view->release();
+    if (m_preferredWidth > 0 && m_preferredHeight > 0) {
+        width = m_preferredWidth;
+        height = m_preferredHeight;
+        return;
+    }
+
+    if (m_plugView) {
+        Steinberg::ViewRect rect{};
+        if (m_plugView->getSize(&rect) == Steinberg::kResultOk) {
+            int w = rect.right - rect.left;
+            int h = rect.bottom - rect.top;
+            if (w > 100 && h > 100) {
+                m_preferredWidth = w;
+                m_preferredHeight = h;
+                width = w;
+                height = h;
+                return;
             }
         }
     }
+
+    width = 850;
+    height = 600;
 }
 
 void Vst3PluginInstance::closeGui() {
@@ -657,14 +783,12 @@ bool Vst3PluginInstance::loadState(const std::vector<uint8_t>& state) {
 
     if (success && m_controller) {
         std::lock_guard<std::mutex> lock(m_paramCacheMutex);
-        const int32_t pCount = m_controller->getParameterCount();
-        for (int32_t i = 0; i < pCount; ++i) {
-            Steinberg::Vst::ParameterInfo info{};
-            if (m_controller->getParameterInfo(i, info) == Steinberg::kResultOk) {
-                const double normVal = m_controller->getParamNormalized(info.id);
-                m_paramCache[info.id] = static_cast<float>(normVal);
-                m_paramQueue.try_enqueue({info.id, normVal});
-            }
+        for (auto& desc : m_paramDescs) {
+            const double normVal = m_controller->getParamNormalized(desc.id);
+            const float fVal = static_cast<float>(normVal);
+            m_paramCache[desc.id] = fVal;
+            desc.currentValue = fVal;
+            m_paramQueue.try_enqueue({desc.id, normVal});
         }
     }
     clearGuiParamEdit();

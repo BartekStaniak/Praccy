@@ -36,6 +36,7 @@ bool AppConfig::load(const std::string& customPath) {
     favoritePresets.clear();
     customPluginCategories.clear();
     recentPlugins.clear();
+    scannedPlugins.clear();
     std::string line;
     while (std::getline(file, line)) {
         if (line.empty() || line[0] == '#' || line[0] == ';') continue;
@@ -75,6 +76,31 @@ bool AppConfig::load(const std::string& customPath) {
             }
         } else if (key == "recent_plugin") {
             recentPlugins.push_back(val);
+        } else if (key == "scanned_plugin") {
+            // Format: name|path|type|vendor|category|bundleFileName|classGuid|clapId
+            std::vector<std::string> parts;
+            size_t start = 0;
+            while (start <= val.size()) {
+                size_t pos = val.find('|', start);
+                if (pos == std::string::npos) {
+                    parts.push_back(val.substr(start));
+                    break;
+                }
+                parts.push_back(val.substr(start, pos - start));
+                start = pos + 1;
+            }
+            if (parts.size() >= 3) {
+                ScannedPluginEntry entry;
+                entry.name = parts[0];
+                entry.path = parts[1];
+                entry.type = parts[2];
+                if (parts.size() > 3) entry.vendor = parts[3];
+                if (parts.size() > 4) entry.category = parts[4];
+                if (parts.size() > 5) entry.bundleFileName = parts[5];
+                if (parts.size() > 6) entry.classGuid = parts[6];
+                if (parts.size() > 7) entry.clapId = parts[7];
+                scannedPlugins.push_back(std::move(entry));
+            }
         } else if (key == "retroactive_buffer_minutes") {
             uint32_t valM = utils::parseInteger<uint32_t>(val, 2);
             if (valM == 1 || valM == 2 || valM == 5 || valM == 10) {
@@ -82,6 +108,8 @@ bool AppConfig::load(const std::string& customPath) {
             } else {
                 retroactiveBufferMinutes = 2;
             }
+        } else if (key == "riff_directory") {
+            riffDirectory = val;
         } else if (key == "rack_view_mode") {
             int modeVal = utils::parseInteger<int>(val, 0);
             rackViewMode = (modeVal == 1) ? RackViewMode::Modular : RackViewMode::Simple;
@@ -97,6 +125,22 @@ bool AppConfig::load(const std::string& customPath) {
             windowH = utils::parseInteger<int>(val, 720);
         } else if (key == "window_maximized") {
             windowMaximized = (val == "1" || val == "true");
+        } else if (key == "tuner_enabled") {
+            tunerEnabled = (val == "1" || val == "true");
+        } else if (key == "tuner_a4_reference") {
+            tunerA4Reference = utils::parseFloat(val, 440.0f);
+        } else if (key == "tuner_instrument") {
+            tunerInstrument = utils::parseInteger<int>(val, 0);
+        } else if (key == "tuner_string_count") {
+            tunerStringCount = utils::parseInteger<int>(val, 6);
+        } else if (key == "tuner_tuning_mode") {
+            tunerTuningMode = utils::parseInteger<int>(val, 0);
+        } else if (key == "tuner_tuning_type") {
+            tunerTuningType = utils::parseInteger<int>(val, 0);
+        } else if (key == "tuner_root_note") {
+            tunerRootNote = utils::parseInteger<int>(val, 4);
+        } else if (key == "tuner_custom_strings") {
+            tunerCustomStrings = val;
         }
     }
     return true;
@@ -115,6 +159,7 @@ bool AppConfig::save(const std::string& customPath) const {
     file << "metronome_bpm=" << metronomeBpm << "\n";
     file << "check_beta_updates=" << (checkBetaUpdates ? "1" : "0") << "\n";
     file << "retroactive_buffer_minutes=" << retroactiveBufferMinutes << "\n";
+    file << "riff_directory=" << riffDirectory << "\n";
     file << "rack_view_mode=" << static_cast<int>(rackViewMode) << "\n";
     file << "theme_id=" << themeId << "\n";
     file << "window_x=" << windowX << "\n";
@@ -122,6 +167,14 @@ bool AppConfig::save(const std::string& customPath) const {
     file << "window_w=" << windowW << "\n";
     file << "window_h=" << windowH << "\n";
     file << "window_maximized=" << (windowMaximized ? "1" : "0") << "\n";
+    file << "tuner_enabled=" << (tunerEnabled ? "1" : "0") << "\n";
+    file << "tuner_a4_reference=" << tunerA4Reference << "\n";
+    file << "tuner_instrument=" << tunerInstrument << "\n";
+    file << "tuner_string_count=" << tunerStringCount << "\n";
+    file << "tuner_tuning_mode=" << tunerTuningMode << "\n";
+    file << "tuner_tuning_type=" << tunerTuningType << "\n";
+    file << "tuner_root_note=" << tunerRootNote << "\n";
+    file << "tuner_custom_strings=" << tunerCustomStrings << "\n";
 
     for (const auto& cp : customPluginPaths) {
         file << "custom_plugin_path=" << cp << "\n";
@@ -141,6 +194,18 @@ bool AppConfig::save(const std::string& customPath) const {
 
     for (const auto& rp : recentPlugins) {
         file << "recent_plugin=" << rp << "\n";
+    }
+
+    for (const auto& sp : scannedPlugins) {
+        file << "scanned_plugin="
+             << sp.name << "|"
+             << sp.path << "|"
+             << sp.type << "|"
+             << sp.vendor << "|"
+             << sp.category << "|"
+             << sp.bundleFileName << "|"
+             << sp.classGuid << "|"
+             << sp.clapId << "\n";
     }
 
     return true;

@@ -53,6 +53,11 @@ public:
     [[nodiscard]] double currentSampleRate() const noexcept { return m_info.sampleRate; }
     [[nodiscard]] int32_t currentBufferSize() const noexcept { return m_info.currentBufferSize; }
 
+    bool setSampleRate(double sampleRate);
+    bool setBufferSize(int32_t bufferSize);
+    [[nodiscard]] bool canSampleRate(double sampleRate) const noexcept;
+    bool checkHardwareChanges();
+
     void setAudioCallback(AudioCallbackFn callback) {
         m_callback = std::move(callback);
     }
@@ -82,6 +87,7 @@ private:
     std::vector<ASIOBufferInfo> m_bufferInfos;
     ASIOCallbacks m_callbacks{};
     std::atomic<bool> m_isRunning{false};
+    std::atomic<bool> m_resetRequested{false};
 
     AudioCallbackFn m_callback;
 

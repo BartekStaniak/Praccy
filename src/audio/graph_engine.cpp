@@ -1338,7 +1338,7 @@ void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& ha
                         auto* slotA = dynamic_cast<PluginSlot*>(originalNode.get());
                         if (slotA && branchA) {
                             originalNode.release();
-                            branchA->addSlot(std::unique_ptr<PluginSlot>(slotA));
+                            branchA->activeSlots().push_back(std::unique_ptr<PluginSlot>(slotA));
                         } else {
                             if (!m_reclaimQueue.try_enqueue(std::move(originalNode))) {
                                 stashForReclamation(std::move(originalNode));

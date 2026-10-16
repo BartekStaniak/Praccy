@@ -464,15 +464,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         double sRate = asio.currentSampleRate();
         if (sRate <= 0.0) sRate = 48000.0;
         const auto& dInfo = asio.driverInfo();
-        uint32_t bufSize = static_cast<uint32_t>(std::max(dInfo.preferredBufferSize, dInfo.maxBufferSize));
-        if (bufSize == 0) bufSize = 2048;
-        graph.prepare(sRate, bufSize);
-        tuner.prepare(sRate, 4096);
-        metronome.prepare(sRate);
-        player.prepare(sRate);
-        looper.prepare(sRate);
-        rackView.getRiffBuffer().prepare(sRate, static_cast<int>(appConfig.retroactiveBufferMinutes));
-        asio.start();
+        uint32_t bufSize = (dInfo.preferredBufferSize > 0) ? static_cast<uint32_t>(dInfo.preferredBufferSize) : 256;
+        rackView.applyAudioSettings(sRate, bufSize);
     };
 
     // Auto-select and start ASIO driver (prioritizing last saved driver, then hardware USB)
@@ -593,6 +586,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         appConfig.lastAsioDriver = asio.driverInfo().name;
     }
     appConfig.customPluginPaths = scanner.searchPaths();
+    scanner.exportToConfig(appConfig);
     appConfig.saveWindowPlacement(hwnd);
     appConfig.save();
 

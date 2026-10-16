@@ -14,18 +14,10 @@ namespace praccy::plugins {
 
 using GetFactoryProc = Steinberg::IPluginFactory* (PLUGIN_API *)();
 
-PluginScanner::PluginScanner() {
+PluginScanner::PluginScanner(const std::string& configPath)
+    : m_configPath(configPath)
+{
     addDefaultPaths();
-    // Load favorites and custom categories from app config
-    state::AppConfig cfg;
-    if (cfg.load()) {
-        for (const auto& fav : cfg.favoritePlugins) {
-            m_favorites.insert(fav);
-        }
-        for (const auto& [name, cat] : cfg.customPluginCategories) {
-            m_categoryOverrides[name] = cat;
-        }
-    }
 
     // Register built-in effects immediately so they are available right away
     m_plugins.push_back(PluginDescriptor{
@@ -58,6 +50,12 @@ PluginScanner::PluginScanner() {
         .classGuid = "",
         .clapId = ""
     });
+
+    // Load favorites, custom categories, custom paths, and cached scanned plugins
+    state::AppConfig cfg;
+    if (cfg.load(m_configPath)) {
+        loadFromConfig(cfg);
+    }
 }
 
 PluginScanner::~PluginScanner() {
@@ -80,6 +78,115 @@ std::vector<PluginDescriptor> PluginScanner::scannedPlugins() const {
 size_t PluginScanner::numPlugins() const {
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_plugins.size();
+}
+
+void PluginScanner::addPlugin(const PluginDescriptor& desc) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = std::find_if(m_plugins.begin(), m_plugins.end(), [&](const PluginDescriptor& d) {
+        return d.name == desc.name;
+    });
+    if (it == m_plugins.end()) {
+        m_plugins.push_back(desc);
+    } else {
+        *it = desc;
+    }
+}
+
+void PluginScanner::loadFromConfig(const state::AppConfig& cfg) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (const auto& fav : cfg.favoritePlugins) {
+        m_favorites.insert(fav);
+    }
+    for (const auto& [name, cat] : cfg.customPluginCategories) {
+        m_categoryOverrides[name] = cat;
+    }
+    for (const auto& cp : cfg.customPluginPaths) {
+        if (!cp.empty() && std::find(m_searchPaths.begin(), m_searchPaths.end(), cp) == m_searchPaths.end()) {
+            m_searchPaths.push_back(cp);
+        }
+    }
+    for (const auto& sp : cfg.scannedPlugins) {
+        PluginDescriptor desc;
+        desc.name = sp.name;
+        desc.path = sp.path;
+        if (sp.type == "CLAP" || sp.type == "clap" || sp.type == "1") {
+            desc.type = PluginType::CLAP;
+        } else if (sp.type == "VST3" || sp.type == "vst3" || sp.type == "2") {
+            desc.type = PluginType::VST3;
+        } else {
+            desc.type = PluginType::BuiltIn;
+        }
+        desc.vendor = sp.vendor;
+        auto catIt = m_categoryOverrides.find(sp.name);
+        if (catIt != m_categoryOverrides.end()) {
+            desc.category = catIt->second;
+        } else if (!sp.category.empty()) {
+            desc.category = sp.category;
+        } else {
+            desc.category = detectPluginCategory(sp.name, sp.vendor);
+        }
+        desc.bundleFileName = sp.bundleFileName;
+        desc.classGuid = sp.classGuid;
+        desc.clapId = sp.clapId;
+
+        auto it = std::find_if(m_plugins.begin(), m_plugins.end(), [&](const PluginDescriptor& existing) {
+            return existing.name == desc.name;
+        });
+        if (it == m_plugins.end()) {
+            m_plugins.push_back(std::move(desc));
+        } else {
+            it->type = desc.type;
+            it->category = desc.category;
+            it->vendor = desc.vendor;
+            if (!desc.bundleFileName.empty()) it->bundleFileName = desc.bundleFileName;
+            if (!desc.classGuid.empty()) it->classGuid = desc.classGuid;
+            if (!desc.clapId.empty()) it->clapId = desc.clapId;
+        }
+    }
+    for (auto& p : m_plugins) {
+        auto catIt = m_categoryOverrides.find(p.name);
+        if (catIt != m_categoryOverrides.end()) {
+            p.category = catIt->second;
+        }
+    }
+}
+
+void PluginScanner::exportToConfig(state::AppConfig& cfg) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    cfg.scannedPlugins.clear();
+    for (const auto& p : m_plugins) {
+        if (p.type == PluginType::BuiltIn || p.path.starts_with("builtin://")) {
+            continue;
+        }
+        state::ScannedPluginEntry entry;
+        entry.name = p.name;
+        entry.path = p.path;
+        entry.type = p.typeString();
+        entry.vendor = p.vendor;
+        entry.category = p.category;
+        entry.bundleFileName = p.bundleFileName;
+        entry.classGuid = p.classGuid;
+        entry.clapId = p.clapId;
+        cfg.scannedPlugins.push_back(std::move(entry));
+    }
+    cfg.favoritePlugins.assign(m_favorites.begin(), m_favorites.end());
+    cfg.customPluginCategories = m_categoryOverrides;
+}
+
+void PluginScanner::saveToAppConfig(const std::string& customPath) const {
+    std::string target = customPath.empty() ? m_configPath : customPath;
+    state::AppConfig cfg;
+    cfg.load(target);
+    exportToConfig(cfg);
+    cfg.save(target);
+}
+
+void PluginScanner::loadFromAppConfig(const std::string& customPath) {
+    std::string target = customPath.empty() ? m_configPath : customPath;
+    state::AppConfig cfg;
+    if (cfg.load(target)) {
+        loadFromConfig(cfg);
+    }
 }
 
 void PluginScanner::addDefaultPaths() {
@@ -429,8 +536,24 @@ void PluginScanner::runScan() {
     }
 
     if (!m_shouldStop.load()) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_plugins = std::move(found);
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            for (auto& newPlug : found) {
+                auto existingIt = std::find_if(m_plugins.begin(), m_plugins.end(), [&](const PluginDescriptor& old) {
+                    return old.name == newPlug.name && old.path == newPlug.path;
+                });
+                if (existingIt != m_plugins.end()) {
+                    if (newPlug.classGuid.empty() && !existingIt->classGuid.empty()) {
+                        newPlug.classGuid = existingIt->classGuid;
+                    }
+                    if (newPlug.clapId.empty() && !existingIt->clapId.empty()) {
+                        newPlug.clapId = existingIt->clapId;
+                    }
+                }
+            }
+            m_plugins = std::move(found);
+        }
+        saveToAppConfig();
     }
 
     m_isScanning = false;
@@ -498,9 +621,9 @@ void PluginScanner::toggleFavorite(const std::string& nameOrPath) {
         m_favorites.insert(nameOrPath);
     }
     state::AppConfig cfg;
-    cfg.load();
+    cfg.load(m_configPath);
     cfg.favoritePlugins.assign(m_favorites.begin(), m_favorites.end());
-    cfg.save();
+    cfg.save(m_configPath);
 }
 
 size_t PluginScanner::numFavorites() const {
@@ -517,9 +640,14 @@ void PluginScanner::setCustomCategory(const std::string& pluginName, const std::
         }
     }
     state::AppConfig cfg;
-    cfg.load();
+    cfg.load(m_configPath);
     cfg.customPluginCategories = m_categoryOverrides;
-    cfg.save();
+    for (auto& sp : cfg.scannedPlugins) {
+        if (sp.name == pluginName) {
+            sp.category = category;
+        }
+    }
+    cfg.save(m_configPath);
 }
 
 void PluginScanner::resetCustomCategory(const std::string& pluginName) {
@@ -531,9 +659,14 @@ void PluginScanner::resetCustomCategory(const std::string& pluginName) {
         }
     }
     state::AppConfig cfg;
-    cfg.load();
+    cfg.load(m_configPath);
     cfg.customPluginCategories = m_categoryOverrides;
-    cfg.save();
+    for (auto& sp : cfg.scannedPlugins) {
+        if (sp.name == pluginName) {
+            sp.category = detectPluginCategory(sp.name, sp.vendor);
+        }
+    }
+    cfg.save(m_configPath);
 }
 
 std::string PluginScanner::getPluginCategory(const std::string& pluginName, const std::string& vendor) const {

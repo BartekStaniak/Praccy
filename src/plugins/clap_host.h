@@ -3,6 +3,14 @@
 #include "plugin_base.h"
 #include <clap/clap.h>
 #include <clap/events.h>
+#include <clap/ext/params.h>
+#include <clap/ext/state.h>
+#include <clap/ext/gui.h>
+#include <clap/ext/latency.h>
+#include <clap/ext/audio-ports.h>
+#include <clap/ext/thread-check.h>
+#include <clap/ext/timer-support.h>
+#include <clap/ext/log.h>
 #include <memory>
 #include <vector>
 #include <string>
@@ -93,6 +101,9 @@ public:
     bool loadState(const std::vector<uint8_t>& state) override;
 
     void onPluginOutputEvent(const clap_event_header_t* event) noexcept;
+    void resetFault() noexcept override;
+    void handleMainThreadCallbacks() noexcept override;
+    void fireTimer(clap_id timerId);
 
 private:
     ClapPluginInstance() = default;
@@ -107,6 +118,31 @@ private:
     static void CLAP_ABI clapHostParamsRequestFlush(const clap_host_t* host);
     static void CLAP_ABI clapHostStateMarkDirty(const clap_host_t* host);
 
+    // Thread check extension
+    static bool CLAP_ABI clapHostThreadCheckIsMainThread(const clap_host_t* host);
+    static bool CLAP_ABI clapHostThreadCheckIsAudioThread(const clap_host_t* host);
+
+    // Audio ports extension
+    static bool CLAP_ABI clapHostAudioPortsIsRescanFlagSupported(const clap_host_t* host, uint32_t flag);
+    static void CLAP_ABI clapHostAudioPortsRescan(const clap_host_t* host, uint32_t flags);
+
+    // Latency extension
+    static void CLAP_ABI clapHostLatencyChanged(const clap_host_t* host);
+
+    // Log extension
+    static void CLAP_ABI clapHostLog(const clap_host_t* host, clap_log_severity severity, const char* msg);
+
+    // GUI extension
+    static void CLAP_ABI clapHostGuiResizeHintsChanged(const clap_host_t* host);
+    static bool CLAP_ABI clapHostGuiRequestResize(const clap_host_t* host, uint32_t width, uint32_t height);
+    static bool CLAP_ABI clapHostGuiRequestShow(const clap_host_t* host);
+    static bool CLAP_ABI clapHostGuiRequestHide(const clap_host_t* host);
+    static void CLAP_ABI clapHostGuiClosed(const clap_host_t* host, bool was_destroyed);
+
+    // Timer support extension
+    static bool CLAP_ABI clapHostRegisterTimer(const clap_host_t* host, uint32_t period_ms, clap_id* timer_id);
+    static bool CLAP_ABI clapHostUnregisterTimer(const clap_host_t* host, clap_id timer_id);
+
     void flushPendingParamsIfStopped();
     void drainGuiOutParamQueue() const;
 
@@ -119,6 +155,8 @@ private:
     const clap_plugin_params* m_paramsExt{nullptr};
     const clap_plugin_state* m_stateExt{nullptr};
     const clap_plugin_latency* m_latencyExt{nullptr};
+    const clap_plugin_audio_ports* m_audioPortsExt{nullptr};
+    const clap_plugin_timer_support* m_timerExt{nullptr};
 
     std::string m_path;
     std::string m_bundleFileName;
@@ -129,6 +167,15 @@ private:
 
     HWND m_guiParentHwnd{nullptr};
     bool m_guiCreated{false};
+
+    DWORD m_mainThreadId{0};
+    double m_sampleRate{48000.0};
+    uint32_t m_maxBlockSize{256};
+    uint32_t m_numAudioInputs{1};
+    uint32_t m_numAudioOutputs{1};
+    std::atomic<bool> m_callbackRequested{false};
+    std::atomic<bool> m_restartRequested{false};
+    std::unordered_map<clap_id, UINT_PTR> m_activeTimers;
 
     moodycamel::ReaderWriterQueue<std::pair<clap_id, double>> m_paramQueue{128};
     mutable moodycamel::ReaderWriterQueue<std::pair<clap_id, double>> m_guiOutParamQueue{128};

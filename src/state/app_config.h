@@ -17,6 +17,24 @@
 
 namespace praccy::state {
 
+struct ScannedPluginEntry {
+    std::string name;
+    std::string path;
+    std::string type; // "VST3", "CLAP", "Built-In"
+    std::string vendor{"Unknown"};
+    std::string category{"Effects"};
+    std::string bundleFileName;
+    std::string classGuid;
+    std::string clapId;
+
+    bool operator==(const ScannedPluginEntry& other) const {
+        return name == other.name && path == other.path && type == other.type &&
+               vendor == other.vendor && category == other.category &&
+               bundleFileName == other.bundleFileName && classGuid == other.classGuid &&
+               clapId == other.clapId;
+    }
+};
+
 struct AppConfig {
     std::string lastAsioDriver;
     audio::InputRoutingMode inputMode{audio::InputRoutingMode::MonoLeft};
@@ -29,8 +47,10 @@ struct AppConfig {
     std::vector<std::string> favoritePresets;
     std::unordered_map<std::string, std::string> customPluginCategories;
     std::vector<std::string> recentPlugins;
+    std::vector<ScannedPluginEntry> scannedPlugins;
 
     uint32_t retroactiveBufferMinutes{2};
+    std::string riffDirectory;
 
     enum class RackViewMode {
         Simple = 0,
@@ -39,6 +59,16 @@ struct AppConfig {
     RackViewMode rackViewMode{RackViewMode::Modular};
 
     int themeId{0}; // 0: ObsidianStudio, 1: CyberMidnight, 2: NordicSlate, 3: VintageConsole
+
+    // Tuner Settings Persistence
+    bool tunerEnabled{true};
+    float tunerA4Reference{440.0f};
+    int tunerInstrument{0};     // 0: Guitar, 1: Bass, etc.
+    int tunerStringCount{6};
+    int tunerTuningMode{0};      // 0: Preset, 1: Custom
+    int tunerTuningType{0};      // 0: Standard, 1: Drop, etc.
+    int tunerRootNote{4};        // 4: E
+    std::string tunerCustomStrings;
 
     // Window geometry persistence
     int windowX{100};

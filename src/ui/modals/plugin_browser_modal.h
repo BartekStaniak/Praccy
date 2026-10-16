@@ -75,6 +75,7 @@ private:
     std::function<void(const std::string&)> m_onPluginInserted;
 
     bool m_isOpen{false};
+    bool m_justOpened{false};
     bool m_needsFocus{false};
     bool m_scrollSelectionIntoView{false};
     bool m_tabHandledThisFrame{false};
