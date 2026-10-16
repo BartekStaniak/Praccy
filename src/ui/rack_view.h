@@ -63,18 +63,24 @@ public:
     audio::RetroactiveRiffBuffer& getRiffBuffer() noexcept { return m_riffBuffer; }
     const audio::RetroactiveRiffBuffer& getRiffBuffer() const noexcept { return m_riffBuffer; }
     void saveLastRiff();
+    [[nodiscard]] static std::string formatRiffFilename(const std::string& presetName, float bpm, const std::tm& tmNow) {
+        return audio::RetroactiveRiffBuffer::formatFilename(presetName, bpm, tmNow);
+    }
 
     state::AppConfig::RackViewMode getRackViewMode() const noexcept { return m_rackViewMode; }
     void setRackViewMode(state::AppConfig::RackViewMode mode) noexcept { m_rackViewMode = mode; }
 
     void applyAudioSettings(double sampleRate, uint32_t bufferSize);
 
+    bool loadPresetChain(const std::string& name);
+    const std::string& activePreset() const noexcept { return m_auditionedPreset; }
+
 private:
     bool renderStatusPill(bool isRunning, const char* statusText);
     void renderPracticeRibbon();
     void renderSignalRack();
-    void renderInputCard(float cardY = -1.0f);
-    void renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int blockIndex = -1, int branchIndex = -1);
+    void renderInputCard(float cardY = -1.0f, float cardH = 224.0f);
+    void renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int blockIndex = -1, int branchIndex = -1, float cardHeight = 224.0f);
     void renderParallelBlock(audio::ParallelSplitMergeBlock* block, int blockIndex, float centerY);
     void renderSceneBar();
     void renderBottomBar();

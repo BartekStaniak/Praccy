@@ -45,13 +45,14 @@ static void drawCubicHermiteCable(ImDrawList* dl, ImVec2 p0, ImVec2 p1,
     const float dy = p1.y - p0.y;
 
     // Distance-adaptive tangent magnitude with short-dx safety clamp
-    float tMag = std::max(36.0f, 0.55f * dx + 0.35f * std::abs(dy));
+    float tMag = std::max(20.0f, 0.45f * dx + 0.25f * std::abs(dy));
     if (dx < 36.0f && dx > 0.0f) {
-        tMag = std::min(tMag, std::max(12.0f, dx * 1.2f));
+        tMag = std::min(tMag, std::max(10.0f, dx * 0.9f));
     }
 
-    // Simulated gravity sag
-    const float sag = std::clamp(std::abs(dx) * 0.16f + 8.0f, 6.0f, 42.0f);
+    // Reduced gravity sag: clean taut curve without excessive droop
+    const float sagFactor = (std::abs(dy) > 10.0f) ? std::max(0.0f, 1.0f - std::abs(dy) / 120.0f) : 1.0f;
+    const float sag = std::clamp(std::abs(dx) * 0.04f + 1.5f, 1.0f, 8.0f) * sagFactor;
 
     // Hermite to Cubic Bezier control points draped under gravity
     const float inv3 = 1.0f / 3.0f;
@@ -265,6 +266,12 @@ RackView::RackView(audio::GraphEngine& graph,
     m_rackViewMode = state::AppConfig::RackViewMode::Modular;
     m_riffBuffer.prepare(48000.0, static_cast<int>(cfg.retroactiveBufferMinutes));
 
+    if (!cfg.lastLoadedPreset.empty()) {
+        if (m_scenes.loadPresetChain(cfg.lastLoadedPreset, m_graph)) {
+            m_auditionedPreset = cfg.lastLoadedPreset;
+        }
+    }
+
     m_pluginBrowserModal->setOnPluginInserted([this](const std::string& pluginName) {
         syncMacrosFromGraph();
         m_undoManager.pushSnapshot(
@@ -276,8 +283,8 @@ RackView::RackView(audio::GraphEngine& graph,
     });
 
     syncMacrosFromGraph();
-    m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Initial Scene"),
-                               "Initial Scene",
+    m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, m_auditionedPreset.empty() ? "Initial Scene" : "Preset: " + m_auditionedPreset),
+                               m_auditionedPreset.empty() ? "Initial Scene" : "Preset: " + m_auditionedPreset,
                                state::UndoActionType::SceneSwitch);
 
     m_settingsModal->setOnDriverChanged([this](double sRate, uint32_t bufSize) {
@@ -318,6 +325,27 @@ void RackView::toggleFavoritePreset(const std::string& name) {
     cfg.load();
     cfg.favoritePresets = m_favoritePresets;
     cfg.save();
+    m_cachedConfig = cfg;
+}
+
+bool RackView::loadPresetChain(const std::string& name) {
+    if (m_scenes.loadPresetChain(name, m_graph)) {
+        m_auditionedPreset = name;
+        syncMacrosFromGraph();
+        m_undoManager.pushSnapshot(
+            state::SceneManager::captureGraphSnapshot(m_graph, "Preset: " + name),
+            "Preset: " + name,
+            state::UndoActionType::SceneSwitch
+        );
+        state::AppConfig cfg;
+        cfg.load();
+        cfg.lastLoadedPreset = name;
+        cfg.save();
+        m_cachedConfig = cfg;
+        triggerHudToast("Loaded " + name);
+        return true;
+    }
+    return false;
 }
 
 void RackView::render() {
@@ -348,11 +376,16 @@ void RackView::render() {
                                   ImGuiWindowFlags_NoScrollWithMouse;
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 12.0f));
     if (ImGui::Begin("PraccyMainWindow", nullptr, windowFlags)) {
         renderPracticeRibbon();
+        ImGui::Spacing();
         ImGui::Separator();
+        ImGui::Spacing();
         renderSceneBar();
+        ImGui::Spacing();
         ImGui::Separator();
+        ImGui::Spacing();
         renderSignalRack();
         renderBottomBar();
 
@@ -496,7 +529,7 @@ void RackView::render() {
         }
     }
     ImGui::End();
-    ImGui::PopStyleVar();
+    ImGui::PopStyleVar(2);
 }
 
 bool RackView::renderStatusPill(bool isRunning, const char* statusText) {
@@ -585,8 +618,11 @@ bool RackView::renderStatusPill(bool isRunning, const char* statusText) {
 
 void RackView::renderPracticeRibbon() {
     const auto& tokens = themeTokens();
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, tokens.surfaces.panelBg.vec4);
-    ImGui::BeginChild("PracticeRibbon", ImVec2(0, 88.0f), false, ImGuiWindowFlags_NoScrollbar);
+    const float btnH = Metrics::buttonHeight();
+    const float modH = 98.0f;
+    const float kRow2Y = 6.0f + btnH + 8.0f;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(4.0f, 0.0f));
 
     // Responsive 4-column layout: Tuner, Metro, Gate, Master — all stretch
     if (ImGui::BeginTable("PracticeRibbonTable", 4, ImGuiTableFlags_SizingStretchProp)) {
@@ -595,12 +631,9 @@ void RackView::renderPracticeRibbon() {
         ImGui::TableSetupColumn("GateCol",   ImGuiTableColumnFlags_WidthStretch, 0.20f);
         ImGui::TableSetupColumn("MasterCol", ImGuiTableColumnFlags_WidthStretch, 0.20f);
 
-        const float modH = 74.0f;
         ImGui::PushStyleColor(ImGuiCol_ChildBg, tokens.surfaces.panelBg.vec4);
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 6.0f));
-
-
 
         // ----------------------------------------------------
         // Column 1: Strobe Tuner Module
@@ -610,7 +643,8 @@ void RackView::renderPracticeRibbon() {
         {
             auto result = m_tuner.currentResult();
             const float availW = ImGui::GetContentRegionAvail().x;
-            DrawStrobeTunerModule(result, availW, modH - 12.0f, &m_tuner, [this]() {
+            const float availH = ImGui::GetContentRegionAvail().y;
+            DrawStrobeTunerModule(result, availW, availH, &m_tuner, [this]() {
                 if (m_tunerSettingsModal) m_tunerSettingsModal->open();
             });
         }
@@ -622,6 +656,8 @@ void RackView::renderPracticeRibbon() {
         ImGui::TableNextColumn();
         ImGui::BeginChild("Mod_Metro", ImVec2(0, modH), true, ImGuiWindowFlags_NoScrollbar);
         {
+            const float fontH = ImGui::GetFontSize();
+            ImGui::SetCursorPos(ImVec2(ImGui::GetStyle().WindowPadding.x, 6.0f + (btnH - fontH) * 0.5f));
             ImGui::TextColored(tokens.text.muted.vec4, "METRONOME");
             ImGui::SameLine(0, 8);
             bool metroPlaying = m_metronome.isPlaying();
@@ -635,7 +671,6 @@ void RackView::renderPracticeRibbon() {
                 ImVec2 curPos = ImGui::GetCursorScreenPos();
                 const float dotRadius = 4.0f;
                 const float dotSpacing = 11.0f;
-                float fontH = ImGui::GetFontSize();
                 float cy = curPos.y + (fontH * 0.5f);
 
                 for (int b = 0; b < totalBeats; ++b) {
@@ -657,10 +692,10 @@ void RackView::renderPracticeRibbon() {
             }
 
             const float gap = 6.0f;
-            const float playW = 50.0f;
+            const float playW = 54.0f;
             const float sigW = 68.0f;
 
-            // Position TAP button in top row directly aligned above the TimeSig dropdown
+            // Position TAP button in top row directly aligned above the TimeSig dropdown with standard button size
             const float rightEdge = ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x;
             const float comboStartX = rightEdge - sigW;
 
@@ -673,7 +708,7 @@ void RackView::renderPracticeRibbon() {
                     {ImGuiCol_Button, tokens.text.accent.vec4},
                     {ImGuiCol_Text, tokens.text.inverse.vec4}
                 }, tapFlash);
-                if (CenteredButton("TAP", ImVec2(sigW, 24.0f))) {
+                if (CenteredButton("TAP", ImVec2(sigW, btnH))) {
                     m_lastTapFlash = now;
                     // Remove tap times older than 2.5 seconds
                     while (!m_tapTimes.empty() && std::chrono::duration<double>(now - m_tapTimes.front()).count() > 2.5) {
@@ -699,18 +734,16 @@ void RackView::renderPracticeRibbon() {
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tap Tempo (Tap repeatedly to set BPM)");
 
-            ImGui::SetCursorPos(ImVec2(ImGui::GetStyle().WindowPadding.x, 36.0f));
+            const float ctrlH = Metrics::buttonHeight();
+            ImGui::SetCursorPos(ImVec2(ImGui::GetStyle().WindowPadding.x, kRow2Y));
             float bpmW = std::max(60.0f, comboStartX - gap - (ImGui::GetStyle().WindowPadding.x + playW + gap));
-
-            // Push FramePadding so PLAY, Tempo button/input, and TimeSig Combo share exact 24px height
-            ScopedStyleVar framePadGuard(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 3.5f));
 
             {
                 ScopedStyleColor metroGuard({
                     {ImGuiCol_Button, tokens.signal.faulted.vec4},
                     {ImGuiCol_Text, tokens.text.primary.vec4}
                 }, metroPlaying);
-                if (CenteredButton(metroPlaying ? "STOP##M" : "PLAY##M", ImVec2(playW, 24.0f))) {
+                if (CenteredButton(metroPlaying ? "STOP##M" : "PLAY##M", ImVec2(playW, ctrlH))) {
                     m_metronome.setPlaying(!metroPlaying);
                 }
             }
@@ -739,7 +772,7 @@ void RackView::renderPracticeRibbon() {
             } else {
                 char bpmLabel[32];
                 std::snprintf(bpmLabel, sizeof(bpmLabel), "%.0f BPM##BPMBtn", curBpm);
-                if (CenteredButton(bpmLabel, ImVec2(bpmW, 24.0f))) {
+                if (CenteredButton(bpmLabel, ImVec2(bpmW, ctrlH))) {
                     m_tempoEditing = true;
                     m_tempoEditValue = static_cast<int>(std::round(curBpm));
                 }
@@ -777,21 +810,43 @@ void RackView::renderPracticeRibbon() {
         {
             auto& gate = m_graph.inputNoiseGate();
             bool gateOn = gate.isEnabled();
-            float availW = ImGui::GetContentRegionAvail().x;
 
+            const float btnW = btnH; // Standard square button matching power/options
+            const float rightEdge = ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x;
+            const float powerBtnX = rightEdge - btnW;
+            const float powerBtnY = 6.0f;
+
+            ImGui::SetCursorPos(ImVec2(ImGui::GetStyle().WindowPadding.x, powerBtnY + (btnH - ImGui::GetFontSize()) * 0.5f));
             ImGui::TextColored(tokens.text.muted.vec4, "NOISE GATE");
-            if (availW > 80.0f) {
-                ImGui::SameLine(availW - 65.0f);
-            } else {
-                ImGui::SameLine();
+
+            ImGui::SetCursorPos(ImVec2(powerBtnX, powerBtnY));
+            if (ImGui::InvisibleButton("##GatePowerToggleBtn", ImVec2(btnW, btnH))) {
+                gate.setEnabled(!gateOn);
             }
-            if (ImGui::Checkbox("Active##Gate", &gateOn)) {
-                gate.setEnabled(gateOn);
+            const bool powerHovered = ImGui::IsItemHovered();
+            const bool powerActive = ImGui::IsItemActive();
+            if (powerHovered) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                ImGui::SetTooltip(gateOn ? "Noise Gate: Active (Click to Bypass)" : "Noise Gate: Bypassed (Click to Enable)");
             }
 
-            ImGui::SetCursorPosY(38.0f);
+            const ImU32 powerBg = powerActive ? tokens.surfaces.buttonBgActive.u32
+                                : (powerHovered ? tokens.surfaces.buttonBgHovered.u32 : tokens.surfaces.frameBg.u32);
+            const ImU32 powerBorder = gateOn ? tokens.signal.tunerInTune.u32 : tokens.borders.subtle.u32;
+            const ImU32 powerIconCol = gateOn ? tokens.signal.tunerInTune.u32
+                                    : (powerHovered ? tokens.text.secondary.u32 : tokens.text.muted.u32);
+
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            const ImVec2 btnMin = ImGui::GetItemRectMin();
+            const ImVec2 btnMax = ImGui::GetItemRectMax();
+            dl->AddRectFilled(btnMin, btnMax, powerBg, 4.0f);
+            dl->AddRect(btnMin, btnMax, powerBorder, 4.0f, 0, 1.0f);
+            DrawPowerGlyph(dl, ImVec2((btnMin.x + btnMax.x) * 0.5f, (btnMin.y + btnMax.y) * 0.5f), 6.5f, powerIconCol, 2.0f);
+
+            ImGui::SetCursorPos(ImVec2(ImGui::GetStyle().WindowPadding.x, kRow2Y));
             float thresh = gate.thresholdDb();
-            ImGui::SetNextItemWidth(std::max(80.0f, availW - 4.0f));
+            const float availGateW = ImGui::GetContentRegionAvail().x;
+            ImGui::SetNextItemWidth(std::max(80.0f, availGateW));
             if (ResettableSliderFloat("##GateThresh", &thresh, -80.0f, -20.0f, -60.0f, "Thresh: %.0f dB")) {
                 gate.setThresholdDb(thresh);
             }
@@ -806,24 +861,25 @@ void RackView::renderPracticeRibbon() {
         ImGui::BeginChild("Mod_Master", ImVec2(0, modH), true, ImGuiWindowFlags_NoScrollbar);
         {
             float masterVol = m_graph.masterVolumeDb();
-            float availMasterW = ImGui::GetContentRegionAvail().x;
 
+            ImGui::SetCursorPos(ImVec2(ImGui::GetStyle().WindowPadding.x, 6.0f + (btnH - ImGui::GetFontSize()) * 0.5f));
             ImGui::TextColored(tokens.text.primary.vec4, "MASTER OUTPUT");
 
             char valStr[32];
             std::snprintf(valStr, sizeof(valStr), "%+.1f dB", masterVol);
             float valTextW = ImGui::CalcTextSize(valStr).x;
-            if (availMasterW > valTextW + 110.0f) {
-                ImGui::SameLine(availMasterW - valTextW - 4.0f);
-            } else {
-                ImGui::SameLine();
+            const float rightEdge = ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x;
+            if (rightEdge - valTextW > ImGui::GetStyle().WindowPadding.x + ImGui::CalcTextSize("MASTER OUTPUT").x + 8.0f) {
+                ImGui::SetCursorPos(ImVec2(rightEdge - valTextW, 6.0f + (btnH - ImGui::GetFontSize()) * 0.5f));
+                ImGui::TextColored(tokens.text.primary.vec4, "%s", valStr);
             }
-            ImGui::TextColored(tokens.text.primary.vec4, "%s", valStr);
 
-            ImGui::SetCursorPosY(38.0f);
+
+            ImGui::SetCursorPos(ImVec2(ImGui::GetStyle().WindowPadding.x, kRow2Y));
             const float meterW = 9.0f;
             const float meterGap = 3.0f;
-            const float sliderW = std::max(60.0f, availMasterW - (meterW * 2.0f + meterGap + 12.0f));
+            const float availMasterW = ImGui::GetContentRegionAvail().x;
+            const float sliderW = std::max(60.0f, availMasterW - (meterW * 2.0f + meterGap + 8.0f));
 
             ImGui::SetNextItemWidth(sliderW);
             if (ResettableSliderFloat("##MasterVol", &masterVol, -36.0f, +6.0f, 0.0f, "Vol: %+.1f dB")) {
@@ -831,10 +887,15 @@ void RackView::renderPracticeRibbon() {
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Master Volume (Double-click to reset 0.0 dB)");
 
+            const float meterH = ImGui::GetItemRectSize().y;
+            const float meterTopY = ImGui::GetItemRectMin().y;
+
             ImGui::SameLine(0, 6);
-            renderMeter("OutMeterL", m_graph.outputMeter().peakLeft(), meterW, 22.0f);
+            ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x, meterTopY));
+            renderMeter("OutMeterL", m_graph.outputMeter().peakLeft(), meterW, meterH);
             ImGui::SameLine(0, meterGap);
-            renderMeter("OutMeterR", m_graph.outputMeter().peakRight(), meterW, 22.0f);
+            ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x, meterTopY));
+            renderMeter("OutMeterR", m_graph.outputMeter().peakRight(), meterW, meterH);
         }
         ImGui::EndChild();
 
@@ -844,8 +905,7 @@ void RackView::renderPracticeRibbon() {
         ImGui::EndTable();
     }
 
-    ImGui::EndChild();
-    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(); // CellPadding
 }
 
 void RackView::renderSceneBar() {
@@ -867,7 +927,8 @@ void RackView::renderSceneBar() {
 
     auto userPresets = m_scenes.savedPresetNames();
     const float actionsCompactW = (kGroupDividerSpacing * 2.0f + 6.0f) + ImGui::CalcTextSize("Actions \xE2\x96\xBE").x + padX * 2.0f;
-    const float fullActionsW = (kGroupDividerSpacing * 2.0f + 6.0f) + ImGui::CalcTextSize("Save Changes").x + ImGui::CalcTextSize("Save Preset As...").x + ImGui::CalcTextSize("Export DAW...").x + ImGui::CalcTextSize("Preset Browser...").x + 10.0f * padX + 4.0f * kBtnSpacing + (userPresets.empty() ? 0.0f : (130.0f + kBtnSpacing));
+    const float favStarBtnW = barBtnH;
+    const float fullActionsW = (kGroupDividerSpacing * 2.0f + 6.0f) + ImGui::CalcTextSize("Save Changes").x + ImGui::CalcTextSize("Save Preset As...").x + favStarBtnW + ImGui::CalcTextSize("Export DAW...").x + ImGui::CalcTextSize("Preset Browser...").x + 10.0f * padX + 5.0f * kBtnSpacing + (userPresets.empty() ? 0.0f : (130.0f + kBtnSpacing));
 
     const float favLabelW = ImGui::CalcTextSize("FAVORITES:").x + kLabelSpacing;
     const bool isCompact = (availTotalW - favLabelW - (abSectionW + undoRedoSectionW + fullActionsW) < 220.0f);
@@ -906,16 +967,7 @@ void RackView::renderSceneBar() {
                     const auto& favName = m_favoritePresets[i];
                     bool isSelected = (m_auditionedPreset == favName);
                     if (ImGui::Selectable(favName.c_str(), isSelected)) {
-                        if (m_scenes.loadPresetChain(favName, m_graph)) {
-                            m_auditionedPreset = favName;
-                            syncMacrosFromGraph();
-                            m_undoManager.pushSnapshot(
-                                state::SceneManager::captureGraphSnapshot(m_graph, "Preset: " + favName),
-                                "Preset: " + favName,
-                                state::UndoActionType::SceneSwitch
-                            );
-                            triggerHudToast("Loaded " + favName);
-                        }
+                        loadPresetChain(favName);
                     }
                 }
             }
@@ -982,16 +1034,7 @@ void RackView::renderSceneBar() {
                             m_midi.startLearning(midi::BindingTargetType::SceneSelect, -1, -1, static_cast<int>(i));
                             triggerHudToast("MIDI LEARN: SCENE " + std::to_string(i + 1));
                         } else {
-                            if (m_scenes.loadPresetChain(favName, m_graph)) {
-                                m_auditionedPreset = favName;
-                                syncMacrosFromGraph();
-                                m_undoManager.pushSnapshot(
-                                    state::SceneManager::captureGraphSnapshot(m_graph, "Preset: " + favName),
-                                    "Preset: " + favName,
-                                    state::UndoActionType::SceneSwitch
-                                );
-                                triggerHudToast("Loaded " + favName);
-                            }
+                            loadPresetChain(favName);
                         }
                     }
                 }
@@ -1174,6 +1217,19 @@ void RackView::renderSceneBar() {
                 m_showSavePresetModal = true;
                 m_presetNameBuffer[0] = '\0';
             }
+            const bool isFav = !m_auditionedPreset.empty() && isPresetFavorite(m_auditionedPreset);
+            std::string favMenuLabel = isFav ? "\xE2\x98\x85 Remove from Favorites" : "\xE2\x98\x86 Add to Favorites";
+            if (!m_auditionedPreset.empty()) {
+                favMenuLabel += " (" + m_auditionedPreset + ")";
+            }
+            if (ImGui::MenuItem(favMenuLabel.c_str())) {
+                if (!m_auditionedPreset.empty()) {
+                    toggleFavoritePreset(m_auditionedPreset);
+                    triggerHudToast(isFav ? "Removed from favorites: " + m_auditionedPreset : "Added to favorites: " + m_auditionedPreset);
+                } else {
+                    triggerHudToast("Save or load a preset first");
+                }
+            }
             if (ImGui::MenuItem("Export DAW...")) {
                 m_exportDawModal.open();
             }
@@ -1185,16 +1241,7 @@ void RackView::renderSceneBar() {
                 if (ImGui::BeginMenu("Quick Load Preset")) {
                     for (const auto& pName : userPresets) {
                         if (ImGui::MenuItem(pName.c_str())) {
-                            if (m_scenes.loadPresetChain(pName, m_graph)) {
-                                m_auditionedPreset = pName;
-                                syncMacrosFromGraph();
-                                m_undoManager.pushSnapshot(
-                                    state::SceneManager::captureGraphSnapshot(m_graph, "Preset: " + pName),
-                                    "Preset: " + pName,
-                                    state::UndoActionType::SceneSwitch
-                                );
-                                triggerHudToast("Loaded preset: " + pName);
-                            }
+                            loadPresetChain(pName);
                         }
                     }
                     ImGui::EndMenu();
@@ -1227,6 +1274,29 @@ void RackView::renderSceneBar() {
         }
 
         ImGui::SameLine(0, kBtnSpacing);
+        const bool isFav = !m_auditionedPreset.empty() && isPresetFavorite(m_auditionedPreset);
+        const float starBtnW = barBtnH;
+        ImVec2 starPos = ImGui::GetCursorScreenPos();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(starPos, ImVec2(starPos.x + starBtnW, starPos.y + barBtnH), tokens.surfaces.buttonBg.u32, 4.0f);
+        dl->AddRect(starPos, ImVec2(starPos.x + starBtnW, starPos.y + barBtnH), isFav ? tokens.text.accent.u32 : tokens.borders.subtle.u32, 4.0f, 0, 1.0f);
+        if (renderCenteredStarButton("##ToggleFavPresetBar", ImVec2(starBtnW, barBtnH), isFav)) {
+            if (!m_auditionedPreset.empty()) {
+                toggleFavoritePreset(m_auditionedPreset);
+                triggerHudToast(isFav ? "Removed from favorites: " + m_auditionedPreset : "Added to favorites: " + m_auditionedPreset);
+            } else {
+                triggerHudToast("Save or load a preset first");
+            }
+        }
+        if (ImGui::IsItemHovered()) {
+            if (!m_auditionedPreset.empty()) {
+                ImGui::SetTooltip(isFav ? "Remove '%s' from Favorites" : "Add '%s' to Favorites", m_auditionedPreset.c_str());
+            } else {
+                ImGui::SetTooltip("Add current preset to Favorites (save or load a preset first)");
+            }
+        }
+
+        ImGui::SameLine(0, kBtnSpacing);
         if (CenteredButton("Export DAW...", ImVec2(0, barBtnH))) {
             m_exportDawModal.open();
         }
@@ -1248,16 +1318,7 @@ void RackView::renderSceneBar() {
             if (ImGui::BeginCombo("##UserPresetsCombo", "Quick Load...")) {
                 for (const auto& pName : userPresets) {
                     if (ImGui::Selectable(pName.c_str())) {
-                        if (m_scenes.loadPresetChain(pName, m_graph)) {
-                            m_auditionedPreset = pName;
-                            syncMacrosFromGraph();
-                            m_undoManager.pushSnapshot(
-                                state::SceneManager::captureGraphSnapshot(m_graph, "Preset: " + pName),
-                                "Preset: " + pName,
-                                state::UndoActionType::SceneSwitch
-                            );
-                            triggerHudToast("Loaded preset: " + pName);
-                        }
+                        loadPresetChain(pName);
                     }
                 }
                 ImGui::EndCombo();
@@ -1281,6 +1342,11 @@ void RackView::renderSceneBar() {
                 if (m_presetNameBuffer[0] != '\0') {
                     m_scenes.savePresetChain(m_presetNameBuffer, m_graph);
                     m_auditionedPreset = m_presetNameBuffer;
+                    state::AppConfig cfg;
+                    cfg.load();
+                    cfg.lastLoadedPreset = m_presetNameBuffer;
+                    cfg.save();
+                    m_cachedConfig = cfg;
                     triggerHudToast(std::string("Preset '") + m_presetNameBuffer + "' saved!");
                     m_showSavePresetModal = false;
                 }
@@ -1312,7 +1378,6 @@ void RackView::renderSignalRack() {
     }
 
     const float cardW = 240.0f;
-    const float cardH = 224.0f;
     const float wireW = 36.0f;
     const float insertCardW = 80.0f;
     const float outputCardW = 100.0f;
@@ -1348,8 +1413,6 @@ void RackView::renderSignalRack() {
     // Output destination card (+32px wire + 100px card = 132px)
     totalContentWidth += (wireW + outputCardW);
 
-    const float totalContentHeight = hasParallel ? 616.0f : 240.0f;
-
     // 2. Viewport Dimension Acquisition & Dynamic Centering
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const float viewportWidth = avail.x;
@@ -1357,22 +1420,45 @@ void RackView::renderSignalRack() {
 
     const float safeW = (std::isnan(viewportWidth) || viewportWidth <= 0.0f) ? 0.0f : viewportWidth;
     const float safeH = (std::isnan(viewportHeight) || viewportHeight <= 0.0f) ? 0.0f : viewportHeight;
+
+    // Dynamically calculate parallel block height based on branch collapse/expand states
+    float maxParallelH = 0.0f;
+    for (size_t i = 0; i < numNodes; ++i) {
+        auto* node = m_graph.getNode(i);
+        if (node && node->type() == audio::NodeType::ParallelSplitMerge) {
+            std::string k0 = "b" + std::to_string(i) + "_0";
+            std::string k1 = "b" + std::to_string(i) + "_1";
+            bool m0 = m_branchMinimized[k0];
+            bool m1 = m_branchMinimized[k1];
+            const float envHeaderH = 36.0f;
+            const float envPadY = 10.0f;
+            const float branchCardH = 224.0f;
+            const float envH = envHeaderH + (2.0f * envPadY) + branchCardH; // 280.0f
+            const float h0 = m0 ? envHeaderH : envH;
+            const float h1 = m1 ? envHeaderH : envH;
+            const float bH = h0 + 20.0f + h1;
+            if (bH > maxParallelH) maxParallelH = bH;
+        }
+    }
+
+    // Standard compact card height for rack elements (224px default)
+    const float serialCardH = 224.0f;
+
+    const float totalContentHeight = hasParallel ? std::max(serialCardH, maxParallelH) : serialCardH;
+
     const float offsetX = std::max(20.0f, (safeW - totalContentWidth) * 0.5f);
     const float offsetY = std::max(16.0f, (safeH - totalContentHeight) * 0.5f);
 
-    float centerY = 120.0f;
-    float serialCardY = 8.0f;
-    float rackTotalH = 240.0f;
-
-    if (hasParallel) {
-        centerY = offsetY + 310.0f;
-        serialCardY = centerY - (cardH * 0.5f); // offsetY + 198.0f
-        rackTotalH = offsetY + 600.0f;
+    float centerY = 0.0f;
+    float rackTotalH = 0.0f;
+    if (safeH >= totalContentHeight) {
+        centerY = safeH * 0.5f;
+        rackTotalH = safeH;
     } else {
-        serialCardY = offsetY + 8.0f;
-        centerY = serialCardY + (cardH * 0.5f);  // offsetY + 120.0f
-        rackTotalH = offsetY + cardH + 16.0f;
+        centerY = offsetY + (totalContentHeight * 0.5f);
+        rackTotalH = offsetY + totalContentHeight + 16.0f;
     }
+    const float serialCardY = centerY - (serialCardH * 0.5f);
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 winPos = ImGui::GetWindowPos();
@@ -1388,7 +1474,7 @@ void RackView::renderSignalRack() {
 
     // 1. Input Node Card
     ImGui::SetCursorPos(ImVec2(currentX, serialCardY));
-    renderInputCard(serialCardY);
+    renderInputCard(serialCardY, serialCardH);
     currentX += inputCardW;
 
     float prevPeak = std::max(m_graph.inputMeter().peakLeft(), m_graph.inputMeter().peakRight());
@@ -1407,7 +1493,7 @@ void RackView::renderSignalRack() {
             currentX += wireW;
 
             ImGui::SetCursorPos(ImVec2(currentX, serialCardY));
-            renderPluginSlot(slot, static_cast<int>(i), -1, -1);
+            renderPluginSlot(slot, static_cast<int>(i), -1, -1, serialCardH);
             currentX += cardW;
 
             if (slot) {
@@ -1435,8 +1521,8 @@ void RackView::renderSignalRack() {
     ImGui::SetCursorPos(ImVec2(currentX, serialCardY));
     ImGui::BeginGroup();
     ImGui::PushStyleColor(ImGuiCol_ChildBg, static_cast<ImVec4>(tokens.surfaces.cardBg));
-    ImGui::BeginChild("InsertSerialCard", ImVec2(insertCardW, cardH), true, ImGuiWindowFlags_NoScrollbar);
-    ImGui::SetCursorPos(ImVec2((insertCardW - 48.0f) * 0.5f, (cardH - 48.0f) * 0.5f));
+    ImGui::BeginChild("InsertSerialCard", ImVec2(insertCardW, serialCardH), true, ImGuiWindowFlags_NoScrollbar);
+    ImGui::SetCursorPos(ImVec2((insertCardW - 48.0f) * 0.5f, (serialCardH - 48.0f) * 0.5f));
     if (renderCenteredPlusButton("##AddPluginSerial", ImVec2(48.0f, 48.0f), 11.0f)) {
         m_pluginBrowserModal->open(-1, -1);
     }
@@ -1465,17 +1551,19 @@ void RackView::renderSignalRack() {
     currentX += wireW;
 
     ImGui::SetCursorPos(ImVec2(currentX, serialCardY));
-    ImGui::BeginGroup();
     ImGui::PushStyleColor(ImGuiCol_ChildBg, static_cast<ImVec4>(tokens.surfaces.cardBg));
-    ImGui::BeginChild("OutputDestNode", ImVec2(100.0f, cardH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-    renderBadgePill("OUTPUT", tokens.surfaces.branchABg, tokens.borders.branchABorder, tokens.text.badgeVst3, Metrics::pillHeight());
-    ImGui::Spacing();
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 6.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 4.0f));
+    ImGui::BeginChild("OutputDestNode", ImVec2(100.0f, serialCardH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    renderBadgePill("OUTPUT", tokens.surfaces.branchABg, tokens.borders.branchABorder, tokens.text.badgeVst3, 18.0f);
     ImGui::TextDisabled("To ASIO");
-    ImGui::Spacing();
-    renderMeter("FinalL", m_graph.outputMeter().peakLeft(), 14, 115);
-    ImGui::SameLine(0, 6);
-    renderMeter("FinalR", m_graph.outputMeter().peakRight(), 14, 115);
+    const float rackMeterW = 14.0f;
+    const float outMeterH = std::max(40.0f, ImGui::GetContentRegionAvail().y - 4.0f);
+    renderMeter("FinalL", m_graph.outputMeter().peakLeft(), rackMeterW, outMeterH);
+    ImGui::SameLine(0, 6.0f);
+    renderMeter("FinalR", m_graph.outputMeter().peakRight(), rackMeterW, outMeterH);
     ImGui::EndChild();
+    ImGui::PopStyleVar(2);
     ImGui::PopStyleColor();
     ImGui::EndGroup();
     currentX += 100.0f;
@@ -1494,7 +1582,7 @@ void RackView::renderSignalRack() {
     ImGui::EndChild();
 }
 
-void RackView::renderInputCard(float cardY) {
+void RackView::renderInputCard(float cardY, float cardH) {
     if (cardY >= 0.0f) {
         ImGui::SetCursorPosY(cardY);
     }
@@ -1502,9 +1590,9 @@ void RackView::renderInputCard(float cardY) {
     ImGui::BeginGroup();
     ImGui::PushStyleColor(ImGuiCol_ChildBg, static_cast<ImVec4>(tokens.surfaces.cardBg));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 6.0f));
-    ImGui::BeginChild("InputGainNode", ImVec2(180, 224), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-    renderBadgePill("INPUT", tokens.surfaces.branchABg, tokens.borders.branchABorder, tokens.text.badgeVst3, Metrics::pillHeight());
-    ImGui::Spacing();
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 4.0f));
+    ImGui::BeginChild("InputGainNode", ImVec2(180.0f, cardH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    renderBadgePill("INPUT", tokens.surfaces.branchABg, tokens.borders.branchABorder, tokens.text.badgeVst3, 18.0f);
 
     // Input Channel Routing Selector (Mono/Stereo)
     auto inputConfig = m_graph.inputRouting();
@@ -1519,7 +1607,7 @@ void RackView::renderInputCard(float cardY) {
     else if (inputConfig.mode == audio::InputRoutingMode::MonoRight) currentModeIdx = 1;
     else if (inputConfig.mode == audio::InputRoutingMode::Stereo) currentModeIdx = 2;
 
-    ImGui::SetNextItemWidth(155);
+    ImGui::SetNextItemWidth(164.0f);
     if (ImGui::Combo("##InRoute", &currentModeIdx, routingLabels, 3)) {
         if (currentModeIdx == 0) inputConfig.mode = audio::InputRoutingMode::MonoLeft;
         else if (currentModeIdx == 1) inputConfig.mode = audio::InputRoutingMode::MonoRight;
@@ -1532,25 +1620,27 @@ void RackView::renderInputCard(float cardY) {
         cfg.save();
     }
 
-    ImGui::Spacing();
     float inGain = m_graph.inputGainDb();
-    if (ResettableVSliderFloat("##InGain", ImVec2(24, 108), &inGain, -24.0f, +24.0f, 0.0f, "")) {
+    const float availH = ImGui::GetContentRegionAvail().y;
+    const float meterH = std::max(40.0f, availH - 4.0f);
+    if (ResettableVSliderFloat("##InGain", ImVec2(24.0f, meterH), &inGain, -24.0f, +24.0f, 0.0f, "")) {
         m_graph.setInputGainDb(inGain);
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Input Gain (Double-click to reset 0 dB)");
-    ImGui::SameLine(0, 8);
-    renderMeter("InL", m_graph.inputMeter().peakLeft(), 10, 108);
-    ImGui::SameLine(0, 4);
-    renderMeter("InR", m_graph.inputMeter().peakRight(), 10, 108);
+    const float rackMeterW = 14.0f;
+    ImGui::SameLine(0, 8.0f);
+    renderMeter("InL", m_graph.inputMeter().peakLeft(), rackMeterW, meterH);
+    ImGui::SameLine(0, 6.0f);
+    renderMeter("InR", m_graph.inputMeter().peakRight(), rackMeterW, meterH);
 
-    ImGui::SameLine(0, 8);
+    ImGui::SameLine(0, 8.0f);
     ImGui::BeginGroup();
     ImGui::Text("%.0fdB", inGain);
     ImGui::TextDisabled("Gain");
     ImGui::EndGroup();
 
     ImGui::EndChild();
-    ImGui::PopStyleVar();
+    ImGui::PopStyleVar(2);
     ImGui::PopStyleColor();
     ImGui::EndGroup();
 }
@@ -1582,7 +1672,7 @@ static inline std::string formatMacroLabel(const std::string& rawLabel, int macr
     return s.substr(0, 5) + "...";
 }
 
-void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int blockIndex, int branchIndex) {
+void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int blockIndex, int branchIndex, float cardHeight) {
     if (!slot) return;
 
     initMacrosForSlot(slot);
@@ -1604,9 +1694,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
     char childId[64];
     std::snprintf(childId, sizeof(childId), "SlotCard_%d_%d_%d", slotIndex, blockIndex, branchIndex);
 
-    // Standardized exact dimensions: 240 x 224 px
     const float cardWidth = 240.0f;
-    const float cardHeight = 224.0f;
     const ImVec2 cardScreenMin = ImGui::GetCursorScreenPos();
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 6.0f));
     ImGui::BeginChild(childId, ImVec2(cardWidth, cardHeight), true, ImGuiWindowFlags_NoScrollbar);
@@ -1786,15 +1874,20 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
     }
 
     // =========================================================================
-    // SECTION 2: BODY SECTION (H = 56px, Y = 34px..90px)
+    // SECTION 2: BODY SECTION (Faceplate preview badge)
     // =========================================================================
+    const float extraH = std::max(0.0f, cardHeight - 224.0f);
+    const float previewW = 224.0f;
+    const float previewH = 56.0f + extraH * 0.38f;
+    const float knobY = 34.0f + previewH + 4.0f + extraH * 0.12f;
+    const float knobR = (cardHeight > 260.0f) ? 12.0f : 11.0f;
+    const float trimY = (cardHeight > 224.0f) ? (cardHeight - 36.0f) : 182.0f;
+    const float mixY = (cardHeight > 224.0f) ? (trimY - 30.0f) : 152.0f;
+
     {
         ImGui::SetCursorPos(ImVec2(8.0f, 34.0f));
         const ImVec2 previewPos = ImGui::GetCursorScreenPos();
-        const float previewW = 224.0f;
-        const float previewH = 56.0f;
         ImDrawList* dl = ImGui::GetWindowDrawList();
-
 
         // Multi-layer Frame Glow Border
         ImU32 frameBg = isFaulted ? static_cast<ImU32>(tokens.surfaces.cardBgFaulted) :
@@ -1847,7 +1940,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             dl->AddText(ImVec2(previewPos.x + (previewW - sSz.x) * 0.5f, previewPos.y + 18.0f),
                         tokens.text.secondary, missSub);
 
-            ImGui::SetCursorScreenPos(ImVec2(previewPos.x + (previewW - 140.0f) * 0.5f, previewPos.y + 33.0f));
+            ImGui::SetCursorScreenPos(ImVec2(previewPos.x + (previewW - 140.0f) * 0.5f, previewPos.y + previewH - 23.0f));
             char replaceBtnId[48];
             std::snprintf(replaceBtnId, sizeof(replaceBtnId), "FIND REPLACEMENT##%d_%d_%d", slotIndex, blockIndex, branchIndex);
             if (ImGui::Button(replaceBtnId, ImVec2(140.0f, 18.0f))) {
@@ -1864,7 +1957,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             dl->AddText(ImVec2(previewPos.x + (previewW - sSz.x) * 0.5f, previewPos.y + 18.0f),
                         tokens.text.secondary, crashSub);
 
-            ImGui::SetCursorScreenPos(ImVec2(previewPos.x + (previewW - 130.0f) * 0.5f, previewPos.y + 33.0f));
+            ImGui::SetCursorScreenPos(ImVec2(previewPos.x + (previewW - 130.0f) * 0.5f, previewPos.y + previewH - 23.0f));
             char reloadBtnId[48];
             std::snprintf(reloadBtnId, sizeof(reloadBtnId), "RELOAD PLUGIN##%d_%d_%d", slotIndex, blockIndex, branchIndex);
             if (ImGui::Button(reloadBtnId, ImVec2(130.0f, 18.0f))) {
@@ -1900,13 +1993,11 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
     }
 
     // =========================================================================
-    // SECTION 3: 4 FRONT-PANEL MACRO MINI-KNOBS (H = 54px, Y = 94px..148px)
+    // SECTION 3: 4 FRONT-PANEL MACRO MINI-KNOBS
     // =========================================================================
     {
         auto& macros = slot->macros();
         const float colW = 56.0f;
-        const float knobR = 11.0f;
-        const float knobY = 94.0f;
 
         for (int m = 0; m < 4; ++m) {
             auto& macro = macros[m];
@@ -1928,7 +2019,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                 }
             }
 
-            ImGui::SetCursorPos(ImVec2(colX + 13.0f, knobY));
+            ImGui::SetCursorPos(ImVec2(colX + (colW - (knobR * 2.0f + 8.0f)) * 0.5f, knobY));
 
             HardwareKnobOptions opt;
             opt.radius = knobR;
@@ -2057,16 +2148,19 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             } else {
                 std::snprintf(valBuf, sizeof(valBuf), "%.1f", macro.currentValue);
             }
+            const float valY = knobY + knobR * 2.0f + 6.0f;
+            const float lblY = valY + 12.0f;
+
             if (g_fontMono) ImGui::PushFont(g_fontMono);
             ImVec2 vSz = ImGui::CalcTextSize(valBuf);
-            ImGui::SetCursorPos(ImVec2(colX + (colW - vSz.x) * 0.5f, 122.0f));
+            ImGui::SetCursorPos(ImVec2(colX + (colW - vSz.x) * 0.5f, valY));
             ImGui::TextColored(tokens.text.primary.vec4, "%s", valBuf);
             if (g_fontMono) ImGui::PopFont();
 
             // Tier 2: Pro-audio parameter label centered beneath value
             std::string dLabel = formatMacroLabel(macro.label, m);
             ImVec2 lSz = ImGui::CalcTextSize(dLabel.c_str());
-            ImGui::SetCursorPos(ImVec2(colX + (colW - lSz.x) * 0.5f, 134.0f));
+            ImGui::SetCursorPos(ImVec2(colX + (colW - lSz.x) * 0.5f, lblY));
             ImGui::TextColored(tokens.text.secondary.vec4, "%s", dLabel.c_str());
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("%s (Macro %d)", macro.label.c_str(), m + 1);
@@ -2075,11 +2169,11 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
     }
 
     // =========================================================================
-    // SECTION 4: TACTILE MIX SLIDER & MINI METER (H = 26px, Y = 152px..178px)
+    // SECTION 4: TACTILE MIX SLIDER & MINI METER
     // =========================================================================
     {
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 3.5f));
-        ImGui::SetCursorPos(ImVec2(8.0f, 152.0f));
+        ImGui::SetCursorPos(ImVec2(8.0f, mixY));
 
         float mix = slot->dryWet() * 100.0f;
         char mixLabel[32];
@@ -2123,10 +2217,10 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
     }
 
     // =========================================================================
-    // SECTION 5: TACTILE OUTPUT TRIM SLIDER (H = 26px, Y = 182px..208px)
+    // SECTION 5: TACTILE OUTPUT TRIM SLIDER
     // =========================================================================
     {
-        ImGui::SetCursorPos(ImVec2(8.0f, 182.0f));
+        ImGui::SetCursorPos(ImVec2(8.0f, trimY));
         float outTrim = slot->outputGainDb();
         char trimLabel[32];
         std::snprintf(trimLabel, sizeof(trimLabel), "##Trim_%d_%d_%d", slotIndex, blockIndex, branchIndex);
@@ -2290,26 +2384,30 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
     const float minEnvelopeW = 540.0f;
     const float envelopeW = std::max({ w0, w1, minEnvelopeW });
 
-    // Vertical positioning:
-    // With centerY = 322.0f, card0MidY = 170.0f (centerY - 152.0f), card1MidY = 474.0f (centerY + 152.0f)
-    const float card0MidY = centerY - 152.0f; // 170.0f
-    const float card1MidY = centerY + 152.0f; // 474.0f
+    const std::string key0 = "b" + std::to_string(blockIndex) + "_0";
+    const std::string key1 = "b" + std::to_string(blockIndex) + "_1";
+    bool min0 = m_branchMinimized[key0];
+    bool min1 = m_branchMinimized[key1];
 
-    const float card0Top = card0MidY - (cardH * 0.5f); // 58.0f
-    const float card1Top = card1MidY - (cardH * 0.5f); // 362.0f
+    const float chassisH0 = min0 ? envHeaderH : envH;
+    const float chassisH1 = min1 ? envHeaderH : envH;
+    const float branchGap = 20.0f;
+    const float totalBlockH = chassisH0 + branchGap + chassisH1;
 
-    const float envY0 = card0Top - envPadY - envHeaderH; // 12.0f
-    const float envY1 = card1Top - envPadY - envHeaderH; // 316.0f
+    // Symmetrically center the parallel envelopes around centerY
+    const float envY0 = centerY - (totalBlockH * 0.5f);
+    const float envY1 = envY0 + chassisH0 + branchGap;
+
+    const float card0Top = envY0 + envHeaderH + envPadY;
+    const float card1Top = envY1 + envHeaderH + envPadY;
+
+    const float card0MidY = card0Top + (cardH * 0.5f);
+    const float card1MidY = card1Top + (cardH * 0.5f);
 
     const float startX = ImGui::GetCursorPosX();
     const float forkLeadW = 36.0f;
     const float forkStartX = startX;
     const float envX = forkStartX + forkLeadW;
-
-    const std::string key0 = "b" + std::to_string(blockIndex) + "_0";
-    const std::string key1 = "b" + std::to_string(blockIndex) + "_1";
-    bool min0 = m_branchMinimized[key0];
-    bool min1 = m_branchMinimized[key1];
 
     const float port0Y = min0 ? (envY0 + envHeaderH * 0.5f) : card0MidY;
     const float port1Y = min1 ? (envY1 + envHeaderH * 0.5f) : card1MidY;
@@ -3479,16 +3577,7 @@ void RackView::renderPresetBrowserModal() {
 
                     std::string selectId = "##SelectPresetRow_" + std::to_string(displayedCount);
                     if (ImGui::Selectable(selectId.c_str(), false, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap, ImVec2(0.0f, 0.0f))) {
-                        if (m_scenes.loadPresetChain(pName, m_graph)) {
-                            m_auditionedPreset = pName;
-                            syncMacrosFromGraph();
-                            m_undoManager.pushSnapshot(
-                                state::SceneManager::captureGraphSnapshot(m_graph, "Preset: " + pName),
-                                "Preset: " + pName,
-                                state::UndoActionType::SceneSwitch
-                            );
-                            triggerHudToast("Loaded preset: " + pName);
-                        }
+                        loadPresetChain(pName);
                     }
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Click to load preset (10ms crossfade)");
@@ -3704,15 +3793,29 @@ void RackView::saveLastRiff() {
 #else
     localtime_r(&now, &tmNow);
 #endif
-    char timeStr[64];
-    std::strftime(timeStr, sizeof(timeStr), "Riff_%Y%m%d_%H%M%S.wav", &tmNow);
-    std::filesystem::path outPath = riffDir / timeStr;
+
+    std::string activePreset = m_auditionedPreset;
+    if (activePreset.empty()) {
+        int activeScene = m_scenes.activeSceneIndex();
+        if (activeScene >= 0 && activeScene < static_cast<int>(m_scenes.numScenes())) {
+            const auto* sc = m_scenes.getScene(activeScene);
+            if (sc && !sc->name.empty()) {
+                activePreset = sc->name;
+            }
+        }
+    }
+    if (activePreset.empty() && !m_favoritePresets.empty()) {
+        activePreset = m_favoritePresets.front();
+    }
+
+    const std::string riffFileName = formatRiffFilename(activePreset, m_metronome.bpm(), tmNow);
+    std::filesystem::path outPath = riffDir / riffFileName;
 
     uint32_t sr = static_cast<uint32_t>(sampleRate);
     std::string pathStr = outPath.string();
 
     utils::asyncWriteWav24Bit(pathStr, std::move(stagingL), std::move(stagingR), sr, nullptr);
-    triggerHudToast("SAVED RIFF: " + std::string(timeStr));
+    triggerHudToast("SAVED RIFF: " + riffFileName);
 }
 
 void RackView::cycleAdjacentScenePreset(int delta) {

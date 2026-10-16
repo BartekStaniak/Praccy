@@ -196,7 +196,7 @@ inline void DrawStrobeTunerModule(const tools::TunerResult& result,
 
     const bool isTunerEnabled = tuner ? tuner->isEnabled() : true;
 
-    const float dialRadius = std::clamp((availH - 18.0f) * 0.5f, 22.0f, 32.0f);
+    const float dialRadius = std::clamp((availH - 16.0f) * 0.5f, 24.0f, 42.0f);
     const float dialMarginX = dialRadius + 8.0f;
     const ImVec2 dialCenter(startPos.x + dialMarginX, startPos.y + availH * 0.5f);
 
@@ -208,17 +208,18 @@ inline void DrawStrobeTunerModule(const tools::TunerResult& result,
     const float textAvailW = std::max(60.0f, availW - (textStartX - startPos.x));
 
     // Header Row: Title, Settings Button, and On/Off Toggle Button
-    float curY = startPos.y + 4.0f;
+    float curY = startPos.y + 6.0f;
 
-    // Header buttons layout (replacing the listening pill):
+    // Header buttons layout (standard button size):
     // [ Settings Button ⚙ ]  [ On/Off Power Button ⏻ ]
-    const float btnW = 20.0f;
-    const float btnH = 18.0f;
+    const float btnH = Metrics::buttonHeight();
+    const float btnW = btnH;
     const float btnGap = 4.0f;
     const float powerBtnX = textStartX + textAvailW - btnW - 2.0f;
     const float settingsBtnX = powerBtnX - btnW - btnGap;
 
-    dl->AddText(ImVec2(textStartX, curY), tokens.text.muted.u32, "TUNER");
+    const float titleTextY = curY + (btnH - ImGui::GetFontSize()) * 0.5f;
+    dl->AddText(ImVec2(textStartX, titleTextY), tokens.text.muted.u32, "TUNER");
 
     // Optional compact tuning subtitle badge if room allows
     const float titleW = ImGui::CalcTextSize("TUNER").x;
@@ -238,10 +239,11 @@ inline void DrawStrobeTunerModule(const tools::TunerResult& result,
         }
         ImVec2 badgeSize = ImGui::CalcTextSize(badgeBuf);
         if (badgeSize.x <= subAvailW) {
-            dl->AddRectFilled(ImVec2(subStartX, curY),
-                              ImVec2(subStartX + badgeSize.x + 6.0f, curY + badgeSize.y + 2.0f),
+            const float badgeY = curY + (btnH - (badgeSize.y + 2.0f)) * 0.5f;
+            dl->AddRectFilled(ImVec2(subStartX, badgeY),
+                              ImVec2(subStartX + badgeSize.x + 6.0f, badgeY + badgeSize.y + 2.0f),
                               tokens.surfaces.cardBg.u32, 2.0f);
-            dl->AddText(ImVec2(subStartX + 3.0f, curY + 1.0f),
+            dl->AddText(ImVec2(subStartX + 3.0f, badgeY + 1.0f),
                         isTunerEnabled ? tokens.text.secondary.u32 : tokens.text.muted.u32,
                         badgeBuf);
         }
@@ -249,7 +251,7 @@ inline void DrawStrobeTunerModule(const tools::TunerResult& result,
 
     // 1. Tuner Settings Button (immediately to the left of the power button)
     if (settingsBtnX > textStartX + titleW + 10.0f) {
-        ImGui::SetCursorScreenPos(ImVec2(settingsBtnX, curY - 1.0f));
+        ImGui::SetCursorScreenPos(ImVec2(settingsBtnX, curY));
         if (ImGui::InvisibleButton("##TunerSettingsBtn", ImVec2(btnW, btnH))) {
             if (onOpenSettings) onOpenSettings();
         }
@@ -264,18 +266,18 @@ inline void DrawStrobeTunerModule(const tools::TunerResult& result,
         const ImU32 settingsBorder = settingsHovered ? tokens.borders.focus.u32 : tokens.borders.subtle.u32;
         const ImU32 settingsIconCol = settingsHovered ? tokens.text.primary.u32 : tokens.text.secondary.u32;
 
-        dl->AddRectFilled(ImVec2(settingsBtnX, curY - 1.0f),
-                          ImVec2(settingsBtnX + btnW, curY - 1.0f + btnH),
-                          settingsBg, 3.0f);
-        dl->AddRect(ImVec2(settingsBtnX, curY - 1.0f),
-                    ImVec2(settingsBtnX + btnW, curY - 1.0f + btnH),
-                    settingsBorder, 3.0f, 0, 1.0f);
-        DrawGearGlyph(dl, ImVec2(settingsBtnX + btnW * 0.5f, curY - 1.0f + btnH * 0.5f), 4.2f, settingsIconCol);
+        dl->AddRectFilled(ImVec2(settingsBtnX, curY),
+                          ImVec2(settingsBtnX + btnW, curY + btnH),
+                          settingsBg, 4.0f);
+        dl->AddRect(ImVec2(settingsBtnX, curY),
+                    ImVec2(settingsBtnX + btnW, curY + btnH),
+                    settingsBorder, 4.0f, 0, 1.0f);
+        DrawGearGlyph(dl, ImVec2(settingsBtnX + btnW * 0.5f, curY + btnH * 0.5f), 5.8f, settingsIconCol);
     }
 
     // 2. On/Off Toggle Button with Power Glyph (immediately to the right of settings button)
     if (powerBtnX > textStartX + titleW + 20.0f) {
-        ImGui::SetCursorScreenPos(ImVec2(powerBtnX, curY - 1.0f));
+        ImGui::SetCursorScreenPos(ImVec2(powerBtnX, curY));
         if (ImGui::InvisibleButton("##TunerPowerToggleBtn", ImVec2(btnW, btnH))) {
             if (tuner) {
                 tuner->setEnabled(!tuner->isEnabled());
@@ -298,16 +300,16 @@ inline void DrawStrobeTunerModule(const tools::TunerResult& result,
         const ImU32 powerIconCol = isTunerEnabled ? tokens.signal.tunerInTune.u32
                                 : (powerHovered ? tokens.text.secondary.u32 : tokens.text.muted.u32);
 
-        dl->AddRectFilled(ImVec2(powerBtnX, curY - 1.0f),
-                          ImVec2(powerBtnX + btnW, curY - 1.0f + btnH),
-                          powerBg, 3.0f);
-        dl->AddRect(ImVec2(powerBtnX, curY - 1.0f),
-                    ImVec2(powerBtnX + btnW, curY - 1.0f + btnH),
-                    powerBorder, 3.0f, 0, 1.0f);
-        DrawPowerGlyph(dl, ImVec2(powerBtnX + btnW * 0.5f, curY - 1.0f + btnH * 0.5f), 4.6f, powerIconCol, 1.5f);
+        dl->AddRectFilled(ImVec2(powerBtnX, curY),
+                          ImVec2(powerBtnX + btnW, curY + btnH),
+                          powerBg, 4.0f);
+        dl->AddRect(ImVec2(powerBtnX, curY),
+                    ImVec2(powerBtnX + btnW, curY + btnH),
+                    powerBorder, 4.0f, 0, 1.0f);
+        DrawPowerGlyph(dl, ImVec2(powerBtnX + btnW * 0.5f, curY + btnH * 0.5f), 6.5f, powerIconCol, 2.0f);
     }
 
-    curY += 18.0f;
+    curY += btnH + (availH >= 85.0f ? 8.0f : 5.0f);
 
     // Tabular Monospace Readout: Frequency & Cents
     char freqBuf[32];
@@ -339,11 +341,11 @@ inline void DrawStrobeTunerModule(const tools::TunerResult& result,
     }
     if (g_fontMono) ImGui::PopFont();
 
-    curY += 20.0f;
+    curY += ImGui::GetFontSize() + (availH >= 85.0f ? 8.0f : 5.0f);
 
     // Mini Horizontal Deviation Track Bar
     const float barW = std::max(40.0f, textAvailW - 4.0f);
-    const float barH = 7.0f;
+    const float barH = (availH >= 85.0f ? 9.0f : 7.0f);
     const ImVec2 barMin(textStartX, curY);
     const ImVec2 barMax(textStartX + barW, curY + barH);
 

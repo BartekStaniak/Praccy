@@ -388,6 +388,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             scenes.applyScene(0, graph);
         }
     });
+
+    // Initialize ASIO
+    praccy::audio::AsioManager asio;
+
+    praccy::ui::RackView rackView(graph, asio, tuner, metronome, player, looper, midi, scenes, scanner);
+    rackView.setDspStats(&dspLoadPercent, &dspDropouts);
+
     g_dragDropRouter.setChainHandler([&](const std::filesystem::path& p) {
         auto* dawAdapter = praccy::state::UniversalDawInteropManager::instance().findAdapter(p);
         if (dawAdapter) {
@@ -395,15 +402,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         } else if (std::filesystem::exists(p) && scenes.loadFromFile(p.string())) {
             scenes.applyScene(0, graph);
         } else {
-            scenes.loadPresetChain(p.stem().string(), graph);
+            rackView.loadPresetChain(p.stem().string());
         }
     });
-
-    // Initialize ASIO
-    praccy::audio::AsioManager asio;
-
-    praccy::ui::RackView rackView(graph, asio, tuner, metronome, player, looper, midi, scenes, scanner);
-    rackView.setDspStats(&dspLoadPercent, &dspDropouts);
 
     asio.setAudioCallback([&](const praccy::audio::AudioBufferView& in, praccy::audio::AudioBufferView& out) {
         auto t0 = std::chrono::high_resolution_clock::now();
@@ -611,6 +612,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     // Persist configuration
     appConfig.load();
+    if (!rackView.activePreset().empty()) {
+        appConfig.lastLoadedPreset = rackView.activePreset();
+    }
     appConfig.inputMode = graph.inputRouting().mode;
     appConfig.inputGainDb = graph.inputGainDb();
     appConfig.masterVolumeDb = graph.masterVolumeDb();

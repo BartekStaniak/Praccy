@@ -45,6 +45,7 @@ struct AppConfig {
     std::vector<std::string> customPluginPaths;
     std::vector<std::string> favoritePlugins;
     std::vector<std::string> favoritePresets;
+    std::string lastLoadedPreset;
     std::unordered_map<std::string, std::string> customPluginCategories;
     std::vector<std::string> recentPlugins;
     std::vector<ScannedPluginEntry> scannedPlugins;

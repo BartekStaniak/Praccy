@@ -110,6 +110,8 @@ bool AppConfig::load(const std::string& customPath) {
             }
         } else if (key == "riff_directory") {
             riffDirectory = val;
+        } else if (key == "last_loaded_preset") {
+            lastLoadedPreset = val;
         } else if (key == "rack_view_mode") {
             int modeVal = utils::parseInteger<int>(val, 0);
             rackViewMode = (modeVal == 1) ? RackViewMode::Modular : RackViewMode::Simple;
@@ -160,6 +162,7 @@ bool AppConfig::save(const std::string& customPath) const {
     file << "check_beta_updates=" << (checkBetaUpdates ? "1" : "0") << "\n";
     file << "retroactive_buffer_minutes=" << retroactiveBufferMinutes << "\n";
     file << "riff_directory=" << riffDirectory << "\n";
+    file << "last_loaded_preset=" << lastLoadedPreset << "\n";
     file << "rack_view_mode=" << static_cast<int>(rackViewMode) << "\n";
     file << "theme_id=" << themeId << "\n";
     file << "window_x=" << windowX << "\n";

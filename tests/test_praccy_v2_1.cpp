@@ -535,6 +535,28 @@ void test_T1_R2_WavWriter_24BitPcmRiffHeader() {
     assert(h.dataSize == 30);
 }
 
+void test_T1_R2_RiffFilename_Format() {
+    std::tm tmNow{};
+    tmNow.tm_year = 2026 - 1900;
+    tmNow.tm_mon = 10 - 1; // October
+    tmNow.tm_mday = 15;
+    tmNow.tm_hour = 1;
+    tmNow.tm_min = 41;
+    tmNow.tm_sec = 28;
+
+    // User specification test: "Modern High Gain Djent", 140 BPM, timestamp
+    std::string filename = audio::RetroactiveRiffBuffer::formatFilename("Modern High Gain Djent", 140.0f, tmNow);
+    assert(filename == "ModernHighGainDjent_140bpm_20261015_014128.wav");
+
+    // Empty preset fallback to "Init"
+    std::string fallback = audio::RetroactiveRiffBuffer::formatFilename("", 120.0f, tmNow);
+    assert(fallback == "Init_120bpm_20261015_014128.wav");
+
+    // Special characters stripped, keeping alphanumeric/dash/underscore
+    std::string special = audio::RetroactiveRiffBuffer::formatFilename("Lead / Solo [80s_Metal-Rig]", 128.4f, tmNow);
+    assert(special == "LeadSolo80s_Metal-Rig_128bpm_20261015_014128.wav");
+}
+
 // Tier 2: Boundary & Corner Cases (R2)
 void test_T2_R2_Buffer_Capacity_Durations() {
     audio::RetroactiveRiffBuffer buf;
@@ -773,6 +795,46 @@ void test_T1_R3_SceneBar_ToneSnapshotAB_Toggle() {
     // Toggle back to A
     activeState = toneA;
     assert(activeState.name == toneA.name);
+}
+
+void test_T1_R3_LastLoadedPreset_Persistence_And_Startup() {
+    const std::string tempIni = "test_last_preset_temp.ini";
+
+    // 1. AppConfig roundtrip serialization
+    state::AppConfig cfgSave;
+    cfgSave.lastLoadedPreset = "Modern High Gain Djent";
+    assert(cfgSave.save(tempIni));
+
+    state::AppConfig cfgLoad;
+    assert(cfgLoad.load(tempIni));
+    assert(cfgLoad.lastLoadedPreset == "Modern High Gain Djent");
+
+    // 2. Startup preset loading into GraphEngine
+    audio::GraphEngine graph;
+    graph.prepare(48000.0, 256);
+
+    state::SceneManager scenes;
+    bool loaded = scenes.loadPresetChain(cfgLoad.lastLoadedPreset, graph);
+    assert(loaded);
+
+    // Audio thread crossfade applies the new nodes
+    std::vector<float> inLeft(256, 0.1f);
+    std::vector<float> inRight(256, 0.1f);
+    std::vector<float> outLeft(256, 0.0f);
+    std::vector<float> outRight(256, 0.0f);
+    float* inChannels[2] = {inLeft.data(), inRight.data()};
+    float* outChannels[2] = {outLeft.data(), outRight.data()};
+    audio::AudioBufferView inView(inChannels, 2, 256);
+    audio::AudioBufferView outView(outChannels, 2, 256);
+
+    graph.process(inView, outView);
+    assert(graph.numNodes() > 0);
+
+    // 3. Fallback resilience on missing/invalid preset
+    bool missing = scenes.loadPresetChain("NonExistentPreset_XYZ", graph);
+    assert(!missing);
+
+    std::filesystem::remove(tempIni);
 }
 
 // Tier 2: Boundary & Corner Cases (R3)
@@ -1457,6 +1519,7 @@ int main() {
     RUN_TEST(test_T1_R2_RetroactiveBuffer_CircularAudioStorage);
     RUN_TEST(test_T1_R2_AtomicLatch_SliceCapture);
     RUN_TEST(test_T1_R2_WavWriter_24BitPcmRiffHeader);
+    RUN_TEST(test_T1_R2_RiffFilename_Format);
     RUN_TEST(test_T2_R2_Buffer_Capacity_Durations);
     RUN_TEST(test_T2_R2_Wav24Bit_Quantization_Precision);
     RUN_TEST(test_T3_R2_AudioThread_ZeroAlloc_ConcurrentPushAndCapture);
@@ -1466,6 +1529,7 @@ int main() {
     std::cout << "\n[MODULE 3] Transactional Undo/Redo & State Management (R3)\n";
     RUN_TEST(test_T1_R3_UndoRedo_BasicTransaction);
     RUN_TEST(test_T1_R3_SceneBar_ToneSnapshotAB_Toggle);
+    RUN_TEST(test_T1_R3_LastLoadedPreset_Persistence_And_Startup);
     RUN_TEST(test_T2_R3_HistoryStack_Capacity64_Eviction);
     RUN_TEST(test_T2_R3_RedoInvalidation_OnNewSnapshot);
     RUN_TEST(test_T3_R3_Coalescing_400ms_IdleThreshold);

@@ -445,6 +445,7 @@ void testAppConfigPersistence() {
     cfg.inputGainDb = 4.5f;
     cfg.masterVolumeDb = -2.0f;
     cfg.metronomeBpm = 135.0f;
+    cfg.lastLoadedPreset = "Modern High Gain Djent";
     cfg.rackViewMode = state::AppConfig::RackViewMode::Modular;
     cfg.customPluginPaths = {"D:\\VSTPlugins", "E:\\MyAudio"};
     cfg.scannedPlugins.push_back(state::ScannedPluginEntry{
@@ -477,6 +478,7 @@ void testAppConfigPersistence() {
     assert(std::abs(loaded.inputGainDb - 4.5f) < 1e-4f);
     assert(std::abs(loaded.masterVolumeDb - (-2.0f)) < 1e-4f);
     assert(std::abs(loaded.metronomeBpm - 135.0f) < 1e-4f);
+    assert(loaded.lastLoadedPreset == "Modern High Gain Djent");
     assert(loaded.rackViewMode == state::AppConfig::RackViewMode::Modular);
     assert(loaded.customPluginPaths.size() >= 2);
     assert(loaded.scannedPlugins.size() == 2);

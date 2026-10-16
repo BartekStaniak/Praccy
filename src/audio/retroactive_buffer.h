@@ -6,6 +6,10 @@
 #include <atomic>
 #include <cstring>
 #include <algorithm>
+#include <string>
+#include <cmath>
+#include <ctime>
+#include <cctype>
 
 namespace praccy::audio {
 
@@ -161,6 +165,41 @@ public:
     [[nodiscard]] size_t writeHead() const noexcept { return m_writeHead.load(std::memory_order_relaxed); }
     [[nodiscard]] int durationMinutes() const noexcept { return m_durationMinutes; }
     [[nodiscard]] double sampleRate() const noexcept { return m_sampleRate; }
+
+    /**
+     * @brief Generates standardized riff filename in "PRESET_BPM_TIMESTAMP" format
+     * e.g. "ModernHighGainDjent_140bpm_20261015_014128.wav".
+     */
+    [[nodiscard]] static std::string formatFilename(const std::string& presetName, float bpm, const std::tm& tmNow) {
+        // 1. Sanitize Preset: strip whitespace (producing PascalCase e.g. "Modern High Gain Djent" -> "ModernHighGainDjent")
+        // and keep filesystem-safe alphanumeric, underscore, and dash characters.
+        std::string presetPart;
+        presetPart.reserve(presetName.size());
+        for (char c : presetName) {
+            if (std::isspace(static_cast<unsigned char>(c))) {
+                continue;
+            }
+            if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-') {
+                presetPart.push_back(c);
+            }
+        }
+        if (presetPart.empty()) {
+            presetPart = "Init";
+        }
+
+        // 2. Format BPM (e.g. 140.0f -> "140bpm")
+        int bpmInt = static_cast<int>(std::round(bpm));
+        if (bpmInt < 20 || bpmInt > 400) {
+            bpmInt = 120;
+        }
+        std::string bpmPart = std::to_string(bpmInt) + "bpm";
+
+        // 3. Format Timestamp: YYYYMMDD_HHMMSS (e.g. "20261015_014128")
+        char timePart[32]{0};
+        std::strftime(timePart, sizeof(timePart), "%Y%m%d_%H%M%S", &tmNow);
+
+        return presetPart + "_" + bpmPart + "_" + timePart + ".wav";
+    }
 
 private:
     std::vector<float> m_bufferL;
