@@ -225,20 +225,19 @@ void TunerSettingsModal::renderInstrumentSection() {
     }
 
     int currentStrCountIdx = 0;
-    std::vector<std::string> strCountLabels;
-    std::vector<const char*> strCountCStrs;
-    for (size_t i = 0; i < availableCounts.size(); ++i) {
-        strCountLabels.push_back(std::to_string(availableCounts[i]) + " Strings");
+    char strCountLabels[12][24]{};
+    const char* strCountCStrs[12]{};
+    const size_t nCounts = std::min<size_t>(availableCounts.size(), 12);
+    for (size_t i = 0; i < nCounts; ++i) {
+        std::snprintf(strCountLabels[i], sizeof(strCountLabels[i]), "%d Strings", availableCounts[i]);
+        strCountCStrs[i] = strCountLabels[i];
         if (availableCounts[i] == cfg.stringCount) {
             currentStrCountIdx = static_cast<int>(i);
         }
     }
-    for (const auto& l : strCountLabels) {
-        strCountCStrs.push_back(l.c_str());
-    }
 
     ImGui::SetNextItemWidth(280.0f);
-    if (ImGui::Combo("##StringCountCombo", &currentStrCountIdx, strCountCStrs.data(), static_cast<int>(strCountCStrs.size()))) {
+    if (ImGui::Combo("##StringCountCombo", &currentStrCountIdx, strCountCStrs, static_cast<int>(nCounts))) {
         cfg.setStringCount(availableCounts[currentStrCountIdx]);
         m_tuner.setConfig(cfg);
     }
@@ -320,11 +319,11 @@ void TunerSettingsModal::renderPresetTuningSection() {
             if (isHighlighted) {
                 ImU32 rowColor;
                 if (std::abs(m_lastDetectedCents) <= 4.0f) {
-                    rowColor = ImGui::GetColorU32(ImVec4(0.12f, 0.42f, 0.20f, 0.45f)); // In tune emerald
+                    rowColor = tokens.signal.tunerInTune.withAlpha(0.45f).u32; // In tune emerald
                 } else if (m_lastDetectedCents < -4.0f) {
-                    rowColor = ImGui::GetColorU32(ImVec4(0.55f, 0.35f, 0.05f, 0.45f)); // Flat warm amber
+                    rowColor = tokens.signal.tunerFlat.withAlpha(0.45f).u32;   // Flat warm amber
                 } else {
-                    rowColor = ImGui::GetColorU32(ImVec4(0.58f, 0.15f, 0.15f, 0.45f)); // Sharp coral red
+                    rowColor = tokens.signal.tunerSharp.withAlpha(0.45f).u32;  // Sharp coral red
                 }
                 ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, rowColor);
                 ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, rowColor);
@@ -414,11 +413,11 @@ void TunerSettingsModal::renderCustomTuningSection() {
             if (isHighlighted) {
                 ImU32 rowColor;
                 if (std::abs(m_lastDetectedCents) <= 4.0f) {
-                    rowColor = ImGui::GetColorU32(ImVec4(0.12f, 0.42f, 0.20f, 0.45f));
+                    rowColor = tokens.signal.tunerInTune.withAlpha(0.45f).u32;
                 } else if (m_lastDetectedCents < -4.0f) {
-                    rowColor = ImGui::GetColorU32(ImVec4(0.55f, 0.35f, 0.05f, 0.45f));
+                    rowColor = tokens.signal.tunerFlat.withAlpha(0.45f).u32;
                 } else {
-                    rowColor = ImGui::GetColorU32(ImVec4(0.58f, 0.15f, 0.15f, 0.45f));
+                    rowColor = tokens.signal.tunerSharp.withAlpha(0.45f).u32;
                 }
                 ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, rowColor);
                 ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, rowColor);
@@ -558,7 +557,7 @@ void TunerSettingsModal::render() {
         const float footerHeight = Metrics::kFooterHeight;
         const float contentHeight = ImGui::GetContentRegionAvail().y - footerHeight;
 
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ColorToken::transparent().vec4);
         if (ImGui::BeginChild("TunerSettingsContentRegion", ImVec2(0, contentHeight), false)) {
             // Zone 1: Pitch Standard Section (Middle A / 440 Hz)
             renderPitchStandardSection();

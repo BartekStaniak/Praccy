@@ -10,6 +10,7 @@ namespace praccy::plugins {
 class FastParamValueQueue : public Steinberg::Vst::IParamValueQueue {
 public:
     FastParamValueQueue() = default;
+    virtual ~FastParamValueQueue() = default;
 
     void init(Steinberg::Vst::ParamID id, double value) noexcept {
         m_id = id;
@@ -31,9 +32,10 @@ public:
     }
 
     // Steinberg COM refcounting
-    Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID iid, void** obj) override {
-        if (Steinberg::FUnknownPrivate::iidEqual(iid, Steinberg::Vst::IParamValueQueue::iid) ||
-            Steinberg::FUnknownPrivate::iidEqual(iid, Steinberg::FUnknown::iid)) {
+    Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID queryIid, void** obj) override {
+        if (Steinberg::FUnknownPrivate::iidEqual(queryIid, Steinberg::Vst::IParamValueQueue::iid) ||
+            Steinberg::FUnknownPrivate::iidEqual(queryIid, Steinberg::FUnknown::iid)) {
+            addRef();
             *obj = static_cast<Steinberg::Vst::IParamValueQueue*>(this);
             return Steinberg::kResultOk;
         }
@@ -53,6 +55,7 @@ public:
     static constexpr size_t kMaxQueuedParams = 128;
 
     FastParameterChanges() = default;
+    virtual ~FastParameterChanges() = default;
 
     void clear() noexcept { m_count = 0; }
 
@@ -87,9 +90,10 @@ public:
     }
 
     // Steinberg COM refcounting
-    Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID iid, void** obj) override {
-        if (Steinberg::FUnknownPrivate::iidEqual(iid, Steinberg::Vst::IParameterChanges::iid) ||
-            Steinberg::FUnknownPrivate::iidEqual(iid, Steinberg::FUnknown::iid)) {
+    Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID queryIid, void** obj) override {
+        if (Steinberg::FUnknownPrivate::iidEqual(queryIid, Steinberg::Vst::IParameterChanges::iid) ||
+            Steinberg::FUnknownPrivate::iidEqual(queryIid, Steinberg::FUnknown::iid)) {
+            addRef();
             *obj = static_cast<Steinberg::Vst::IParameterChanges*>(this);
             return Steinberg::kResultOk;
         }

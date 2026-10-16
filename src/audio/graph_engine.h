@@ -489,8 +489,21 @@ public:
     void setInputGainDb(float db) noexcept { m_inputGainDb.store(db, std::memory_order_relaxed); }
     [[nodiscard]] float inputGainDb() const noexcept { return m_inputGainDb.load(std::memory_order_relaxed); }
 
-    void setInputRouting(const InputRoutingConfig& config) noexcept { m_inputConfig = config; }
-    [[nodiscard]] const InputRoutingConfig& inputRouting() const noexcept { return m_inputConfig; }
+    void setInputRouting(const InputRoutingConfig& config) noexcept {
+        const uint64_t packed =
+            (static_cast<uint64_t>(static_cast<uint8_t>(config.mode)) & 0xFFull) |
+            ((static_cast<uint64_t>(static_cast<uint16_t>(std::max(0, config.channelLeft))) & 0xFFFFull) << 8) |
+            ((static_cast<uint64_t>(static_cast<uint16_t>(std::max(0, config.channelRight))) & 0xFFFFull) << 24);
+        m_packedInputConfig.store(packed, std::memory_order_release);
+    }
+    [[nodiscard]] InputRoutingConfig inputRouting() const noexcept {
+        const uint64_t packed = m_packedInputConfig.load(std::memory_order_acquire);
+        InputRoutingConfig cfg;
+        cfg.mode = static_cast<InputRoutingMode>(packed & 0xFFull);
+        cfg.channelLeft = static_cast<int>((packed >> 8) & 0xFFFFull);
+        cfg.channelRight = static_cast<int>((packed >> 24) & 0xFFFFull);
+        return cfg;
+    }
 
     void setMasterVolumeDb(float db) noexcept { m_masterVolumeDb.store(db, std::memory_order_relaxed); }
     [[nodiscard]] float masterVolumeDb() const noexcept { return m_masterVolumeDb.load(std::memory_order_relaxed); }
@@ -513,7 +526,11 @@ private:
 
     std::atomic<float> m_inputGainDb{0.0f};
     std::atomic<float> m_masterVolumeDb{0.0f};
-    InputRoutingConfig m_inputConfig;
+    std::atomic<uint64_t> m_packedInputConfig{
+        (static_cast<uint64_t>(static_cast<uint8_t>(InputRoutingMode::MonoLeft)) & 0xFFull) |
+        (0ull << 8) |
+        (1ull << 24)
+    };
 
     NoiseGate m_noiseGate;
     LevelMeter m_inputMeter;

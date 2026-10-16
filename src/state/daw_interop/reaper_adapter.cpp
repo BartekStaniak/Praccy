@@ -240,7 +240,7 @@ std::optional<ScenePreset> ReaperAdapter::parseToScene(const std::filesystem::pa
             // Consecutive parallel slots
             NodePreset parBlock;
             parBlock.kind = NodePreset::Kind::ParallelBlock;
-            parBlock.branchBlend = 0.5f;
+            parBlock.branchBlend = 0.0f;
 
             BranchPreset branchA;
             branchA.name = "Branch A";

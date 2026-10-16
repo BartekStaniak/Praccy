@@ -491,7 +491,7 @@ void PracticeToolsModal::renderOverviewWaveformStrip(float stripWidth, float str
 
     // InvisibleButton to handle mouse click-to-seek and drag
     char btnId[32];
-    std::snprintf(btnId, sizeof(btnId), "##WaveformSeek_%p", this);
+    std::snprintf(btnId, sizeof(btnId), "##WaveformSeek_%p", static_cast<const void*>(this));
     ImGui::InvisibleButton(btnId, ImVec2(stripWidth, stripHeight));
     bool isHovered = ImGui::IsItemHovered();
     bool isActive = ImGui::IsItemActive();
@@ -558,7 +558,7 @@ void PracticeToolsModal::render() {
         const float footerHeight = Metrics::kFooterHeight;
         const float contentHeight = ImGui::GetContentRegionAvail().y - footerHeight;
 
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ColorToken::transparent().vec4);
         if (ImGui::BeginChild("PracticeToolsContentRegion", ImVec2(0, contentHeight), false)) {
             if (ImGui::BeginTabBar("PracticeToolsTabs")) {
                 if (ImGui::BeginTabItem("Quick Looper")) {

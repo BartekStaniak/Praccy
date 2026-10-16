@@ -100,7 +100,8 @@ int calculateFuzzyScore(std::string_view query, const plugins::PluginDescriptor&
     }
 
     if (qIdx == q.length()) {
-        score = std::max(score, subseqScore);
+        // Cap non-contiguous subsequence matches below substring tier (1000)
+        score = std::max(score, std::min(subseqScore, 950));
     }
 
     if (cleanName != q && score >= 2000) {

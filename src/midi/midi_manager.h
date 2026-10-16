@@ -122,6 +122,8 @@ private:
     MidiBindingCallback m_bindingCallback;
 
     std::atomic<bool> m_learning{false};
+    std::atomic<uint32_t> m_ccTableSeq{0};
+    mutable std::mutex m_learnMutex;
     MidiBinding m_pendingLearnBinding;
 
     std::atomic<uint32_t> m_lastRawMessage{0};

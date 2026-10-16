@@ -18,13 +18,10 @@ inline bool isCrashException(DWORD code) noexcept {
         case EXCEPTION_ACCESS_VIOLATION:
         case EXCEPTION_DATATYPE_MISALIGNMENT:
         case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
-        case EXCEPTION_FLT_DENORMAL_OPERAND:
         case EXCEPTION_FLT_DIVIDE_BY_ZERO:
-        case EXCEPTION_FLT_INEXACT_RESULT:
         case EXCEPTION_FLT_INVALID_OPERATION:
         case EXCEPTION_FLT_OVERFLOW:
         case EXCEPTION_FLT_STACK_CHECK:
-        case EXCEPTION_FLT_UNDERFLOW:
         case EXCEPTION_INT_DIVIDE_BY_ZERO:
         case EXCEPTION_INT_OVERFLOW:
         case EXCEPTION_PRIV_INSTRUCTION:
@@ -119,7 +116,8 @@ inline LONG WINAPI vehExceptionHandler(PEXCEPTION_POINTERS ep) {
 
 inline void ensureVehRegistered() {
     std::call_once(g_vehInitOnce, []() {
-        g_vehHandle = AddVectoredExceptionHandler(1, vehExceptionHandler);
+        // Register with First=0 so plugin/driver internal SEH handlers run before last-resort catch
+        g_vehHandle = AddVectoredExceptionHandler(0, vehExceptionHandler);
     });
 }
 

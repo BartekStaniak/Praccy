@@ -10,10 +10,12 @@ IDI_APP_ICON            ICON    "icon.ico"
 IDR_FONT_INTER          RCDATA  "fonts/Inter-Regular.ttf"
 IDR_FONT_JETBRAINS_MONO RCDATA  "fonts/JetBrainsMono-Regular.ttf"
 
+#include "../src/version.h"
+
 // Application Version & Metadata
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION     2,6,0,3
-PRODUCTVERSION  2,6,0,3
+FILEVERSION     PRACCY_VERSION_MAJOR,PRACCY_VERSION_MINOR,PRACCY_VERSION_PATCH,PRACCY_VERSION_BUILD
+PRODUCTVERSION  PRACCY_VERSION_MAJOR,PRACCY_VERSION_MINOR,PRACCY_VERSION_PATCH,PRACCY_VERSION_BUILD
 FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
 FILEFLAGS       0x0L
 FILEOS          VOS_NT_WINDOWS32
@@ -26,12 +28,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "Praccy Audio"
             VALUE "FileDescription",  "Praccy - ASIO VST3 & CLAP Practice Suite"
-            VALUE "FileVersion",      "2.6-beta3"
+            VALUE "FileVersion",      PRACCY_VERSION_RAW
             VALUE "InternalName",     "Praccy"
             VALUE "LegalCopyright",   "Copyright (C) 2026 Bartek Staniak"
             VALUE "OriginalFilename", "Praccy.exe"
             VALUE "ProductName",      "Praccy"
-            VALUE "ProductVersion",   "2.6-beta3"
+            VALUE "ProductVersion",   PRACCY_VERSION_RAW
         END
     END
     BLOCK "VarFileInfo"

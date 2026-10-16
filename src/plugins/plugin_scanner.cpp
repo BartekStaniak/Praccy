@@ -9,6 +9,7 @@
 #include <unordered_set>
 #include <windows.h>
 #include <pluginterfaces/base/ipluginbase.h>
+#include <clap/clap.h>
 
 namespace praccy::plugins {
 
@@ -385,14 +386,16 @@ std::string PluginScanner::detectVendor(const std::filesystem::path& path, const
     if (hLib) {
         auto* getFactory = reinterpret_cast<GetFactoryProc>(reinterpret_cast<void*>(GetProcAddress(hLib, "GetPluginFactory")));
         if (getFactory) {
-            auto* factory = getFactory();
-            if (factory) {
+            if (auto* factory = getFactory()) {
                 Steinberg::PFactoryInfo fInfo{};
+                std::string fVendor;
                 if (factory->getFactoryInfo(&fInfo) == Steinberg::kResultOk && fInfo.vendor[0] != '\0') {
-                    std::string fVendor = fInfo.vendor;
-                    FreeLibrary(hLib);
-                    if (!fVendor.empty()) return fVendor;
+                    fVendor = fInfo.vendor;
                 }
+                factory->release();
+                FreeLibrary(hLib);
+                if (!fVendor.empty()) return fVendor;
+                return "Other";
             }
         }
         FreeLibrary(hLib);
@@ -580,6 +583,27 @@ void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vec
                 desc.bundleFileName = path.filename().string();
                 desc.type = PluginType::CLAP;
                 desc.vendor = detectVendor(path, name);
+
+                // Extract canonical CLAP plugin ID for Tier-1 PluginResolver
+                if (HMODULE hLib = LoadLibraryExW(path.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH)) {
+                    const auto* entry = reinterpret_cast<const clap_plugin_entry_t*>(
+                        reinterpret_cast<void*>(GetProcAddress(hLib, "clap_entry")));
+                    if (entry && entry->init && entry->init(path.string().c_str())) {
+                        if (entry->get_factory) {
+                            const auto* fac = static_cast<const clap_plugin_factory_t*>(
+                                entry->get_factory(CLAP_PLUGIN_FACTORY_ID));
+                            if (fac && fac->get_plugin_count && fac->get_plugin_count(fac) > 0 && fac->get_plugin_descriptor) {
+                                if (const auto* cDesc = fac->get_plugin_descriptor(fac, 0)) {
+                                    if (cDesc->id) desc.clapId = cDesc->id;
+                                    if (cDesc->vendor && cDesc->vendor[0] != '\0') desc.vendor = cDesc->vendor;
+                                }
+                            }
+                        }
+                        if (entry->deinit) entry->deinit();
+                    }
+                    FreeLibrary(hLib);
+                }
+
                 auto catIt = m_categoryOverrides.find(name);
                 desc.category = (catIt != m_categoryOverrides.end()) ? catIt->second : detectPluginCategory(name, desc.vendor);
                 outPlugins.push_back(std::move(desc));
@@ -596,6 +620,37 @@ void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vec
                 desc.bundleFileName = path.filename().string();
                 desc.type = PluginType::VST3;
                 desc.vendor = detectVendor(path, name);
+
+                // Extract canonical 32-char VST3 Class GUID for Tier-1 PluginResolver
+                std::filesystem::path dllPath = path;
+                if (std::filesystem::is_directory(path)) {
+                    auto candidate = path / "Contents" / "x86_64-win" / (path.stem().string() + ".vst3");
+                    if (std::filesystem::exists(candidate)) dllPath = candidate;
+                }
+                if (HMODULE hLib = LoadLibraryExW(dllPath.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH)) {
+                    using GetFactoryProc = Steinberg::IPluginFactory* (PLUGIN_API*)();
+                    auto* getFactory = reinterpret_cast<GetFactoryProc>(reinterpret_cast<void*>(GetProcAddress(hLib, "GetPluginFactory")));
+                    if (getFactory) {
+                        if (auto* factory = getFactory()) {
+                            const int32_t nClasses = factory->countClasses();
+                            Steinberg::PClassInfo ci{};
+                            for (int32_t cIdx = 0; cIdx < nClasses; ++cIdx) {
+                                if (factory->getClassInfo(cIdx, &ci) == Steinberg::kResultOk &&
+                                    std::strcmp(ci.category, "Audio Module Class") == 0) {
+                                    char hex[33] = {0};
+                                    for (int b = 0; b < 16; ++b) {
+                                        std::snprintf(hex + b * 2, 3, "%02X", static_cast<unsigned char>(ci.cid[b]));
+                                    }
+                                    desc.classGuid = hex;
+                                    break;
+                                }
+                            }
+                            factory->release();
+                        }
+                    }
+                    FreeLibrary(hLib);
+                }
+
                 auto catIt = m_categoryOverrides.find(name);
                 desc.category = (catIt != m_categoryOverrides.end()) ? catIt->second : detectPluginCategory(name, desc.vendor);
                 outPlugins.push_back(std::move(desc));

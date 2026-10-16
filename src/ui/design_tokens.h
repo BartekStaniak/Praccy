@@ -56,6 +56,10 @@ struct ColorToken {
         return ColorToken(r, g, b, af);
     }
 
+    [[nodiscard]] static constexpr ColorToken transparent() noexcept {
+        return ColorToken(0, 0, 0, 0);
+    }
+
     constexpr operator ImU32() const noexcept { return u32; }
     constexpr operator ImVec4() const noexcept { return vec4; }
 };
@@ -386,8 +390,17 @@ inline const ThemeTokens kThemes[static_cast<size_t>(ThemeId::Count)] = {
 };
 
 inline std::atomic<ThemeId> s_activeThemeId{ThemeId::ObsidianStudio};
+inline std::atomic<float> s_dpiScale{1.0f};
 
 } // namespace detail
+
+inline void setDpiScale(float scale) noexcept {
+    detail::s_dpiScale.store(std::clamp(scale, 1.0f, 4.0f), std::memory_order_relaxed);
+}
+
+inline float dpiScale() noexcept {
+    return detail::s_dpiScale.load(std::memory_order_relaxed);
+}
 
 inline const ThemeTokens& getThemeTokens(ThemeId id) noexcept {
     const size_t idx = static_cast<size_t>(id);
@@ -433,6 +446,11 @@ inline void applyTheme(ThemeId id) {
     style.IndentSpacing     = 16.0f;
     style.ScrollbarSize     = 12.0f;
     style.GrabMinSize       = 10.0f;
+
+    const float scale = dpiScale();
+    if (scale > 1.0f) {
+        style.ScaleAllSizes(scale);
+    }
 
     // Apply color tokens directly to ImGuiStyle Colors
     ImVec4* colors = style.Colors;

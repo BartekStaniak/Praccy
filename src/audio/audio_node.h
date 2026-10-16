@@ -41,11 +41,11 @@ public:
     }
 
     [[nodiscard]] virtual uint32_t latencySamples() const noexcept {
-        return m_latencySamples;
+        return m_latencySamples.load(std::memory_order_relaxed);
     }
 
     virtual void setLatencySamples(uint32_t samples) noexcept {
-        m_latencySamples = samples;
+        m_latencySamples.store(samples, std::memory_order_relaxed);
     }
 
     [[nodiscard]] virtual bool isFaulted() const noexcept {
@@ -58,7 +58,7 @@ public:
 
 protected:
     std::atomic<bool> m_bypassed{false};
-    uint32_t m_latencySamples{0};
+    std::atomic<uint32_t> m_latencySamples{0};
 };
 
 class MissingPluginPlaceholder : public AudioNode {

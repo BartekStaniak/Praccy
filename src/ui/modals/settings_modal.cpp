@@ -591,7 +591,7 @@ void SettingsModal::render() {
         const float footerHeight = Metrics::kFooterHeight;
         const float contentHeight = ImGui::GetContentRegionAvail().y - footerHeight;
 
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ColorToken::transparent().vec4);
         if (ImGui::BeginChild("SettingsTabsContentRegion", ImVec2(0, contentHeight), false)) {
             if (ImGui::BeginTabBar("SettingsTabs")) {
                 if (ImGui::BeginTabItem("Audio & ASIO")) {

@@ -370,7 +370,7 @@ void test_dawproject_roundtrip() {
     ASSERT_EQ(manifestNode->tag, "manifest");
     ASSERT_EQ(manifestNode->attribute("formatVersion"), "1.0");
     ASSERT_EQ(manifestNode->attribute("application"), "Praccy");
-    ASSERT_EQ(manifestNode->attribute("appVersion"), "2.4");
+    ASSERT_EQ(manifestNode->attribute("appVersion"), "2.6.0");
 
     // Verify project.xml
     auto projectPath = inspectDir / "project.xml";

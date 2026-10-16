@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <algorithm>
 #include <numbers>
 #include <atomic>
@@ -55,6 +57,28 @@ public:
         const float angle = norm * HALF_PI;
         leftGain = std::cos(angle);
         rightGain = std::sin(angle);
+    }
+
+    /**
+     * @brief Scrub IEEE-754 NaN/Inf values and hard-clamp runaway plugin gain spikes (+18 dBFS)
+     * before they can poison downstream IIR filters, delay feedback loops, or hardware outputs.
+     */
+    static inline bool sanitizeChannel(float* data, uint32_t numSamples, float hardClamp = 8.0f) noexcept {
+        if (!data) return false;
+        bool faulted = false;
+        for (uint32_t s = 0; s < numSamples; ++s) {
+            uint32_t bits = 0;
+            std::memcpy(&bits, &data[s], sizeof(uint32_t));
+            if ((bits & 0x7F800000u) == 0x7F800000u) {
+                data[s] = 0.0f;
+                faulted = true;
+            } else if (data[s] > hardClamp) {
+                data[s] = hardClamp;
+            } else if (data[s] < -hardClamp) {
+                data[s] = -hardClamp;
+            }
+        }
+        return faulted;
     }
 };
 
@@ -125,21 +149,34 @@ class LevelMeter {
 public:
     LevelMeter() : m_peakLeft(0.0f), m_peakRight(0.0f) {}
 
-    void process(const float* left, const float* right, uint32_t numSamples) noexcept {
+    void reset() noexcept {
+        m_peakLeft.store(0.0f, std::memory_order_relaxed);
+        m_peakRight.store(0.0f, std::memory_order_relaxed);
+    }
+
+    void process(const float* left, const float* right, uint32_t numSamples, double sampleRate = 48000.0) noexcept {
         float maxL = 0.0f;
         float maxR = 0.0f;
         for (uint32_t i = 0; i < numSamples; ++i) {
-            maxL = std::max(maxL, std::abs(left[i]));
+            if (left) maxL = std::max(maxL, std::abs(left[i]));
             if (right) {
                 maxR = std::max(maxR, std::abs(right[i]));
             }
         }
-        // Update atomics if new peak is higher, otherwise gently decay
+        const float targetR = right ? maxR : maxL;
+
+        // Responsive peak ballistics: instantaneous peak capture, snappy 120 ms exponential decay
+        const float sr = (sampleRate > 8000.0) ? static_cast<float>(sampleRate) : 48000.0f;
+        const float dt = static_cast<float>(numSamples) / sr;
+        const float releaseCoeff = 1.0f - std::exp(-dt / 0.120f);
+
         float curL = m_peakLeft.load(std::memory_order_relaxed);
-        m_peakLeft.store(std::max(maxL, curL * 0.95f), std::memory_order_relaxed);
+        curL = (maxL >= curL) ? maxL : (curL + releaseCoeff * (maxL - curL));
+        m_peakLeft.store(curL < 1e-6f ? 0.0f : curL, std::memory_order_relaxed);
 
         float curR = m_peakRight.load(std::memory_order_relaxed);
-        m_peakRight.store(std::max(maxR ? maxR : maxL, curR * 0.95f), std::memory_order_relaxed);
+        curR = (targetR >= curR) ? targetR : (curR + releaseCoeff * (targetR - curR));
+        m_peakRight.store(curR < 1e-6f ? 0.0f : curR, std::memory_order_relaxed);
     }
 
     [[nodiscard]] float peakLeft() const noexcept { return m_peakLeft.load(std::memory_order_relaxed); }

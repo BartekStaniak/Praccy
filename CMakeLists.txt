@@ -7,11 +7,42 @@ if(WIN32)
     endif()
 endif()
 
-project(Praccy VERSION 2.6.0 LANGUAGES CXX C RC)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/version.h" _PRACCY_VER_H)
+string(REGEX MATCH "#define PRACCY_VERSION_MAJOR ([0-9]+)" _ "${_PRACCY_VER_H}")
+set(PRACCY_VER_MAJOR ${CMAKE_MATCH_1})
+string(REGEX MATCH "#define PRACCY_VERSION_MINOR ([0-9]+)" _ "${_PRACCY_VER_H}")
+set(PRACCY_VER_MINOR ${CMAKE_MATCH_1})
+string(REGEX MATCH "#define PRACCY_VERSION_PATCH ([0-9]+)" _ "${_PRACCY_VER_H}")
+set(PRACCY_VER_PATCH ${CMAKE_MATCH_1})
+
+project(Praccy VERSION ${PRACCY_VER_MAJOR}.${PRACCY_VER_MINOR}.${PRACCY_VER_PATCH} LANGUAGES CXX C RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Ensure <pluginterfaces/...> resolves cleanly from third_party/vst3_pluginterfaces
+if(NOT EXISTS "${CMAKE_BINARY_DIR}/vst3_sdk/pluginterfaces")
+    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/vst3_sdk")
+    file(CREATE_LINK
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/vst3_pluginterfaces"
+        "${CMAKE_BINARY_DIR}/vst3_sdk/pluginterfaces"
+        COPY_ON_ERROR SYMBOLIC
+    )
+endif()
+include_directories(SYSTEM "${CMAKE_BINARY_DIR}/vst3_sdk")
+
+option(PRACCY_SANITIZER "Enable dynamic sanitizer (address, thread, undefined, realtime)" "")
+if(PRACCY_SANITIZER STREQUAL "address")
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
+elseif(PRACCY_SANITIZER STREQUAL "thread")
+    add_compile_options(-fsanitize=thread -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=thread)
+elseif(PRACCY_SANITIZER STREQUAL "realtime")
+    add_compile_options(-fsanitize=realtime -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=realtime)
+endif()
 
 if(NOT MSVC)
     add_compile_options(-Wno-missing-field-initializers)

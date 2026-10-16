@@ -2966,25 +2966,96 @@ void RackView::renderBottomBar() {
 }
 
 void RackView::renderMeter(const char* label, float level, float width, float height) {
+    (void)label;
     ImVec2 pos = ImGui::GetCursorScreenPos();
     ImDrawList* drawList = ImGui::GetWindowDrawList();
     const auto& tokens = themeTokens();
 
+    // 1. Recessed track background
     drawList->AddRectFilled(pos, ImVec2(pos.x + width, pos.y + height), tokens.surfaces.frameBg, 2.0f);
 
-    float db = audio::DspUtils::gainToDb(level);
-    float norm = (db + 60.0f) / 60.0f;
-    norm = std::clamp(norm, 0.0f, 1.0f);
+    const float db = audio::DspUtils::gainToDb(level);
+    const float norm = std::clamp((db + 60.0f) / 60.0f, 0.0f, 1.0f);
 
-    float fillHeight = height * norm;
-    ImU32 meterColor = (db > -0.5f) ? tokens.signal.meterClip.u32 :
-                       (db > -6.0f) ? tokens.signal.meterWarning.u32 :
-                                      tokens.signal.meterNormal.u32;
+    const float innerX1 = pos.x + 1.0f;
+    const float innerX2 = pos.x + width - 1.0f;
+    const float innerYBottom = pos.y + height - 1.0f;
+    const float innerYTop = pos.y + 1.0f;
+    const float innerH = std::max(0.0f, innerYBottom - innerYTop);
 
-    drawList->AddRectFilled(ImVec2(pos.x, pos.y + height - fillHeight),
-                            ImVec2(pos.x + width, pos.y + height),
-                            meterColor, 2.0f);
+    // 2. Smooth continuous gradient meter bar (seamless, no blocks)
+    if (norm > 0.001f && innerH > 0.0f && innerX2 > innerX1) {
+        const float fillH = norm * innerH;
+        const float yFillTop = innerYBottom - fillH;
 
+        constexpr float kNormOptimal = 0.70f;   // -18 dBFS
+        constexpr float kNormWarning = 0.90f;   // -6 dBFS
+        constexpr float kNormClip    = 0.9917f; // -0.5 dBFS
+
+        const auto& cNormal  = tokens.signal.meterNormal;
+        const auto& cOptimal = tokens.signal.meterOptimal;
+        const auto& cWarning = tokens.signal.meterWarning;
+        const auto& cClip    = tokens.signal.meterClip;
+
+        auto lerpColor = [](const ColorToken& c1, const ColorToken& c2, float t) noexcept -> ImU32 {
+            t = std::clamp(t, 0.0f, 1.0f);
+            const float r = c1.r + (c2.r - c1.r) * t;
+            const float g = c1.g + (c2.g - c1.g) * t;
+            const float b = c1.b + (c2.b - c1.b) * t;
+            const float a = c1.a + (c2.a - c1.a) * t;
+            return IM_COL32(
+                static_cast<int>(r * 255.0f + 0.5f),
+                static_cast<int>(g * 255.0f + 0.5f),
+                static_cast<int>(b * 255.0f + 0.5f),
+                static_cast<int>(a * 255.0f + 0.5f)
+            );
+        };
+
+        const float yOpt = innerYBottom - kNormOptimal * innerH;
+        if (norm <= kNormOptimal) {
+            const float t = norm / kNormOptimal;
+            const ImU32 topCol = lerpColor(cNormal, cOptimal, t);
+            drawList->AddRectFilledMultiColor(
+                ImVec2(innerX1, yFillTop), ImVec2(innerX2, innerYBottom),
+                topCol, topCol, cNormal.u32, cNormal.u32);
+        } else {
+            drawList->AddRectFilledMultiColor(
+                ImVec2(innerX1, yOpt), ImVec2(innerX2, innerYBottom),
+                cOptimal.u32, cOptimal.u32, cNormal.u32, cNormal.u32);
+
+            const float yWarn = innerYBottom - kNormWarning * innerH;
+            if (norm <= kNormWarning) {
+                const float t = (norm - kNormOptimal) / (kNormWarning - kNormOptimal);
+                const ImU32 topCol = lerpColor(cOptimal, cWarning, t);
+                drawList->AddRectFilledMultiColor(
+                    ImVec2(innerX1, yFillTop), ImVec2(innerX2, yOpt),
+                    topCol, topCol, cOptimal.u32, cOptimal.u32);
+            } else {
+                drawList->AddRectFilledMultiColor(
+                    ImVec2(innerX1, yWarn), ImVec2(innerX2, yOpt),
+                    cWarning.u32, cWarning.u32, cOptimal.u32, cOptimal.u32);
+
+                const float yClip = innerYBottom - kNormClip * innerH;
+                if (norm <= kNormClip) {
+                    const float t = (norm - kNormWarning) / (kNormClip - kNormWarning);
+                    const ImU32 topCol = lerpColor(cWarning, cClip, t);
+                    drawList->AddRectFilledMultiColor(
+                        ImVec2(innerX1, yFillTop), ImVec2(innerX2, yWarn),
+                        topCol, topCol, cWarning.u32, cWarning.u32);
+                } else {
+                    drawList->AddRectFilledMultiColor(
+                        ImVec2(innerX1, yClip), ImVec2(innerX2, yWarn),
+                        cClip.u32, cClip.u32, cWarning.u32, cWarning.u32);
+
+                    drawList->AddRectFilled(
+                        ImVec2(innerX1, yFillTop), ImVec2(innerX2, yClip),
+                        cClip.u32);
+                }
+            }
+        }
+    }
+
+    // 3. Subtle framing border
     drawList->AddRect(pos, ImVec2(pos.x + width, pos.y + height), tokens.borders.subtle, 2.0f);
     ImGui::Dummy(ImVec2(width, height));
 }
@@ -3307,7 +3378,7 @@ void RackView::renderPresetBrowserModal() {
         }
 
         const float pillsChildH = Metrics::buttonHeight() + 6.0f;
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ColorToken::transparent().vec4);
         ImGui::BeginChild("##CategoryPillsScroll", ImVec2(0.0f, pillsChildH), false, ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_HorizontalScrollbar);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, Metrics::buttonHeight() * 0.5f);
         for (size_t c = 0; c < catPills.size(); ++c) {
@@ -3801,9 +3872,9 @@ void RackView::pollPluginGuiEdits(bool forceFlushPending) {
             slot->setParameter(editedParamId, curVal);
         }
 
-        // Also detect parameter changes made directly inside an open plugin GUI window
-        // or when an all-parameters change event (e.g. preset change) was signaled.
-        if ((isWindowOpen || (hasGuiEdit && editedParamId == 0xFFFFFFFFu)) && !ImGui::IsAnyItemActive()) {
+        // Only scan the full parameter bank on bulk preset changes (0xFFFFFFFFu) or at a throttled 4 Hz cadence
+        const bool throttledPollTick = (ImGui::GetFrameCount() % 15) == 0;
+        if (((isWindowOpen && throttledPollTick) || (hasGuiEdit && editedParamId == 0xFFFFFFFFu)) && !ImGui::IsAnyItemActive()) {
             auto& baseline = m_guiParamBaseline[slot];
             if (baseline.size() != nParams) {
                 refreshGuiParamBaseline(slot);

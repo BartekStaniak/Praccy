@@ -94,6 +94,7 @@ public:
     void setA4Reference(float freqHz) noexcept {
         float clamped = std::clamp(freqHz, 300.0f, 600.0f);
         m_a4Reference.store(clamped, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lock(m_configMutex);
         m_config.a4ReferenceHz = clamped;
     }
     [[nodiscard]] float a4Reference() const noexcept {
@@ -101,7 +102,10 @@ public:
     }
 
     void setConfig(const TunerConfig& cfg) {
-        m_config = cfg;
+        {
+            std::lock_guard<std::mutex> lock(m_configMutex);
+            m_config = cfg;
+        }
         m_a4Reference.store(cfg.a4ReferenceHz, std::memory_order_relaxed);
     }
     [[nodiscard]] const TunerConfig& config() const noexcept { return m_config; }
@@ -117,6 +121,7 @@ private:
     double m_sampleRate{48000.0};
     std::atomic<bool> m_enabled{true};
     std::atomic<float> m_a4Reference{440.0f};
+    mutable std::mutex m_configMutex;
     TunerConfig m_config;
 
     // Lock-free ingestion ring buffer

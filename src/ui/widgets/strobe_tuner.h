@@ -63,7 +63,9 @@ inline void DrawStrobeTuner(const tools::TunerResult& result,
     const ImGuiIO& io = ImGui::GetIO();
     const float dt = std::clamp(io.DeltaTime, 0.0f, 0.1f);
 
-    static float s_strobePhase = 0.0f;
+    ImGuiStorage* storage = ImGui::GetStateStorage();
+    const ImGuiID phaseKey = ImGui::GetID("##praccy_strobe_phase");
+    float s_strobePhase = storage ? storage->GetFloat(phaseKey, 0.0f) : 0.0f;
     const bool inTuneExact = isEnabled && result.confidence && (std::abs(result.centDeviation) <= 1.0f);
     const bool inTuneBroad = isEnabled && result.confidence && (std::abs(result.centDeviation) <= 3.0f);
 
@@ -81,6 +83,9 @@ inline void DrawStrobeTuner(const tools::TunerResult& result,
         // Idle gentle rotation
         s_strobePhase += 0.04f * dt * (2.0f * IM_PI);
         while (s_strobePhase > 2.0f * IM_PI) s_strobePhase -= 2.0f * IM_PI;
+    }
+    if (storage) {
+        storage->SetFloat(phaseKey, s_strobePhase);
     }
 
     // 1. Outer Ring Housing & Background Track

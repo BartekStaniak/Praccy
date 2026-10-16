@@ -97,6 +97,28 @@ void testDspUtils() {
         assert(std::abs(power - 1.0f) < 1e-4f);
     }
 
+    // LevelMeter responsive ballistics: instantaneous peak capture & 120ms decay
+    audio::LevelMeter meter;
+    assert(meter.peakLeft() == 0.0f);
+    assert(meter.peakRight() == 0.0f);
+
+    float peakBlock[64];
+    std::fill_n(peakBlock, 64, 0.8f);
+    meter.process(peakBlock, peakBlock, 64, 48000.0);
+    assert(std::abs(meter.peakLeft() - 0.8f) < 1e-4f);
+    assert(std::abs(meter.peakRight() - 0.8f) < 1e-4f);
+
+    // Responsive decay after tau = 120 ms (5760 samples @ 48kHz)
+    std::vector<float> silence(5760, 0.0f);
+    meter.process(silence.data(), silence.data(), static_cast<uint32_t>(silence.size()), 48000.0);
+    const float expectedDecay = 0.8f * (1.0f / std::numbers::e_v<float>);
+    assert(std::abs(meter.peakLeft() - expectedDecay) < 0.01f);
+    assert(std::abs(meter.peakRight() - expectedDecay) < 0.01f);
+
+    meter.reset();
+    assert(meter.peakLeft() == 0.0f);
+    assert(meter.peakRight() == 0.0f);
+
     std::cout << "PASSED\n";
 }
 

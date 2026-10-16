@@ -31,6 +31,7 @@ void PluginSlot::reset() {
         m_innerNode->reset();
     }
     m_automationRegister.reset();
+    m_meter.reset();
 }
 
 const std::string& PluginSlot::name() const noexcept {
@@ -67,33 +68,40 @@ void PluginSlot::process(AudioProcessContext& ctx) {
     // If fully bypassed, faulted, or not transitioning, pure pass-through
     if ((currentlyBypassed && !transitioning) || m_innerNode->isFaulted()) {
         ctx.output.copyFrom(ctx.input);
-        m_meter.process(ctx.output.channel(0), ctx.output.numChannels() > 1 ? ctx.output.channel(1) : nullptr, numSamples);
+        m_meter.process(ctx.output.channel(0), ctx.output.numChannels() > 1 ? ctx.output.channel(1) : nullptr, numSamples, ctx.sampleRate);
         return;
     }
 
-    // Save dry signal
+    // Save dry signal and prepare distinct, non-aliasing input/output buffers for plugin
     auto dryView = m_dryBuffer.view(numSamples);
     dryView.copyFrom(ctx.input);
-
-    // Apply input gain
-    auto procView = m_processBuffer.view(numSamples);
-    procView.copyFrom(ctx.input);
     const float inGain = DspUtils::dbToGain(m_inputGainDb.load(std::memory_order_relaxed));
-    procView.applyGain(inGain);
+    dryView.applyGain(inGain);
 
-    // Process through inner plugin node
+    auto procView = m_processBuffer.view(numSamples);
+    procView.clear();
+
+    // Process through inner plugin node with non-aliasing input (dryView) and output (procView)
     AudioProcessContext innerCtx{
-        .input = procView,
+        .input = dryView,
         .output = procView,
         .sampleRate = ctx.sampleRate,
         .numSamples = numSamples
     };
     m_innerNode->process(innerCtx);
 
+    // Restore unscaled dry reference for dry/wet mix or fault fallback
+    dryView.copyFrom(ctx.input);
+
+    // Scrub NaN/Inf and clamp runaway spikes from third-party plugins
+    for (uint32_t ch = 0; ch < procView.numChannels(); ++ch) {
+        DspUtils::sanitizeChannel(procView.channel(ch), numSamples);
+    }
+
     // If plugin faulted during execution, safely bypass with dry signal
     if (m_innerNode->isFaulted()) {
         ctx.output.copyFrom(dryView);
-        m_meter.process(ctx.output.channel(0), ctx.output.numChannels() > 1 ? ctx.output.channel(1) : nullptr, numSamples);
+        m_meter.process(ctx.output.channel(0), ctx.output.numChannels() > 1 ? ctx.output.channel(1) : nullptr, numSamples, ctx.sampleRate);
         return;
     }
 
@@ -127,7 +135,7 @@ void PluginSlot::process(AudioProcessContext& ctx) {
         }
     }
 
-    m_meter.process(ctx.output.channel(0), numCh > 1 ? ctx.output.channel(1) : nullptr, numSamples);
+    m_meter.process(ctx.output.channel(0), numCh > 1 ? ctx.output.channel(1) : nullptr, numSamples, ctx.sampleRate);
 }
 
 // ==========================================
@@ -211,6 +219,7 @@ void ParallelBranch::reset() {
     m_crossfadePos = 0;
     m_isCrossfading = false;
     m_branchLatency.store(0, std::memory_order_relaxed);
+    m_meter.reset();
 
     for (auto& slot : m_activeSlots) {
         if (slot) slot->reset();
@@ -535,7 +544,7 @@ void ParallelBranch::process(AudioProcessContext& ctx) {
         bR[s] = outSampR;
     }
 
-    m_meter.process(branchView.channel(0), branchView.numChannels() > 1 ? branchView.channel(1) : nullptr, numSamples);
+    m_meter.process(branchView.channel(0), branchView.numChannels() > 1 ? branchView.channel(1) : nullptr, numSamples, ctx.sampleRate);
 }
 
 // ==========================================
@@ -711,7 +720,8 @@ void NoiseGate::process(AudioBufferView& buffer) noexcept {
 
         // Downward expander / gate
         float targetGain = (m_envelope >= threshold) ? 1.0f : 0.0f;
-        m_currentGain += 0.01f * (targetGain - m_currentGain); // Smooth gain transitions
+        const float smoothAlpha = std::clamp(1.0f - m_attackCoeff, 0.001f, 0.1f);
+        m_currentGain += smoothAlpha * (targetGain - m_currentGain); // Sample-rate-invariant gain smoothing
 
         ch0[s] *= m_currentGain;
         if (ch1) ch1[s] *= m_currentGain;
@@ -894,9 +904,14 @@ void GraphEngine::drainCommandQueueIntoActive() {
                             auto& actSlots = br->activeSlots();
                             size_t insertPos = cmd.indexA;
                             for (auto& s : actSlots) {
-                                if (s) {
-                                    m_activeNodes.insert(m_activeNodes.begin() + insertPos, std::move(s));
+                                if (!s) continue;
+                                if (m_activeNodes.size() < MAX_GRAPH_NODES) {
+                                    m_activeNodes.insert(m_activeNodes.begin() + static_cast<ptrdiff_t>(insertPos), std::move(s));
                                     ++insertPos;
+                                } else {
+                                    if (!m_reclaimQueue.try_enqueue(std::move(s))) {
+                                        stashForReclamation(std::move(s));
+                                    }
                                 }
                             }
                             actSlots.clear();
@@ -945,6 +960,8 @@ void GraphEngine::reset() {
     m_isSceneCrossfading.store(false, std::memory_order_relaxed);
     m_pendingCrossfadeSamples.store(0, std::memory_order_relaxed);
     m_inplaceCrossfadeRamp.reset(std::max(1u, static_cast<uint32_t>(m_sampleRate * 0.010)));
+    m_inputMeter.reset();
+    m_outputMeter.reset();
     m_activeNodes.reserve(MAX_GRAPH_NODES);
     m_retiringNodes.reserve(MAX_GRAPH_NODES);
 
@@ -1365,9 +1382,14 @@ void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& ha
                             auto& actSlots = br->activeSlots();
                             size_t insertPos = cmd.indexA;
                             for (auto& s : actSlots) {
-                                if (s) {
-                                    m_activeNodes.insert(m_activeNodes.begin() + insertPos, std::move(s));
+                                if (!s) continue;
+                                if (m_activeNodes.size() < MAX_GRAPH_NODES) {
+                                    m_activeNodes.insert(m_activeNodes.begin() + static_cast<ptrdiff_t>(insertPos), std::move(s));
                                     ++insertPos;
+                                } else {
+                                    if (!m_reclaimQueue.try_enqueue(std::move(s))) {
+                                        stashForReclamation(std::move(s));
+                                    }
                                 }
                             }
                             actSlots.clear();
@@ -1397,29 +1419,30 @@ void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& ha
     float* mainL = mainView.channel(0);
     float* mainR = (mainView.numChannels() > 1) ? mainView.channel(1) : mainL;
 
-    if (m_inputConfig.mode == InputRoutingMode::MonoLeft && inCh > 0) {
+    const InputRoutingConfig inCfg = inputRouting();
+    if (inCfg.mode == InputRoutingMode::MonoLeft && inCh > 0) {
         const float* src = hardwareIn.channel(0);
         std::memcpy(mainL, src, numSamples * sizeof(float));
         std::memcpy(mainR, src, numSamples * sizeof(float));
-    } else if (m_inputConfig.mode == InputRoutingMode::MonoRight && inCh > 1) {
+    } else if (inCfg.mode == InputRoutingMode::MonoRight && inCh > 1) {
         const float* src = hardwareIn.channel(1);
         std::memcpy(mainL, src, numSamples * sizeof(float));
         std::memcpy(mainR, src, numSamples * sizeof(float));
-    } else if (m_inputConfig.mode == InputRoutingMode::MonoChannel && inCh > 0) {
-        const uint32_t ch = std::min(static_cast<uint32_t>(m_inputConfig.channelLeft), inCh - 1);
+    } else if (inCfg.mode == InputRoutingMode::MonoChannel && inCh > 0) {
+        const uint32_t ch = std::min(static_cast<uint32_t>(inCfg.channelLeft), inCh - 1);
         const float* src = hardwareIn.channel(ch);
         std::memcpy(mainL, src, numSamples * sizeof(float));
         std::memcpy(mainR, src, numSamples * sizeof(float));
-    } else if (m_inputConfig.mode == InputRoutingMode::Stereo) {
+    } else if (inCfg.mode == InputRoutingMode::Stereo) {
         const float* srcL = inCh > 0 ? hardwareIn.channel(0) : nullptr;
         const float* srcR = inCh > 1 ? hardwareIn.channel(1) : srcL;
         if (srcL) std::memcpy(mainL, srcL, numSamples * sizeof(float));
         else std::memset(mainL, 0, numSamples * sizeof(float));
         if (srcR) std::memcpy(mainR, srcR, numSamples * sizeof(float));
         else std::memset(mainR, 0, numSamples * sizeof(float));
-    } else if (m_inputConfig.mode == InputRoutingMode::StereoCustom && inCh > 0) {
-        const uint32_t chL = std::min(static_cast<uint32_t>(m_inputConfig.channelLeft), inCh - 1);
-        const uint32_t chR = std::min(static_cast<uint32_t>(m_inputConfig.channelRight), inCh - 1);
+    } else if (inCfg.mode == InputRoutingMode::StereoCustom && inCh > 0) {
+        const uint32_t chL = std::min(static_cast<uint32_t>(inCfg.channelLeft), inCh - 1);
+        const uint32_t chR = std::min(static_cast<uint32_t>(inCfg.channelRight), inCh - 1);
         std::memcpy(mainL, hardwareIn.channel(chL), numSamples * sizeof(float));
         std::memcpy(mainR, hardwareIn.channel(chR), numSamples * sizeof(float));
     } else {
@@ -1427,7 +1450,7 @@ void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& ha
     }
 
     // Track input levels
-    m_inputMeter.process(mainL, mainR, numSamples);
+    m_inputMeter.process(mainL, mainR, numSamples, m_sampleRate);
 
     // Apply Master Input Gain
     const float inGain = DspUtils::dbToGain(m_inputGainDb.load(std::memory_order_relaxed));
@@ -1572,7 +1595,7 @@ void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& ha
     m_hasProcessedAudio = true;
 
     // Track output levels
-    m_outputMeter.process(hardwareOut.channel(0), hardwareOut.numChannels() > 1 ? hardwareOut.channel(1) : nullptr, numSamples);
+    m_outputMeter.process(hardwareOut.channel(0), hardwareOut.numChannels() > 1 ? hardwareOut.channel(1) : nullptr, numSamples, m_sampleRate);
 }
 
 } // namespace praccy::audio

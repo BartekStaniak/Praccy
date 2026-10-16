@@ -100,6 +100,7 @@ void MidiManager::addCcBinding(uint8_t channel, uint8_t cc, uint32_t paramId, fl
 }
 
 void MidiManager::rebuildCcTable() {
+    m_ccTableSeq.fetch_add(1, std::memory_order_release); // Odd = write in progress
     for (auto& row : m_ccTable) {
         for (auto& slot : row) {
             slot = FlatCcBinding{};
@@ -122,6 +123,7 @@ void MidiManager::rebuildCcTable() {
             }
         }
     }
+    m_ccTableSeq.fetch_add(1, std::memory_order_release); // Even = write complete
 }
 
 void MidiManager::removeBinding(const std::string& id) {
@@ -133,11 +135,13 @@ void MidiManager::removeBinding(const std::string& id) {
 void MidiManager::clearBindings() {
     std::lock_guard<std::mutex> lock(m_bindingsMutex);
     m_bindings.clear();
+    m_ccTableSeq.fetch_add(1, std::memory_order_release);
     for (auto& row : m_ccTable) {
         for (auto& slot : row) {
             slot = FlatCcBinding{};
         }
     }
+    m_ccTableSeq.fetch_add(1, std::memory_order_release);
 }
 
 const FlatCcBinding& MidiManager::getCcBinding(uint8_t channel, uint8_t cc) const noexcept {
@@ -147,17 +151,20 @@ const FlatCcBinding& MidiManager::getCcBinding(uint8_t channel, uint8_t cc) cons
 }
 
 void MidiManager::startLearning(BindingTargetType target, int slot, int branch, int scene) {
-    m_pendingLearnBinding = MidiBinding{
-        .id = "binding_" + std::to_string(static_cast<int>(target)) + "_" + std::to_string(slot),
-        .targetType = target,
-        .targetSlotIndex = slot,
-        .targetBranchIndex = branch,
-        .targetSceneIndex = scene,
-        .midiChannel = 0,
-        .triggerType = MidiMessageType::ControlChange,
-        .triggerNumber = 0
-    };
-    m_learning.store(true);
+    {
+        std::lock_guard<std::mutex> lock(m_learnMutex);
+        m_pendingLearnBinding = MidiBinding{
+            .id = "binding_" + std::to_string(static_cast<int>(target)) + "_" + std::to_string(slot),
+            .targetType = target,
+            .targetSlotIndex = slot,
+            .targetBranchIndex = branch,
+            .targetSceneIndex = scene,
+            .midiChannel = 0,
+            .triggerType = MidiMessageType::ControlChange,
+            .triggerNumber = 0
+        };
+    }
+    m_learning.store(true, std::memory_order_release);
 }
 
 void MidiManager::cancelLearning() {
@@ -179,6 +186,8 @@ void CALLBACK MidiManager::midiInProc(HMIDIIN hMidiIn, UINT wMsg, DWORD_PTR dwIn
 
 void MidiManager::handleControlChange(uint8_t channel, uint8_t cc, uint8_t val) {
     if (cc >= NUM_CC_NUMBERS) return;
+    // Skip dispatch if UI thread is mid-rebuild of m_ccTable (odd sequence counter)
+    if ((m_ccTableSeq.load(std::memory_order_acquire) & 1u) != 0u) return;
     const float norm = static_cast<float>(val) / 127.0f;
 
     // 1. Channel-specific lookup O(1)
@@ -223,14 +232,18 @@ void MidiManager::handleMidiMessage(uint8_t status, uint8_t d1, uint8_t d2) {
     const auto type = msg.type();
 
     // Handle MIDI Learn
-    if (m_learning.load(std::memory_order_relaxed)) {
+    if (m_learning.load(std::memory_order_acquire)) {
         if (type == MidiMessageType::ControlChange || type == MidiMessageType::ProgramChange || type == MidiMessageType::NoteOn) {
-            m_pendingLearnBinding.midiChannel = channel;
-            m_pendingLearnBinding.triggerType = type;
-            m_pendingLearnBinding.triggerNumber = (type == MidiMessageType::ProgramChange) ? msg.programNumber() : d1;
-
-            addBinding(m_pendingLearnBinding);
-            m_learning.store(false, std::memory_order_relaxed);
+            MidiBinding learned;
+            {
+                std::lock_guard<std::mutex> lock(m_learnMutex);
+                m_pendingLearnBinding.midiChannel = channel;
+                m_pendingLearnBinding.triggerType = type;
+                m_pendingLearnBinding.triggerNumber = (type == MidiMessageType::ProgramChange) ? msg.programNumber() : d1;
+                learned = m_pendingLearnBinding;
+            }
+            addBinding(learned);
+            m_learning.store(false, std::memory_order_release);
             return;
         }
     }

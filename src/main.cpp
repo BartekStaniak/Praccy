@@ -227,10 +227,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     praccy::state::AppConfig startupCfg;
     startupCfg.load();
+    praccy::ui::setDpiScale(dpiScale);
     praccy::ui::applyTheme(static_cast<praccy::ui::ThemeId>(std::clamp(startupCfg.themeId, 0, 3)));
-    if (dpiScale > 1.0f) {
-        ImGui::GetStyle().ScaleAllSizes(dpiScale);
-    }
 
     ImFontConfig fontConfig;
     fontConfig.OversampleH = 3; // 3x horizontal oversampling for subpixel crispness
@@ -384,15 +382,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     g_dragDropRouter.setAudioTrackHandler([&](const std::filesystem::path& p) {
         player.loadWavFile(p.string());
-        looper.loadWavFile(p.string());
     });
     g_dragDropRouter.setPresetHandler([&](const std::filesystem::path& p) {
-        scenes.loadFromFile(p.string());
+        if (scenes.loadFromFile(p.string())) {
+            scenes.applyScene(0, graph);
+        }
     });
     g_dragDropRouter.setChainHandler([&](const std::filesystem::path& p) {
         auto* dawAdapter = praccy::state::UniversalDawInteropManager::instance().findAdapter(p);
         if (dawAdapter) {
             praccy::state::UniversalDawInteropManager::instance().importAndApply(p, graph, scenes, scanner);
+        } else if (std::filesystem::exists(p) && scenes.loadFromFile(p.string())) {
+            scenes.applyScene(0, graph);
         } else {
             scenes.loadPresetChain(p.stem().string(), graph);
         }
@@ -509,7 +510,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         }
     }
 
-    // Connect MIDI bindings callback
+    // Connect MIDI bindings callback (defer SceneSelect off WinMM interrupt thread to UI thread)
+    std::atomic<int> pendingMidiSceneIndex{-1};
     midi.setBindingCallback([&](const praccy::midi::MidiBinding& binding, float normVal) {
         if (binding.targetType == praccy::midi::BindingTargetType::SlotBypass) {
             auto* node = graph.getNode(binding.targetSlotIndex);
@@ -517,8 +519,33 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         } else if (binding.targetType == praccy::midi::BindingTargetType::SlotDryWet) {
             auto* slot = dynamic_cast<praccy::audio::PluginSlot*>(graph.getNode(binding.targetSlotIndex));
             if (slot) slot->setDryWet(normVal);
+        } else if (binding.targetType == praccy::midi::BindingTargetType::SlotOutputGain) {
+            auto* slot = dynamic_cast<praccy::audio::PluginSlot*>(graph.getNode(binding.targetSlotIndex));
+            if (slot) slot->setOutputGainDb(-24.0f + (normVal * 36.0f));
+        } else if (binding.targetType == praccy::midi::BindingTargetType::SlotInputGain) {
+            auto* slot = dynamic_cast<praccy::audio::PluginSlot*>(graph.getNode(binding.targetSlotIndex));
+            if (slot) slot->setInputGainDb(-24.0f + (normVal * 48.0f));
+        } else if (binding.targetType == praccy::midi::BindingTargetType::BranchMute ||
+                   binding.targetType == praccy::midi::BindingTargetType::BranchSolo ||
+                   binding.targetType == praccy::midi::BindingTargetType::BranchGain ||
+                   binding.targetType == praccy::midi::BindingTargetType::BranchPan) {
+            auto* block = dynamic_cast<praccy::audio::ParallelSplitMergeBlock*>(graph.getNode(binding.targetSlotIndex));
+            if (block && binding.targetBranchIndex >= 0 &&
+                static_cast<size_t>(binding.targetBranchIndex) < block->numBranches()) {
+                if (auto* br = block->getBranch(static_cast<size_t>(binding.targetBranchIndex))) {
+                    if (binding.targetType == praccy::midi::BindingTargetType::BranchMute) {
+                        br->setMuted(!br->isMuted());
+                    } else if (binding.targetType == praccy::midi::BindingTargetType::BranchSolo) {
+                        br->setSolo(!br->isSolo());
+                    } else if (binding.targetType == praccy::midi::BindingTargetType::BranchGain) {
+                        br->setGainDb(-24.0f + (normVal * 36.0f));
+                    } else if (binding.targetType == praccy::midi::BindingTargetType::BranchPan) {
+                        br->setPan((normVal * 2.0f) - 1.0f);
+                    }
+                }
+            }
         } else if (binding.targetType == praccy::midi::BindingTargetType::SceneSelect) {
-            scenes.applyScene(binding.targetSceneIndex, graph);
+            pendingMidiSceneIndex.store(binding.targetSceneIndex, std::memory_order_release);
         } else if (binding.targetType == praccy::midi::BindingTargetType::MasterVolume) {
             graph.setMasterVolumeDb(-36.0f + (normVal * 42.0f));
         }
@@ -558,6 +585,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             }
         }
         if (done) break;
+
+        // Drain deferred MIDI scene switches on the main UI thread (safe for HWND teardown & disk I/O)
+        const int reqScene = pendingMidiSceneIndex.exchange(-1, std::memory_order_acquire);
+        if (reqScene >= 0) {
+            scenes.applyScene(static_cast<size_t>(reqScene), graph);
+        }
 
         // Start Dear ImGui frame
         ImGui_ImplDX11_NewFrame();
@@ -687,6 +720,11 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 return 0;
             break;
         case WM_DPICHANGED: {
+            const UINT newDpi = HIWORD(wParam);
+            if (newDpi > 0) {
+                praccy::ui::setDpiScale(static_cast<float>(newDpi) / 96.0f);
+                praccy::ui::applyTheme(praccy::ui::themeTokens().id);
+            }
             const RECT* prc = reinterpret_cast<const RECT*>(lParam);
             SetWindowPos(hWnd, nullptr,
                 prc->left, prc->top,

@@ -168,7 +168,7 @@ std::optional<ScenePreset> AbletonAdapter::parseToScene(const std::filesystem::p
                     } else if (branchSlotsList.size() >= 2) {
                         NodePreset parBlock;
                         parBlock.kind = NodePreset::Kind::ParallelBlock;
-                        parBlock.branchBlend = 0.5f;
+                        parBlock.branchBlend = 0.0f;
 
                         BranchPreset bA;
                         bA.name = "Branch A";
@@ -221,7 +221,7 @@ std::optional<ScenePreset> AbletonAdapter::parseToScene(const std::filesystem::p
                 } else if (branchSlotsList.size() >= 2) {
                     NodePreset parBlock;
                     parBlock.kind = NodePreset::Kind::ParallelBlock;
-                    parBlock.branchBlend = 0.5f;
+                    parBlock.branchBlend = 0.0f;
 
                     BranchPreset bA;
                     bA.name = "Branch A";

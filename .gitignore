@@ -39,3 +39,5 @@ test_archive_temp.zip
 temp_out/
 .agents/
 run_tool.py
+Testing/
+*.patch

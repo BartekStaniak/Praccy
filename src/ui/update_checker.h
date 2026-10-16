@@ -36,6 +36,7 @@ struct UpdateInfo {
     std::string downloadUrl;     // Browser link
     std::string assetUrl;        // Direct download link
     std::string assetName;       // e.g. "Praccy-v1.0.0-windows-x64.zip"
+    std::string expectedSha256;  // Optional SHA-256 digest from release metadata
     int64_t totalBytes{0};
     int64_t downloadedBytes{0};
     float downloadProgress{0.0f}; // 0.0 to 1.0

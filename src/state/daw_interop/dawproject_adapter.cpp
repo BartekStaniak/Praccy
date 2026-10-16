@@ -185,7 +185,7 @@ std::optional<ScenePreset> DawprojectAdapter::parseToScene(const std::filesystem
             } else if (child->tag == "parallelBlock" || child->tag == "split") {
                 NodePreset parBlock;
                 parBlock.kind = NodePreset::Kind::ParallelBlock;
-                parBlock.branchBlend = 0.5f;
+                parBlock.branchBlend = 0.0f;
 
                 auto branches = child->childrenNamed("branch");
                 for (size_t bIdx = 0; bIdx < branches.size() && bIdx < 2; ++bIdx) {
@@ -221,7 +221,7 @@ bool DawprojectAdapter::exportFromScene(const ScenePreset& scene, const std::fil
         std::ofstream mf(tempDir / "manifest.xml", std::ios::trunc);
         if (!mf.is_open()) return false;
         mf << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
-        mf << "<manifest formatVersion=\"1.0\" application=\"Praccy\" appVersion=\"2.4\" />\n";
+        mf << "<manifest formatVersion=\"1.0\" application=\"Praccy\" appVersion=\"2.6.0\" />\n";
     }
 
     // 2. project.xml and binary state files
@@ -231,7 +231,7 @@ bool DawprojectAdapter::exportFromScene(const ScenePreset& scene, const std::fil
     std::ostringstream px;
     px << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
     px << "<project version=\"1.0\">\n";
-    px << "  <application name=\"Praccy\" version=\"2.4\" />\n";
+    px << "  <application name=\"Praccy\" version=\"2.6.0\" />\n";
     px << "  <transport tempo=\"" << scene.tempoBpm << "\" timeSignatureNumerator=\""
        << static_cast<int>(scene.timeSigNumerator) << "\" timeSignatureDenominator=\""
        << static_cast<int>(scene.timeSigDenominator) << "\" />\n";

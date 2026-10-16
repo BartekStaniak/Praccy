@@ -451,14 +451,17 @@ TunerResult InstrumentTuner::currentResult() const {
     float bestCentsDiff = 9999.0f;
     float bestTargetFreq = 0.0f;
 
-    for (size_t i = 0; i < m_config.stringMidiNotes.size(); ++i) {
-        int strMidi = m_config.stringMidiNotes[i];
-        float strTargetFreq = safeA4 * std::pow(2.0f, (static_cast<float>(strMidi) - 69.0f) / 12.0f);
-        float centsDiff = 1200.0f * std::log2(freq / strTargetFreq);
-        if (std::abs(centsDiff) < std::abs(bestCentsDiff)) {
-            bestCentsDiff = centsDiff;
-            bestStringIdx = static_cast<int>(i);
-            bestTargetFreq = strTargetFreq;
+    {
+        std::lock_guard<std::mutex> lock(m_configMutex);
+        for (size_t i = 0; i < m_config.stringMidiNotes.size(); ++i) {
+            int strMidi = m_config.stringMidiNotes[i];
+            float strTargetFreq = safeA4 * std::pow(2.0f, (static_cast<float>(strMidi) - 69.0f) / 12.0f);
+            float centsDiff = 1200.0f * std::log2(freq / strTargetFreq);
+            if (std::abs(centsDiff) < std::abs(bestCentsDiff)) {
+                bestCentsDiff = centsDiff;
+                bestStringIdx = static_cast<int>(i);
+                bestTargetFreq = strTargetFreq;
+            }
         }
     }
 

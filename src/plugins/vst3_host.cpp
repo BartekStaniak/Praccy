@@ -36,6 +36,7 @@ public:
     Steinberg::int64 pos{0};
 
     PraccyMemoryStream() = default;
+    virtual ~PraccyMemoryStream() = default;
     explicit PraccyMemoryStream(const std::vector<uint8_t>& data) {
         buffer.assign(data.begin(), data.end());
     }
@@ -43,7 +44,8 @@ public:
     Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID _iid, void** obj) override {
         if (memcmp(_iid, Steinberg::IBStream::iid, sizeof(Steinberg::TUID)) == 0 ||
             memcmp(_iid, Steinberg::FUnknown::iid, sizeof(Steinberg::TUID)) == 0) {
-            *obj = this;
+            addRef();
+            *obj = static_cast<Steinberg::IBStream*>(this);
             return Steinberg::kResultOk;
         }
         *obj = nullptr;
@@ -93,11 +95,13 @@ public:
 class PraccyComponentHandler : public Steinberg::Vst::IComponentHandler {
 public:
     Vst3PluginInstance* owner{nullptr};
+    virtual ~PraccyComponentHandler() = default;
 
     Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID _iid, void** obj) override {
         if (memcmp(_iid, Steinberg::Vst::IComponentHandler::iid, sizeof(Steinberg::TUID)) == 0 ||
             memcmp(_iid, Steinberg::FUnknown::iid, sizeof(Steinberg::TUID)) == 0) {
-            *obj = this;
+            addRef();
+            *obj = static_cast<Steinberg::Vst::IComponentHandler*>(this);
             return Steinberg::kResultOk;
         }
         *obj = nullptr;
@@ -128,11 +132,13 @@ class PraccyPlugFrame : public Steinberg::IPlugFrame {
 public:
     HWND parentHwnd{nullptr};
     bool inResize{false};
+    virtual ~PraccyPlugFrame() = default;
 
     Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID _iid, void** obj) override {
         if (memcmp(_iid, Steinberg::IPlugFrame::iid, sizeof(Steinberg::TUID)) == 0 ||
             memcmp(_iid, Steinberg::FUnknown::iid, sizeof(Steinberg::TUID)) == 0) {
-            *obj = this;
+            addRef();
+            *obj = static_cast<Steinberg::IPlugFrame*>(this);
             return Steinberg::kResultOk;
         }
         *obj = nullptr;
@@ -307,6 +313,7 @@ std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::
 
     if (targetClassIdx == -1) {
         std::cerr << "No audio effect class found in: " << dllPath.string() << "\n";
+        factory->release();
         FreeLibrary(hLib);
         return nullptr;
     }
@@ -334,16 +341,13 @@ std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::
     // Create Component Instance
     if (factory->createInstance(classInfo.cid, Steinberg::Vst::IComponent::iid, reinterpret_cast<void**>(&instance->m_component)) != Steinberg::kResultOk || !instance->m_component) {
         std::cerr << "Failed to create IComponent for: " << instance->m_name << "\n";
-        FreeLibrary(hLib);
-        return nullptr;
+        return nullptr; // ~Vst3PluginInstance releases m_factory and unloads m_module
     }
 
     // Query Audio Processor
     if (instance->m_component->queryInterface(Steinberg::Vst::IAudioProcessor::iid, reinterpret_cast<void**>(&instance->m_processor)) != Steinberg::kResultOk || !instance->m_processor) {
         std::cerr << "Failed to query IAudioProcessor for: " << instance->m_name << "\n";
-        instance->m_component->release();
-        FreeLibrary(hLib);
-        return nullptr;
+        return nullptr; // ~Vst3PluginInstance releases m_component, m_factory, and unloads m_module
     }
 
     instance->m_component->initialize(nullptr);
@@ -495,6 +499,12 @@ Vst3PluginInstance::~Vst3PluginInstance() {
         m_component->terminate();
         m_component->release();
         m_component = nullptr;
+    }
+
+    // 7b. Release IPluginFactory COM reference before ExitDll
+    if (m_factory) {
+        m_factory->release();
+        m_factory = nullptr;
     }
 
     // 8. Cleanly invoke ExitDll and unload module

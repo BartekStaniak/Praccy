@@ -46,9 +46,10 @@ private:
     std::string m_vendor{"Praccy Audio"};
     std::string m_version{"1.0.0"};
 
-    float m_drive{4.0f};  // 1.0 to 15.0
-    float m_tone{0.5f};   // 0.0 to 1.0
-    float m_level{1.0f};  // 0.0 to 2.0
+    double m_sampleRate{48000.0};
+    std::atomic<float> m_drive{4.0f};  // 1.0 to 15.0
+    std::atomic<float> m_tone{0.5f};   // 0.0 to 1.0
+    std::atomic<float> m_level{1.0f};  // 0.0 to 2.0
 
     float m_filterState[2]{0.0f, 0.0f};
 };
@@ -91,11 +92,14 @@ private:
     std::string m_vendor{"Praccy Audio"};
     std::string m_version{"1.0.0"};
 
-    float m_gain{6.0f};
-    float m_bass{0.5f};
-    float m_treble{0.5f};
-    float m_master{0.8f};
+    double m_sampleRate{48000.0};
+    std::atomic<float> m_gain{6.0f};
+    std::atomic<float> m_bass{0.5f};
+    std::atomic<float> m_treble{0.5f};
+    std::atomic<float> m_master{0.8f};
 
+    float m_bassFilterL{0.0f};
+    float m_bassFilterR{0.0f};
     float m_cabFilterL{0.0f};
     float m_cabFilterR{0.0f};
 };
@@ -139,9 +143,9 @@ private:
     std::string m_version{"1.0.0"};
 
     double m_sampleRate{48000.0};
-    float m_timeMs{350.0f};
-    float m_feedback{0.45f};
-    float m_mix{0.35f};
+    std::atomic<float> m_timeMs{350.0f};
+    std::atomic<float> m_feedback{0.45f};
+    std::atomic<float> m_mix{0.35f};
 
     std::vector<float> m_delayBufferL;
     std::vector<float> m_delayBufferR;
