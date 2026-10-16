@@ -77,7 +77,21 @@ inline bool ResettableSliderFloat(const char* label, float* v, float v_min, floa
         s_suppressResetId = 0;
     }
 
-    bool changed = ImGui::SliderFloat(label, v, v_min, v_max, format, flags);
+    // Suppress stock opaque grab block so it never collides behind value text
+    ScopedStyleColor hideStock({
+        {ImGuiCol_FrameBg, ColorToken::transparent().vec4},
+        {ImGuiCol_FrameBgHovered, ColorToken::transparent().vec4},
+        {ImGuiCol_FrameBgActive, ColorToken::transparent().vec4},
+        {ImGuiCol_SliderGrab, ColorToken::transparent().vec4},
+        {ImGuiCol_SliderGrabActive, ColorToken::transparent().vec4},
+        {ImGuiCol_Border, ColorToken::transparent().vec4}
+    });
+
+    bool changed = ImGui::SliderFloat(label, v, v_min, v_max, "", flags);
+    const ImVec2 rMin = ImGui::GetItemRectMin();
+    const ImVec2 rMax = ImGui::GetItemRectMax();
+    const bool hovered = ImGui::IsItemHovered();
+    const bool active  = ImGui::IsItemActive();
 
     if (s_suppressResetId == id) {
         if (*v != default_val) {
@@ -88,12 +102,61 @@ inline bool ResettableSliderFloat(const char* label, float* v, float v_min, floa
         ImGui::ClearActiveID();
     }
 
-    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+    if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         *v = default_val;
         s_suppressResetId = id;
         ImGui::MarkItemEdited(id);
         ImGui::ClearActiveID();
         changed = true;
+    }
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const auto& tokens = themeTokens();
+    const float w = rMax.x - rMin.x;
+    const float h = rMax.y - rMin.y;
+
+    // 1. Recessed outer frame
+    const ImU32 borderCol = active ? tokens.borders.focus.u32
+                          : (hovered ? tokens.borders.strong.u32 : tokens.borders.subtle.u32);
+    dl->AddRectFilled(rMin, rMax, tokens.surfaces.frameBg.u32, 4.0f);
+    dl->AddRect(rMin, rMax, borderCol, 4.0f);
+
+    // 2. Bottom subtle rail track & unity/default tick mark
+    const float padX = 6.0f;
+    const float trackX1 = rMin.x + padX;
+    const float trackX2 = rMax.x - padX;
+    const float trackW = std::max(1.0f, trackX2 - trackX1);
+    const float range = (v_max > v_min) ? (v_max - v_min) : 1.0f;
+    const float defNorm = std::clamp((default_val - v_min) / range, 0.0f, 1.0f);
+    const float valNorm = std::clamp((*v - v_min) / range, 0.0f, 1.0f);
+    const float defX = trackX1 + defNorm * trackW;
+    const float valX = trackX1 + valNorm * trackW;
+
+    // Subtle translucent fill bar (22% alpha) so foreground text always retains >10:1 WCAG contrast
+    const bool isBipolar = (v_min < 0.0f && v_max > 0.0f);
+    const float fillX1 = isBipolar ? std::min(defX, valX) : rMin.x + 1.0f;
+    const float fillX2 = isBipolar ? std::max(defX, valX) : valX;
+    if (fillX2 > fillX1 + 0.5f) {
+        const ImU32 fillCol = active ? tokens.borders.focus.withAlpha(0.28f).u32
+                                     : tokens.signal.active.withAlpha(0.22f).u32;
+        dl->AddRectFilled(ImVec2(fillX1, rMin.y + 1.0f), ImVec2(fillX2, rMax.y - 1.0f), fillCol, 3.0f);
+    }
+
+    // Unity / default reference tick at bottom & top edge
+    dl->AddLine(ImVec2(defX, rMin.y + 1.0f), ImVec2(defX, rMin.y + 4.5f), tokens.borders.strong.u32, 1.2f);
+    dl->AddLine(ImVec2(defX, rMax.y - 4.5f), ImVec2(defX, rMax.y - 1.0f), tokens.borders.strong.u32, 1.2f);
+
+    // Crisp vertical cursor indicator line (2px wide) instead of text-obscuring block
+    const ImU32 thumbCol = active ? tokens.borders.focus.u32 : tokens.text.accent.u32;
+    dl->AddLine(ImVec2(valX, rMin.y + 1.5f), ImVec2(valX, rMax.y - 1.5f), thumbCol, 2.2f);
+
+    // 3. High-contrast centered value readout
+    if (format && format[0] != '\0') {
+        char valBuf[64];
+        std::snprintf(valBuf, sizeof(valBuf), format, *v);
+        const ImVec2 tSz = ImGui::CalcTextSize(valBuf);
+        const ImVec2 tPos(rMin.x + (w - tSz.x) * 0.5f, rMin.y + (h - tSz.y) * 0.5f);
+        dl->AddText(tPos, tokens.text.primary.u32, valBuf);
     }
 
     return changed;
@@ -254,12 +317,12 @@ inline bool renderCenteredSplitButton(const char* id, const ImVec2& size = ImVec
     float cx = std::floor(pos.x + size.x * 0.5f);
     float cy = std::floor(pos.y + size.y * 0.5f);
 
-    const float barHalfW = 1.0f;
-    const float barHalfH = 4.5f;
-    const float offset = 2.5f;
-
-    dl->AddRectFilled(ImVec2(cx - offset - barHalfW, cy - barHalfH), ImVec2(cx - offset + barHalfW, cy + barHalfH), iconCol, 0.5f);
-    dl->AddRectFilled(ImVec2(cx + offset - barHalfW, cy - barHalfH), ImVec2(cx + offset + barHalfW, cy + barHalfH), iconCol, 0.5f);
+    // Y-fork parallel routing split glyph (replaces misleading '||' pause bars)
+    dl->AddLine(ImVec2(cx - 4.5f, cy), ImVec2(cx - 0.5f, cy), iconCol, 1.5f);
+    dl->AddLine(ImVec2(cx - 0.5f, cy), ImVec2(cx + 3.5f, cy - 3.5f), iconCol, 1.4f);
+    dl->AddLine(ImVec2(cx - 0.5f, cy), ImVec2(cx + 3.5f, cy + 3.5f), iconCol, 1.4f);
+    dl->AddCircleFilled(ImVec2(cx + 4.0f, cy - 3.5f), 1.3f, iconCol);
+    dl->AddCircleFilled(ImVec2(cx + 4.0f, cy + 3.5f), 1.3f, iconCol);
 
     return clicked;
 }

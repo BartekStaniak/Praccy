@@ -22,20 +22,29 @@ enum class DeviceCategory {
     GenericProcessor
 };
 
-inline DeviceCategory detectDeviceCategory(const std::string& name, const std::string& /*vendor*/) {
-    std::string lower = name;
+inline DeviceCategory detectDeviceCategory(const std::string& name, const std::string& vendor) {
+    std::string lower = name + " " + vendor;
     std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    // Check metering/reference/utility tools first so "MetricAB" never triggers "cab"
+    if (lower.find("metricab") != std::string::npos || lower.find("metric ab") != std::string::npos ||
+        lower.find("meter") != std::string::npos || lower.find("scope") != std::string::npos ||
+        lower.find("spectrum") != std::string::npos || lower.find("loudness") != std::string::npos) {
+        return DeviceCategory::GenericProcessor;
+    }
 
     bool hasCompKeyword = (lower.find("1176") != std::string::npos || lower.find("la2a") != std::string::npos ||
                            lower.find("comp") != std::string::npos || lower.find("limit") != std::string::npos ||
                            lower.find("gate") != std::string::npos || lower.find("level") != std::string::npos ||
-                           lower.find("dynamic") != std::string::npos);
+                           lower.find("opticom") != std::string::npos || lower.find("dynamic") != std::string::npos);
 
-    bool hasAmpKeyword = (lower.find("amp") != std::string::npos || lower.find("head") != std::string::npos ||
+    bool hasAmpKeyword = (lower.find("amp") != std::string::npos || lower.find("archetype") != std::string::npos ||
+                          lower.find("neural dsp") != std::string::npos || lower.find("head") != std::string::npos ||
                           lower.find("cab") != std::string::npos || lower.find("marshall") != std::string::npos ||
                           lower.find("fender") != std::string::npos || lower.find("mesa") != std::string::npos ||
                           lower.find("recto") != std::string::npos || lower.find("soldano") != std::string::npos ||
                           lower.find("lead") != std::string::npos || lower.find("crunch") != std::string::npos ||
+                          lower.find("ampeg") != std::string::npos || lower.find("svt") != std::string::npos ||
                           lower.find("ir") != std::string::npos);
 
     if (hasAmpKeyword) {

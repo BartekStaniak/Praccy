@@ -209,7 +209,10 @@ RackView::RackView(audio::GraphEngine& graph,
       m_scenes(scenes),
       m_scanner(scanner),
       m_pluginBrowserModal(std::make_unique<PluginBrowserModal>(scanner, graph)),
-      m_settingsModal(std::make_unique<SettingsModal>(asio, scanner, [this]() { m_pluginBrowserModal->open(); })),
+      m_settingsModal(std::make_unique<SettingsModal>(asio, scanner, [this]() {
+          if (m_settingsModal) m_settingsModal->close();
+          m_pluginBrowserModal->open();
+      })),
       m_practiceToolsModal(std::make_unique<PracticeToolsModal>(looper, player)),
       m_tunerSettingsModal(std::make_unique<TunerSettingsModal>(tuner)) {
     state::AppConfig cfg;
@@ -375,6 +378,9 @@ void RackView::render() {
                                   ImGuiWindowFlags_NoScrollbar |
                                   ImGuiWindowFlags_NoScrollWithMouse;
 
+    const auto& mainTokens = themeTokens();
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, mainTokens.surfaces.windowBg.vec4);
+    ImGui::PushStyleColor(ImGuiCol_Border, mainTokens.borders.subtle.vec4);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 12.0f));
     if (ImGui::Begin("PraccyMainWindow", nullptr, windowFlags)) {
@@ -515,6 +521,13 @@ void RackView::render() {
             }
         }
 
+        if (m_pluginBrowserModal && m_pluginBrowserModal->isOpen()) {
+            ImDrawList* winDl = ImGui::GetWindowDrawList();
+            const ImGuiViewport* mainVp = ImGui::GetMainViewport();
+            if (mainVp) {
+                winDl->AddRectFilled(mainVp->Pos, ImVec2(mainVp->Pos.x + mainVp->Size.x, mainVp->Pos.y + mainVp->Size.y), mainTokens.surfaces.modalOverlay.u32);
+            }
+        }
         m_pluginBrowserModal->render();
         renderDspTweakModal();
         renderUpdateModal();
@@ -530,6 +543,7 @@ void RackView::render() {
     }
     ImGui::End();
     ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(2);
 }
 
 bool RackView::renderStatusPill(bool isRunning, const char* statusText) {
@@ -632,7 +646,9 @@ void RackView::renderPracticeRibbon() {
         ImGui::TableSetupColumn("MasterCol", ImGuiTableColumnFlags_WidthStretch, 0.20f);
 
         ImGui::PushStyleColor(ImGuiCol_ChildBg, tokens.surfaces.panelBg.vec4);
+        ImGui::PushStyleColor(ImGuiCol_Border, tokens.borders.card.vec4);
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 6.0f));
 
         // ----------------------------------------------------
@@ -899,8 +915,8 @@ void RackView::renderPracticeRibbon() {
         }
         ImGui::EndChild();
 
-        ImGui::PopStyleVar(2);
-        ImGui::PopStyleColor();
+        ImGui::PopStyleVar(3);
+        ImGui::PopStyleColor(2);
 
         ImGui::EndTable();
     }
@@ -1360,11 +1376,40 @@ void RackView::renderSceneBar() {
     }
 }
 
+namespace {
+float calculateParallelEnvelopeWidth(size_t numSlots0, size_t numSlots1) {
+    const float cardW = 240.0f;
+    const float slotWireW = 28.0f;
+    const float insertCardW = 80.0f;
+    const float envPadX = 14.0f;
+
+    const float w0 = envPadX + (numSlots0 * (cardW + slotWireW)) + insertCardW + envPadX;
+    const float w1 = envPadX + (numSlots1 * (cardW + slotWireW)) + insertCardW + envPadX;
+
+    // Minimum width needed for header controls to never overlap:
+    // Left: Pad(12) + Badge("BRANCH A/B" ~90-140) + Spacing(8) + SlotCount("(88 Slots)" ~55-80) + Spacing(10)
+    // Buttons: Mute(24) + Spacing(4) + Solo(24) + Spacing(4) + Phase(24) + Spacing(8)
+    // Sliders: 2 * minComfortableSliderW(72) + sliderGap(6) = 150
+    // Right: Safety(16) + Minimise(24) + Spacing(4) + Delete(24) + RightMargin(14) = 82
+    const float badgeW = ImGui::CalcTextSize("BRANCH A").x + 20.0f;
+    const float slotTextW = ImGui::CalcTextSize("(99 Slots)").x;
+    const float minSlidersW = (72.0f * 2.0f) + 6.0f;
+    const float headerRequiredW = 12.0f + badgeW + 8.0f + slotTextW + 10.0f
+                                + (24.0f * 3.0f + 8.0f) + 8.0f
+                                + minSlidersW + 16.0f + 52.0f + 14.0f;
+
+    const float minEnvelopeW = std::max(540.0f, headerRequiredW);
+    return std::max({ w0, w1, minEnvelopeW });
+}
+} // namespace
+
 void RackView::renderSignalRack() {
     m_graph.processReclamation();
 
     const auto& tokens = themeTokens();
     const float bottomBarReservedH = 46.0f;
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, tokens.surfaces.panelBg.vec4);
+    ImGui::PushStyleColor(ImGuiCol_Border, tokens.borders.subtle.vec4);
     ImGui::BeginChild("RackScrollArea", ImVec2(0, -bottomBarReservedH), true, ImGuiWindowFlags_HorizontalScrollbar);
 
     const size_t numNodes = m_graph.numNodes();
@@ -1394,13 +1439,9 @@ void RackView::renderSignalRack() {
             totalContentWidth += (wireW + cardW); // +32px + 240px = 272px
         } else if (node->type() == audio::NodeType::ParallelSplitMerge) {
             auto* block = dynamic_cast<audio::ParallelSplitMergeBlock*>(node);
-            const float envPadX = 14.0f;
-            const float slotWireW = 28.0f;
             const size_t n0 = (block && block->getBranch(0)) ? block->getBranch(0)->numSlots() : 0;
             const size_t n1 = (block && block->getBranch(1)) ? block->getBranch(1)->numSlots() : 0;
-            const float w0 = envPadX + (n0 * (cardW + slotWireW)) + insertCardW + envPadX;
-            const float w1 = envPadX + (n1 * (cardW + slotWireW)) + insertCardW + envPadX;
-            const float envelopeW = std::max({ w0, w1, 540.0f });
+            const float envelopeW = calculateParallelEnvelopeWidth(n0, n1);
 
             // InWire(24) + Fork(36) + Envelope + Conv(36) + Comb(104) = Envelope + 200px
             totalContentWidth += (24.0f + 36.0f + envelopeW + 36.0f + 104.0f);
@@ -1580,6 +1621,7 @@ void RackView::renderSignalRack() {
     }
 
     ImGui::EndChild();
+    ImGui::PopStyleColor(2);
 }
 
 void RackView::renderInputCard(float cardY, float cardH) {
@@ -1749,36 +1791,43 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         char titleBtnId[64];
         std::snprintf(titleBtnId, sizeof(titleBtnId), "##SlotTitle_%d_%d_%d", slotIndex, blockIndex, branchIndex);
         ImGui::InvisibleButton(titleBtnId, ImVec2(availTitleW, 18.0f));
-
-        float scrollOffset = 0.0f;
-        if (overflow > 0.0f) {
-            // Smooth ping-pong marquee animation to reveal full name
-            const float scrollSpeed = 32.0f; // px / sec
-            const float travelTime = overflow / scrollSpeed;
-            const float pauseTime = 1.3f; // seconds paused at each end
-            const float cyclePeriod = travelTime * 2.0f + pauseTime * 2.0f;
-
-            float phase = static_cast<float>(slotIndex) * 0.85f + static_cast<float>(branchIndex + 1) * 0.5f;
-            float t = std::fmod(static_cast<float>(ImGui::GetTime()) + phase, cyclePeriod);
-
-            if (t < pauseTime) {
-                scrollOffset = 0.0f;
-            } else if (t < pauseTime + travelTime) {
-                scrollOffset = ((t - pauseTime) / travelTime) * overflow;
-            } else if (t < pauseTime * 2.0f + travelTime) {
-                scrollOffset = overflow;
-            } else {
-                float returnProgress = (t - (pauseTime * 2.0f + travelTime)) / travelTime;
-                scrollOffset = (1.0f - returnProgress) * overflow;
-            }
-        }
+        const bool isTitleHovered = ImGui::IsItemHovered();
 
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImVec2 clipMin = titlePos;
         ImVec2 clipMax = ImVec2(titlePos.x + availTitleW, titlePos.y + 18.0f);
         dl->PushClipRect(clipMin, clipMax, true);
         float textY = titlePos.y + (18.0f - fontH) * 0.5f;
-        dl->AddText(ImVec2(titlePos.x - scrollOffset, textY), ImGui::GetColorU32(titleColor), rawName.c_str());
+
+        if (overflow > 0.0f && isTitleHovered) {
+            // Smooth ping-pong marquee animation on hover to reveal full name
+            const float scrollSpeed = 36.0f; // px / sec
+            const float travelTime = overflow / scrollSpeed;
+            const float pauseTime = 0.8f;
+            const float cyclePeriod = travelTime * 2.0f + pauseTime * 2.0f;
+            float t = std::fmod(static_cast<float>(ImGui::GetTime()), cyclePeriod);
+            float scrollOffset = 0.0f;
+            if (t >= pauseTime && t < pauseTime + travelTime) {
+                scrollOffset = ((t - pauseTime) / travelTime) * overflow;
+            } else if (t >= pauseTime + travelTime && t < pauseTime * 2.0f + travelTime) {
+                scrollOffset = overflow;
+            } else if (t >= pauseTime * 2.0f + travelTime) {
+                float returnProgress = (t - (pauseTime * 2.0f + travelTime)) / travelTime;
+                scrollOffset = (1.0f - returnProgress) * overflow;
+            }
+            dl->AddText(ImVec2(titlePos.x - scrollOffset, textY), ImGui::GetColorU32(titleColor), rawName.c_str());
+        } else if (overflow > 0.0f) {
+            // Static left-aligned title with clean right-side ellipsis so the start of the plugin name is never clipped
+            std::string truncated = rawName;
+            const float ellipsisW = ImGui::CalcTextSize("..").x;
+            while (truncated.size() > 3 && ImGui::CalcTextSize(truncated.c_str()).x + ellipsisW > availTitleW) {
+                truncated.pop_back();
+            }
+            truncated += "..";
+            dl->AddText(ImVec2(titlePos.x, textY), ImGui::GetColorU32(titleColor), truncated.c_str());
+        } else {
+            dl->AddText(ImVec2(titlePos.x, textY), ImGui::GetColorU32(titleColor), rawName.c_str());
+        }
         dl->PopClipRect();
 
         // Header drag-and-drop source
@@ -2157,8 +2206,14 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             ImGui::TextColored(tokens.text.primary.vec4, "%s", valBuf);
             if (g_fontMono) ImGui::PopFont();
 
-            // Tier 2: Pro-audio parameter label centered beneath value
+            // Tier 2: Pro-audio parameter label centered beneath value (disambiguated if duplicate prefix)
             std::string dLabel = formatMacroLabel(macro.label, m);
+            for (int prev = 0; prev < m; ++prev) {
+                if (formatMacroLabel(macros[prev].label, prev) == dLabel && dLabel.size() >= 4) {
+                    dLabel = dLabel.substr(0, 4) + " " + std::to_string(m + 1);
+                    break;
+                }
+            }
             ImVec2 lSz = ImGui::CalcTextSize(dLabel.c_str());
             ImGui::SetCursorPos(ImVec2(colX + (colW - lSz.x) * 0.5f, lblY));
             ImGui::TextColored(tokens.text.secondary.vec4, "%s", dLabel.c_str());
@@ -2379,10 +2434,7 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
     const size_t numSlots1 = br1 ? br1->numSlots() : 0;
 
     // Calculate dynamic envelope width based on number of slots in each branch
-    float w0 = envPadX + (numSlots0 * (cardW + slotWireW)) + insertCardW + envPadX;
-    float w1 = envPadX + (numSlots1 * (cardW + slotWireW)) + insertCardW + envPadX;
-    const float minEnvelopeW = 540.0f;
-    const float envelopeW = std::max({ w0, w1, minEnvelopeW });
+    const float envelopeW = calculateParallelEnvelopeWidth(numSlots0, numSlots1);
 
     const std::string key0 = "b" + std::to_string(blockIndex) + "_0";
     const std::string key1 = "b" + std::to_string(blockIndex) + "_1";
@@ -2446,7 +2498,7 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
         if (br0) {
             const float headerY0 = envY0 + 6.0f;
             const float rightBtnsW = 24.0f + 4.0f + 24.0f; // Minimise (24) + spacing (4) + Delete (24)
-            const float rightMargin = 10.0f;
+            const float rightMargin = 14.0f;
             const float btnAreaX0 = envX + envelopeW - rightBtnsW - rightMargin;
             const float headerSafetyMargin = 16.0f;
 
@@ -2513,7 +2565,8 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
             const float sliderStartX0 = ImGui::GetCursorPosX();
             const float availForSliders0 = (btnAreaX0 - headerSafetyMargin) - sliderStartX0;
             const float sliderGap = 6.0f;
-            const float sliderW0 = std::clamp((availForSliders0 - sliderGap) * 0.5f, 64.0f, 96.0f);
+            const float maxSliderW = 96.0f;
+            const float sliderW0 = std::clamp((availForSliders0 - sliderGap) * 0.5f, 48.0f, maxSliderW);
 
             // Pan Slider (Double-click reset to 0.0)
             float pan0 = br0->pan();
@@ -2636,7 +2689,7 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
         if (br1) {
             const float headerY1 = envY1 + 6.0f;
             const float rightBtnsW = 24.0f + 4.0f + 24.0f; // Minimise (24) + spacing (4) + Delete (24)
-            const float rightMargin = 10.0f;
+            const float rightMargin = 14.0f;
             const float btnAreaX1 = envX + envelopeW - rightBtnsW - rightMargin;
             const float headerSafetyMargin = 16.0f;
 
@@ -2703,7 +2756,8 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
             const float sliderStartX1 = ImGui::GetCursorPosX();
             const float availForSliders1 = (btnAreaX1 - headerSafetyMargin) - sliderStartX1;
             const float sliderGap = 6.0f;
-            const float sliderW1 = std::clamp((availForSliders1 - sliderGap) * 0.5f, 64.0f, 96.0f);
+            const float maxSliderW = 96.0f;
+            const float sliderW1 = std::clamp((availForSliders1 - sliderGap) * 0.5f, 48.0f, maxSliderW);
 
             // Pan Slider (Double-click reset to 0.0)
             float pan1 = br1->pan();
@@ -3101,12 +3155,7 @@ void RackView::renderMeter(const char* label, float level, float width, float he
             const float g = c1.g + (c2.g - c1.g) * t;
             const float b = c1.b + (c2.b - c1.b) * t;
             const float a = c1.a + (c2.a - c1.a) * t;
-            return IM_COL32(
-                static_cast<int>(r * 255.0f + 0.5f),
-                static_cast<int>(g * 255.0f + 0.5f),
-                static_cast<int>(b * 255.0f + 0.5f),
-                static_cast<int>(a * 255.0f + 0.5f)
-            );
+            return ColorToken(r, g, b, a).u32;
         };
 
         const float yOpt = innerYBottom - kNormOptimal * innerH;
@@ -3153,7 +3202,20 @@ void RackView::renderMeter(const char* label, float level, float width, float he
         }
     }
 
-    // 3. Subtle framing border
+    // 3. Calibrated dBFS reference ticks (-6, -12, -18, -36 dB) and 0 dBFS clip indicator on tall meters
+    if (height >= 48.0f && innerH > 0.0f) {
+        constexpr float kTickDbs[] = { -6.0f, -12.0f, -18.0f, -36.0f };
+        for (float tDb : kTickDbs) {
+            const float tNorm = (tDb + 60.0f) / 60.0f;
+            const float tickY = std::floor(innerYBottom - tNorm * innerH);
+            drawList->AddLine(ImVec2(pos.x + 1.0f, tickY), ImVec2(pos.x + 3.5f, tickY), tokens.borders.strong.u32, 1.0f);
+        }
+        if (db >= -0.2f) {
+            drawList->AddRectFilled(ImVec2(innerX1, innerYTop), ImVec2(innerX2, innerYTop + 3.5f), tokens.signal.meterClip.u32);
+        }
+    }
+
+    // 4. Subtle framing border
     drawList->AddRect(pos, ImVec2(pos.x + width, pos.y + height), tokens.borders.subtle, 2.0f);
     ImGui::Dummy(ImVec2(width, height));
 }

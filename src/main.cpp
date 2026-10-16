@@ -28,6 +28,7 @@
 #include "ui/thumbnail_manager.h"
 #include "ui/drag_drop_router.h"
 #include "resource.h"
+#include <fstream>
 
 // Global typography handles
 ImFont* g_fontUI   = nullptr;
@@ -55,6 +56,24 @@ EmbeddedResource loadWin32Resource(HMODULE hModule, int resourceId, LPCWSTR reso
 
     res.data = LockResource(hGlobal);
     return res;
+}
+
+void enableWin32DarkTitleBar(HWND hwnd, bool isDark = true) {
+    if (!hwnd) return;
+    HMODULE hDwm = LoadLibraryW(L"dwmapi.dll");
+    if (!hDwm) return;
+    typedef HRESULT (WINAPI *PFN_DwmSetWindowAttribute)(HWND, DWORD, LPCVOID, DWORD);
+    FARPROC proc = GetProcAddress(hDwm, "DwmSetWindowAttribute");
+    if (proc) {
+        PFN_DwmSetWindowAttribute pfnSetAttr = nullptr;
+        std::memcpy(&pfnSetAttr, &proc, sizeof(proc));
+        BOOL useDark = isDark ? TRUE : FALSE;
+        // DWMWA_USE_IMMERSIVE_DARK_MODE = 20 (Win10 20H1+ / Win11), fallback 19
+        if (FAILED(pfnSetAttr(hwnd, 20, &useDark, sizeof(useDark)))) {
+            pfnSetAttr(hwnd, 19, &useDark, sizeof(useDark));
+        }
+    }
+    FreeLibrary(hDwm);
 }
 
 float getDpiScaleForWindow(HWND hwnd) {
@@ -185,11 +204,21 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(1));
     }
 
-    // Register Win32 window class with dark background brush matching Praccy theme
-    HBRUSH hDarkBrush = CreateSolidBrush(RGB(28, 30, 36));
+    praccy::state::AppConfig startupCfg;
+    startupCfg.load();
+    const auto initialThemeId = static_cast<praccy::ui::ThemeId>(std::clamp(startupCfg.themeId, 0, 3));
+    const auto& initTokens = praccy::ui::getThemeTokens(initialThemeId);
+
+    // Register Win32 window class with background brush matching initial Praccy theme
+    const COLORREF bgCol = RGB(
+        static_cast<BYTE>(initTokens.surfaces.windowBg.r * 255.0f + 0.5f),
+        static_cast<BYTE>(initTokens.surfaces.windowBg.g * 255.0f + 0.5f),
+        static_cast<BYTE>(initTokens.surfaces.windowBg.b * 255.0f + 0.5f)
+    );
+    HBRUSH hBgBrush = CreateSolidBrush(bgCol);
     WNDCLASSEXW wc = {
         sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L,
-        hInstance, hIcon, LoadCursor(nullptr, IDC_ARROW), hDarkBrush, nullptr,
+        hInstance, hIcon, LoadCursor(nullptr, IDC_ARROW), hBgBrush, nullptr,
         L"PraccyHostClass", hIcon
     };
     RegisterClassExW(&wc);
@@ -208,6 +237,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
 
     DragAcceptFiles(hwnd, TRUE);
+    enableWin32DarkTitleBar(hwnd, initTokens.isDark);
+    praccy::plugins::PluginWindowManager::instance().setMainWindow(hwnd);
+    praccy::plugins::PluginWindowManager::instance().updateTheme(initTokens.isDark, bgCol);
 
     // 2. Query active monitor DPI scale factor
     const float dpiScale = getDpiScaleForWindow(hwnd);
@@ -215,7 +247,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     if (!CreateDeviceD3D(hwnd)) {
         CleanupDeviceD3D();
         UnregisterClassW(wc.lpszClassName, wc.hInstance);
-        if (hDarkBrush) DeleteObject(hDarkBrush);
+        if (hBgBrush) DeleteObject(hBgBrush);
         return 1;
     }
 
@@ -225,10 +257,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
-    praccy::state::AppConfig startupCfg;
-    startupCfg.load();
     praccy::ui::setDpiScale(dpiScale);
-    praccy::ui::applyTheme(static_cast<praccy::ui::ThemeId>(std::clamp(startupCfg.themeId, 0, 3)));
+    praccy::ui::applyTheme(initialThemeId);
+
+
 
     ImFontConfig fontConfig;
     fontConfig.OversampleH = 3; // 3x horizontal oversampling for subpixel crispness
@@ -553,14 +585,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     });
 
     // Pre-render and present the first frame to the swapchain backbuffer
-    // BEFORE showing the window. This completely eliminates any white window flash or hang,
-    // ensuring the window appears instantly in its fully styled dark state.
+    // BEFORE showing the window. This completely eliminates any window flash or hang,
+    // ensuring the window appears instantly in its fully styled theme state.
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
     rackView.render();
     ImGui::Render();
-    const float clear_color[4] = { 0.11f, 0.12f, 0.14f, 1.00f };
+    const auto& initTheme = praccy::ui::themeTokens();
+    const float clear_color[4] = {
+        initTheme.surfaces.windowBg.r,
+        initTheme.surfaces.windowBg.g,
+        initTheme.surfaces.windowBg.b,
+        1.00f
+    };
     g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
     g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
@@ -573,6 +611,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         ShowWindow(hwnd, SW_SHOWDEFAULT);
     }
     UpdateWindow(hwnd);
+
+    praccy::ui::ThemeId activeThemeId = initTheme.id;
 
     // Main event loop
     bool done = false;
@@ -593,6 +633,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             scenes.applyScene(static_cast<size_t>(reqScene), graph);
         }
 
+        // Throttle rendering when window is minimized to keep background CPU/GPU at zero
+        if (IsIconic(hwnd)) {
+            Sleep(16);
+            continue;
+        }
+
         // Start Dear ImGui frame
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
@@ -600,10 +646,29 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         rackView.render();
 
+        const auto& curTokens = praccy::ui::themeTokens();
+        if (curTokens.id != activeThemeId) {
+            activeThemeId = curTokens.id;
+            enableWin32DarkTitleBar(hwnd, curTokens.isDark);
+            const COLORREF newBgCol = RGB(
+                static_cast<BYTE>(curTokens.surfaces.windowBg.r * 255.0f + 0.5f),
+                static_cast<BYTE>(curTokens.surfaces.windowBg.g * 255.0f + 0.5f),
+                static_cast<BYTE>(curTokens.surfaces.windowBg.b * 255.0f + 0.5f)
+            );
+            praccy::plugins::PluginWindowManager::instance().updateTheme(curTokens.isDark, newBgCol);
+        }
+
+        const float frame_clear_color[4] = {
+            curTokens.surfaces.windowBg.r,
+            curTokens.surfaces.windowBg.g,
+            curTokens.surfaces.windowBg.b,
+            1.00f
+        };
+
         // Rendering
         ImGui::Render();
         g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
-        g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
+        g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, frame_clear_color);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
         // Present with vsync (1) to keep CPU overhead at near-zero
@@ -641,7 +706,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     CleanupDeviceD3D();
     DestroyWindow(hwnd);
     UnregisterClassW(wc.lpszClassName, wc.hInstance);
-    if (hDarkBrush) DeleteObject(hDarkBrush);
+    if (hBgBrush) DeleteObject(hBgBrush);
     OleUninitialize();
 
     return 0;

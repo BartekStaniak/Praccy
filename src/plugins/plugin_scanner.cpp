@@ -121,8 +121,6 @@ void PluginScanner::loadFromConfig(const state::AppConfig& cfg) {
         auto catIt = m_categoryOverrides.find(sp.name);
         if (catIt != m_categoryOverrides.end()) {
             desc.category = catIt->second;
-        } else if (!sp.category.empty()) {
-            desc.category = sp.category;
         } else {
             desc.category = detectPluginCategory(sp.name, sp.vendor);
         }
@@ -404,9 +402,15 @@ std::string PluginScanner::detectVendor(const std::filesystem::path& path, const
     return "Other";
 }
 
-std::string detectPluginCategory(const std::string& name, const std::string& /*vendor*/) {
-    std::string lower = name;
+std::string detectPluginCategory(const std::string& name, const std::string& vendor) {
+    std::string lower = name + " " + vendor;
     std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    // Check metering/utility first so "MetricAB" does not match "cab" under Amp Emulation
+    if (lower.find("metricab") != std::string::npos || lower.find("meter") != std::string::npos ||
+        lower.find("scope") != std::string::npos || lower.find("util") != std::string::npos) {
+        return "Utility/Metering";
+    }
 
     if (lower.find("tune") != std::string::npos || lower.find("tuner") != std::string::npos ||
         lower.find("pitch") != std::string::npos || lower.find("scale") != std::string::npos ||
@@ -421,11 +425,13 @@ std::string detectPluginCategory(const std::string& name, const std::string& /*v
         lower.find("klon") != std::string::npos || lower.find("od") != std::string::npos) {
         return "Distortion";
     }
-    if (lower.find("amp") != std::string::npos || lower.find("head") != std::string::npos ||
+    if (lower.find("amp") != std::string::npos || lower.find("archetype") != std::string::npos ||
+        lower.find("neural dsp") != std::string::npos || lower.find("head") != std::string::npos ||
         lower.find("cab") != std::string::npos || lower.find("marshall") != std::string::npos ||
         lower.find("fender") != std::string::npos || lower.find("mesa") != std::string::npos ||
         lower.find("recto") != std::string::npos || lower.find("soldano") != std::string::npos ||
         lower.find("lead") != std::string::npos || lower.find("crunch") != std::string::npos ||
+        lower.find("ampeg") != std::string::npos || lower.find("svt") != std::string::npos ||
         lower.find("ir") != std::string::npos) {
         return "Amp Emulation";
     }

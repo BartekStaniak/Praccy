@@ -50,6 +50,21 @@ std::optional<std::string> openNativeFolderPicker(HWND parentHwnd, const wchar_t
     ScopedComInitializer com;
     if (!com.succeeded()) return std::nullopt;
 
+    // Apply dark mode preference for Win32 common dialogs (Windows 10 1809+ / Windows 11)
+    const auto& tokens = themeTokens();
+    if (HMODULE hUxTheme = LoadLibraryW(L"uxtheme.dll")) {
+        using PFN_SetPreferredAppMode = int (WINAPI*)(int);
+        FARPROC proc = GetProcAddress(hUxTheme, MAKEINTRESOURCEA(135));
+        if (proc) {
+            PFN_SetPreferredAppMode pfnSetPreferredAppMode = nullptr;
+            std::memcpy(&pfnSetPreferredAppMode, &proc, sizeof(proc));
+            if (pfnSetPreferredAppMode) {
+                pfnSetPreferredAppMode(tokens.isDark ? 2 /* ForceDark */ : 3 /* ForceLight */);
+            }
+        }
+        FreeLibrary(hUxTheme);
+    }
+
     Microsoft::WRL::ComPtr<IFileOpenDialog> fileDialog;
     HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&fileDialog));
     if (FAILED(hr)) return std::nullopt;
@@ -124,6 +139,11 @@ void SettingsModal::close() {
 void SettingsModal::renderAudioTab() {
     const auto& tokens = themeTokens();
     ImGui::Spacing();
+    if (ImGui::BeginTable("##AudioSettingsTwoCol", 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersInnerV)) {
+        ImGui::TableSetupColumn("AsioCol", ImGuiTableColumnFlags_WidthStretch, 0.52f);
+        ImGui::TableSetupColumn("RiffCol", ImGuiTableColumnFlags_WidthStretch, 0.48f);
+        ImGui::TableNextColumn();
+    }
     ImGui::TextColored(tokens.text.accent.vec4, "ASIO DRIVER CONFIGURATION");
     ImGui::Separator();
     ImGui::Spacing();
@@ -290,9 +310,13 @@ void SettingsModal::renderAudioTab() {
         ImGui::BulletText("Audio Engine State: STOPPED (Driver loaded: %s)", m_asio.isLoaded() ? "Yes" : "No");
     }
 
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
+    if (ImGui::GetCurrentTable() != nullptr) {
+        ImGui::TableNextColumn();
+    } else {
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+    }
 
     ImGui::TextColored(tokens.text.accent.vec4, "RETROACTIVE RIFF RECORDER");
     ImGui::Separator();
@@ -394,6 +418,9 @@ void SettingsModal::renderAudioTab() {
             ImGui::SetTooltip("Reset to default Praccy Documents/Riffs folder");
         }
     }
+    if (ImGui::GetCurrentTable() != nullptr) {
+        ImGui::EndTable();
+    }
 }
 
 void SettingsModal::renderPluginsTab() {
@@ -469,7 +496,23 @@ void SettingsModal::renderPluginsTab() {
     } else {
         for (size_t i = 0; i < paths.size(); ++i) {
             ImGui::PushID(static_cast<int>(i));
+            const bool isSystemDefault = (i < 6);
+            ImGui::AlignTextToFramePadding();
             ImGui::BulletText("%s", paths[i].c_str());
+            ImGui::SameLine(std::max(280.0f, ImGui::GetContentRegionAvail().x - (isSystemDefault ? 90.0f : 150.0f)));
+            ImGui::TextDisabled(isSystemDefault ? "[System]" : "[Custom]");
+            if (!isSystemDefault) {
+                ImGui::SameLine(0, 8.0f);
+                if (CenteredButton("Remove", ImVec2(64.0f, Metrics::smallButtonHeight()))) {
+                    m_scanner.removeCustomSearchPath(i);
+                    state::AppConfig cfg;
+                    cfg.load();
+                    cfg.customPluginPaths = m_scanner.searchPaths();
+                    cfg.save();
+                    ImGui::PopID();
+                    break;
+                }
+            }
             ImGui::PopID();
         }
     }
@@ -502,17 +545,86 @@ void SettingsModal::renderThemeTab() {
     ThemeId currentTheme = themeTokens().id;
     int themeIdx = static_cast<int>(currentTheme);
 
+    const char* themeSubtitles[] = {
+        "Deep obsidian surfaces with warm amber focus and emerald metering.",
+        "High-contrast midnight navy with electric cyan and magenta accents.",
+        "Cool Scandinavian slate greys with arctic blue and seafoam telemetry.",
+        "Warm analog console paper with terracotta and forest green meters."
+    };
+
+    const float availW = ImGui::GetContentRegionAvail().x;
+    const float cardGap = 12.0f;
+    const float cardW = std::max(220.0f, (availW - cardGap) * 0.5f);
+    const float padX = 12.0f;
+    const float padBottom = 12.0f;
+    const float wrapWidth = cardW - padX * 2.0f;
+
+    const float headerH = std::max(28.0f, ImGui::GetTextLineHeight() + 8.0f);
+    const float swatchY = headerH + 10.0f;
+    const float swatchH = 16.0f;
+    const float subtitleY = swatchY + swatchH + 10.0f;
+
+    float maxSubH = 0.0f;
     for (int i = 0; i < 4; ++i) {
-        if (ImGui::RadioButton(themes[i], themeIdx == i)) {
+        ImVec2 sz = ImGui::CalcTextSize(themeSubtitles[i], nullptr, false, wrapWidth);
+        if (sz.y > maxSubH) {
+            maxSubH = sz.y;
+        }
+    }
+    const float cardH = std::max(110.0f, subtitleY + maxSubH + padBottom);
+
+    for (int i = 0; i < 4; ++i) {
+        if (i % 2 == 1) ImGui::SameLine(0.0f, cardGap);
+
+        const ThemeTokens& t = getThemeTokens(static_cast<ThemeId>(i));
+
+        ImGui::PushID(i);
+        ImVec2 pos = ImGui::GetCursorScreenPos();
+        if (ImGui::InvisibleButton("##ThemePreviewCard", ImVec2(cardW, cardH))) {
             applyTheme(static_cast<ThemeId>(i));
+            themeIdx = i;
             state::AppConfig cfg;
             cfg.load();
             cfg.themeId = i;
             cfg.save();
         }
-        ImGui::Spacing();
+        const bool isSelected = (themeIdx == i);
+        const bool hovered = ImGui::IsItemHovered();
+        if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImU32 borderCol = isSelected ? tokens.borders.focus.u32
+                              : (hovered ? tokens.borders.cardHovered.u32 : tokens.borders.subtle.u32);
+        dl->AddRectFilled(pos, ImVec2(pos.x + cardW, pos.y + cardH), t.surfaces.panelBg.u32, 6.0f);
+        dl->AddRect(pos, ImVec2(pos.x + cardW, pos.y + cardH), borderCol, 6.0f, 0, isSelected ? 2.0f : 1.0f);
+
+        dl->PushClipRect(pos, ImVec2(pos.x + cardW, pos.y + cardH), true);
+
+        // Header bar inside preview card
+        dl->AddRectFilled(pos, ImVec2(pos.x + cardW, pos.y + headerH), t.surfaces.headerBg.u32, 6.0f, ImDrawFlags_RoundCornersTop);
+        const float headerTextY = pos.y + (headerH - ImGui::GetTextLineHeight()) * 0.5f;
+        dl->AddText(ImVec2(pos.x + padX, headerTextY), t.text.primary.u32, themes[i]);
+
+        // 6 live color swatches (WindowBg, CardBg, Accent, Active, BranchA, BranchB)
+        const ImU32 swatches[6] = {
+            t.surfaces.windowBg.u32, t.surfaces.cardBg.u32, t.text.accent.u32,
+            t.signal.active.u32, t.signal.branchA.u32, t.signal.branchB.u32
+        };
+        for (int s = 0; s < 6; ++s) {
+            const float sx = pos.x + padX + static_cast<float>(s) * 28.0f;
+            const float sy = pos.y + swatchY;
+            dl->AddRectFilled(ImVec2(sx, sy), ImVec2(sx + 22.0f, sy + swatchH), swatches[s], 3.0f);
+            dl->AddRect(ImVec2(sx, sy), ImVec2(sx + 22.0f, sy + swatchH), t.borders.subtle.u32, 3.0f);
+        }
+
+        dl->AddText(nullptr, 0.0f, ImVec2(pos.x + padX, pos.y + subtitleY), t.text.secondary.u32, themeSubtitles[i], nullptr, wrapWidth);
+        dl->PopClipRect();
+
+        if (i == 1) ImGui::Spacing();
+        ImGui::PopID();
     }
 
+    ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
     ImGui::TextDisabled("All themes enforce 4px/8px grid geometry and >= 4.5:1 text contrast.");

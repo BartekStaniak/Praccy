@@ -344,7 +344,7 @@ inline const ThemeTokens kThemes[static_cast<size_t>(ThemeId::Count)] = {
             ColorToken(236, 230, 218), ColorToken(242, 237, 226), ColorToken(248, 245, 238),
             ColorToken(240, 234, 220), ColorToken(232, 224, 206), ColorToken(228, 222, 210),
             ColorToken(250, 226, 224), ColorToken(226, 218, 202), ColorToken(216, 206, 188),
-            ColorToken(204, 192, 172), ColorToken(245, 240, 230, 250), ColorToken(0, 0, 0, 191),
+            ColorToken(204, 192, 172), ColorToken(245, 240, 230, 250), ColorToken(45, 38, 30, 140),
             ColorToken(230, 222, 206), ColorToken(220, 210, 192), ColorToken(208, 196, 176),
             ColorToken(218, 208, 190), ColorToken(206, 194, 174), ColorToken(192, 178, 156),
             ColorToken(228, 220, 204), ColorToken(216, 206, 188), ColorToken(244, 240, 230),
@@ -431,6 +431,12 @@ inline void applyTheme(ThemeId id) {
 
     // Apply standard geometry according to 4px/8px design grid
     ImGuiStyle& style = ImGui::GetStyle();
+    style = ImGuiStyle(); // Reset to unscaled baseline so ScaleAllSizes never compounds on theme/DPI change
+    if (tokens.isDark) {
+        ImGui::StyleColorsDark(&style);
+    } else {
+        ImGui::StyleColorsLight(&style);
+    }
     style.WindowRounding    = 6.0f;
     style.ChildRounding     = 6.0f;
     style.FrameRounding     = 4.0f;
@@ -484,8 +490,8 @@ inline void applyTheme(ThemeId id) {
     colors[ImGuiCol_Separator]             = tokens.borders.separator;
     colors[ImGuiCol_SeparatorHovered]      = tokens.borders.strong;
     colors[ImGuiCol_SeparatorActive]       = tokens.borders.focus;
-    colors[ImGuiCol_ResizeGrip]            = tokens.borders.subtle;
-    colors[ImGuiCol_ResizeGripHovered]     = tokens.borders.strong;
+    colors[ImGuiCol_ResizeGrip]            = ColorToken::transparent();
+    colors[ImGuiCol_ResizeGripHovered]     = tokens.borders.subtle;
     colors[ImGuiCol_ResizeGripActive]      = tokens.borders.focus;
     colors[ImGuiCol_Tab]                   = tokens.surfaces.tabBg;
     colors[ImGuiCol_TabHovered]            = tokens.surfaces.tabBgHovered;
@@ -507,6 +513,7 @@ inline void applyTheme(ThemeId id) {
     colors[ImGuiCol_NavWindowingHighlight] = tokens.borders.focus;
     colors[ImGuiCol_NavWindowingDimBg]     = tokens.surfaces.modalOverlay;
     colors[ImGuiCol_ModalWindowDimBg]      = tokens.surfaces.modalOverlay;
+    colors[ImGuiCol_DockingEmptyBg]        = tokens.surfaces.windowBg;
 }
 
 } // namespace praccy::ui

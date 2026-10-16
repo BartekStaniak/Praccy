@@ -39,6 +39,7 @@ public:
         width = 850;
         height = 600;
     }
+    virtual void onGuiResize(int /*width*/, int /*height*/) {}
 
     [[nodiscard]] virtual const std::string& path() const noexcept {
         static const std::string s_empty;

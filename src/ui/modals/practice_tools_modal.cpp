@@ -9,8 +9,59 @@
 #include <cstdio>
 #include <fstream>
 #include <cstring>
+#include <optional>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <shobjidl.h>
+#endif
 
 namespace praccy::ui {
+
+namespace {
+#if defined(_WIN32)
+std::optional<std::string> openNativeWavFilePicker() {
+    HRESULT hrCom = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    IFileOpenDialog* pDialog = nullptr;
+    std::optional<std::string> result;
+    if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pDialog)))) {
+        COMDLG_FILTERSPEC rgSpec[] = {
+            { L"WAV Audio Files (*.wav)", L"*.wav" },
+            { L"All Files (*.*)", L"*.*" }
+        };
+        pDialog->SetFileTypes(ARRAYSIZE(rgSpec), rgSpec);
+        pDialog->SetTitle(L"Select Backing Track Audio File (.wav)");
+        HWND parent = GetActiveWindow();
+        if (SUCCEEDED(pDialog->Show(parent))) {
+            IShellItem* pItem = nullptr;
+            if (SUCCEEDED(pDialog->GetResult(&pItem)) && pItem) {
+                PWSTR pszPath = nullptr;
+                if (SUCCEEDED(pItem->GetDisplayName(SIGDN_FILESYSPATH, &pszPath)) && pszPath) {
+                    int len = WideCharToMultiByte(CP_UTF8, 0, pszPath, -1, nullptr, 0, nullptr, nullptr);
+                    if (len > 0) {
+                        std::string pathStr(len - 1, '\0');
+                        WideCharToMultiByte(CP_UTF8, 0, pszPath, -1, pathStr.data(), len, nullptr, nullptr);
+                        result = pathStr;
+                    }
+                    CoTaskMemFree(pszPath);
+                }
+                pItem->Release();
+            }
+        }
+        pDialog->Release();
+    }
+    if (SUCCEEDED(hrCom)) {
+        CoUninitialize();
+    }
+    return result;
+}
+#endif
+} // namespace
 
 PracticeToolsModal::PracticeToolsModal(tools::QuickLooper& looper, tools::AudioPlayer& player)
     : m_looper(looper)
@@ -44,29 +95,32 @@ void PracticeToolsModal::renderLooperCircularProgressRing() {
     const ImVec2 center(screenPos.x + widgetSize * 0.5f, screenPos.y + widgetSize * 0.5f);
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    // 1. Determine State Colors & Strings
-    ImU32 arcColor = tokens.text.muted.u32;
+    // 1. Determine State Colors & Strings (keep state label >= 4.5:1 WCAG contrast in READY/STOP states)
+    ImU32 arcColor = tokens.borders.subtle.u32;
+    ImU32 stateLabelColor = tokens.text.looperIdle.u32;
     const char* stateText = "READY";
     switch (state) {
         case tools::LooperState::Recording:
-            arcColor = tokens.signal.recording.u32;
+            arcColor = stateLabelColor = tokens.signal.recording.u32;
             stateText = "REC";
             break;
         case tools::LooperState::Overdubbing:
-            arcColor = tokens.signal.overdubbing.u32;
+            arcColor = stateLabelColor = tokens.signal.overdubbing.u32;
             stateText = "DUB";
             break;
         case tools::LooperState::Playing:
-            arcColor = tokens.signal.playing.u32;
+            arcColor = stateLabelColor = tokens.signal.playing.u32;
             stateText = "PLAY";
             break;
         case tools::LooperState::Stopped:
             arcColor = tokens.signal.stopped.u32;
+            stateLabelColor = tokens.text.secondary.u32;
             stateText = "STOP";
             break;
         case tools::LooperState::Empty:
         default:
             arcColor = tokens.borders.subtle.u32;
+            stateLabelColor = tokens.text.looperIdle.u32;
             stateText = "READY";
             break;
     }
@@ -129,7 +183,7 @@ void PracticeToolsModal::renderLooperCircularProgressRing() {
 
     // 6. Center Typography: State, Bar/Beat, Duration
     const ImVec2 stateSize = ImGui::CalcTextSize(stateText);
-    dl->AddText(ImVec2(center.x - stateSize.x * 0.5f, center.y - 22.0f), arcColor, stateText);
+    dl->AddText(ImVec2(center.x - stateSize.x * 0.5f, center.y - 22.0f), stateLabelColor, stateText);
 
     // Bar & Beat Counter
     char barBeatBuf[32];
@@ -181,16 +235,16 @@ void PracticeToolsModal::renderLooperTab() {
     ImGui::Text("Phrase Looper Controls:");
     ImGui::Spacing();
 
-    // Action button label based on state
-    const char* actionLabel = "Record [Action]";
+    // Action button label based on state (clean labels without raw '[Action]' placeholder)
+    const char* actionLabel = "Record Loop";
     if (loopState == tools::LooperState::Recording) {
-        actionLabel = "Play [Lock Loop]";
+        actionLabel = "Lock & Play";
     } else if (loopState == tools::LooperState::Playing) {
-        actionLabel = "Overdub [Add Layer]";
+        actionLabel = "Overdub Layer";
     } else if (loopState == tools::LooperState::Overdubbing) {
-        actionLabel = "Play [Lock Layer]";
+        actionLabel = "Finish Overdub";
     } else if (loopState == tools::LooperState::Stopped) {
-        actionLabel = "Record [New Loop]";
+        actionLabel = "Record New Loop";
     }
 
     if (CenteredButton(actionLabel, ImVec2(180, Metrics::buttonHeight()))) {
@@ -260,11 +314,20 @@ void PracticeToolsModal::renderBackingTrackTab() {
     ImGui::Separator();
     ImGui::Spacing();
 
-    // File path loader
+    // File path loader with native Browse... dialog
     ImGui::Text("Audio Track File (.wav):");
-    const float inputW = std::max(200.0f, ImGui::GetContentRegionAvail().x - 84.0f);
+    const float inputW = std::max(180.0f, ImGui::GetContentRegionAvail().x - 180.0f);
     ImGui::SetNextItemWidth(inputW);
     ImGui::InputTextWithHint("##AudioTrackPath", "Path to .wav file or drag-and-drop onto Praccy...", m_audioFilePathBuffer, sizeof(m_audioFilePathBuffer));
+    ImGui::SameLine(0, 8);
+    if (CenteredButton("Browse...", ImVec2(88, Metrics::buttonHeight()))) {
+#if defined(_WIN32)
+        if (auto picked = openNativeWavFilePicker()) {
+            std::snprintf(m_audioFilePathBuffer, sizeof(m_audioFilePathBuffer), "%s", picked->c_str());
+            m_player.loadWavFile(*picked);
+        }
+#endif
+    }
     ImGui::SameLine(0, 8);
     if (CenteredButton("Load", ImVec2(70, Metrics::buttonHeight()))) {
         if (m_audioFilePathBuffer[0] != '\0') {

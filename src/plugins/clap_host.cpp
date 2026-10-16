@@ -718,6 +718,16 @@ bool ClapPluginInstance::openGui(HWND parentHwnd) {
     return opened;
 }
 
+void ClapPluginInstance::onGuiResize(int width, int height) {
+    if (m_guiExt && m_plugin && m_guiCreated && width > 64 && height > 64 && !m_faulted.load(std::memory_order_relaxed)) {
+        safeCallPluginGui([&]() {
+            if (m_guiExt->set_size) {
+                m_guiExt->set_size(m_plugin, static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+            }
+        });
+    }
+}
+
 void ClapPluginInstance::closeGui() {
     if (m_guiExt && m_plugin && m_guiCreated) {
         safeCallPluginGui([&]() {

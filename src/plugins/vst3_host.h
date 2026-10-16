@@ -49,6 +49,7 @@ public:
     bool openGui(HWND parentHwnd) override;
     void closeGui() override;
     void getPreferredSize(int& width, int& height) const override;
+    void onGuiResize(int width, int height) override;
 
     [[nodiscard]] std::vector<uint8_t> saveState() const override;
     bool loadState(const std::vector<uint8_t>& state) override;

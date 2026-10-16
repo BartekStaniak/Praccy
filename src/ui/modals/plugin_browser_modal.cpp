@@ -601,6 +601,9 @@ void PluginBrowserModal::render() {
     ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
 
     ImGui::PushStyleColor(ImGuiCol_WindowBg, tokens.surfaces.popupBg.vec4);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, tokens.surfaces.panelBg.vec4);
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, tokens.surfaces.popupBg.vec4);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, tokens.surfaces.frameBg.vec4);
     ImGui::PushStyleColor(ImGuiCol_Border, tokens.borders.focus.vec4);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.5f);
@@ -622,7 +625,7 @@ void PluginBrowserModal::render() {
                 ImGui::End();
                 m_tabHandledThisFrame = false;
                 ImGui::PopStyleVar(3);
-                ImGui::PopStyleColor(2);
+                ImGui::PopStyleColor(5);
                 return;
             }
         }
@@ -632,7 +635,7 @@ void PluginBrowserModal::render() {
             close();
             ImGui::End();
             ImGui::PopStyleVar(3);
-            ImGui::PopStyleColor(2);
+            ImGui::PopStyleColor(5);
             return;
         }
 
@@ -697,6 +700,17 @@ void PluginBrowserModal::render() {
             std::snprintf(recLabel, sizeof(recLabel), "Recents (%zu)", m_recentPlugins.size());
             renderScopeTab(PaletteScope::Recents, recLabel);
 
+            // Show explicit target destination badge on the right side of the header
+            const char* targetBadge = (m_targetBranchIndex == 0) ? "Target: Branch A"
+                                    : (m_targetBranchIndex == 1) ? "Target: Branch B"
+                                                                 : "Target: Serial Rack";
+            const ImVec2 targetSz = ImGui::CalcTextSize(targetBadge);
+            const float rightX = ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - targetSz.x - 24.0f;
+            if (rightX > ImGui::GetCursorPosX() + 12.0f) {
+                ImGui::SameLine(rightX);
+                renderBadgePill(targetBadge, tokens.surfaces.frameBg, tokens.borders.subtle, tokens.text.secondary, ImGui::GetFrameHeight());
+            }
+
             ImGui::PopStyleVar();
         }
 
@@ -732,7 +746,7 @@ void PluginBrowserModal::render() {
             instantiateSelectedPlugin();
             ImGui::End();
             ImGui::PopStyleVar(3);
-            ImGui::PopStyleColor(2);
+            ImGui::PopStyleColor(5);
             return;
         }
 
@@ -744,6 +758,7 @@ void PluginBrowserModal::render() {
         const float footerH = ImGui::GetTextLineHeightWithSpacing() + 14.0f * dpiScale;
         const float listHeight = std::max(140.0f * dpiScale, ImGui::GetContentRegionAvail().y - footerH);
         const float rowH = 34.0f * dpiScale;
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, tokens.surfaces.panelBg.vec4);
         ImGui::BeginChild("##PaletteResultsList", ImVec2(0.0f, listHeight), false, ImGuiWindowFlags_AlwaysVerticalScrollbar);
 
         if (m_filteredItems.empty()) {
@@ -768,6 +783,7 @@ void PluginBrowserModal::render() {
             clipper.End();
         }
         ImGui::EndChild();
+        ImGui::PopStyleColor();
 
         // High-DPI collision-free Footer Status Bar
         ImGui::Spacing();
@@ -790,7 +806,7 @@ void PluginBrowserModal::render() {
     m_tabHandledThisFrame = false;
 
     ImGui::PopStyleVar(3);
-    ImGui::PopStyleColor(2);
+    ImGui::PopStyleColor(5);
 }
 
 } // namespace praccy::ui

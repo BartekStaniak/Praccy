@@ -13,6 +13,9 @@ PluginWindowManager::PluginWindowManager() {
     HICON hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(101));
     if (!hIcon) hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(1));
 
+    m_bgCol = RGB(18, 19, 22);
+    m_bgBrush = CreateSolidBrush(m_bgCol);
+
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.style = CS_HREDRAW | CS_VREDRAW;
@@ -21,7 +24,7 @@ PluginWindowManager::PluginWindowManager() {
     wc.hIcon = hIcon;
     wc.hIconSm = hIcon;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.hbrBackground = m_bgBrush;
     wc.lpszClassName = L"PraccyPluginHostClass";
 
     m_windowClassAtom = RegisterClassExW(&wc);
@@ -31,6 +34,10 @@ PluginWindowManager::~PluginWindowManager() {
     closeAllWindows();
     if (m_windowClassAtom) {
         UnregisterClassW(reinterpret_cast<LPCWSTR>(m_windowClassAtom), GetModuleHandle(nullptr));
+    }
+    if (m_bgBrush) {
+        DeleteObject(m_bgBrush);
+        m_bgBrush = nullptr;
     }
 }
 
@@ -61,7 +68,8 @@ bool PluginWindowManager::openPluginWindow(IPluginInstance* plugin) {
 
     // Calculate window size including borders for desired client area
     DWORD style = WS_OVERLAPPEDWINDOW;
-    DWORD exStyle = WS_EX_APPWINDOW | WS_EX_TOPMOST;
+    // Use m_mainHwnd as owner window instead of global WS_EX_TOPMOST so plugin windows don't cover external apps on Alt-Tab
+    DWORD exStyle = m_mainHwnd ? WS_EX_APPWINDOW : (WS_EX_APPWINDOW | WS_EX_TOPMOST);
     RECT wr = {0, 0, prefW, prefH};
     AdjustWindowRectEx(&wr, style, FALSE, exStyle);
     int winW = wr.right - wr.left;
@@ -80,10 +88,26 @@ bool PluginWindowManager::openPluginWindow(IPluginInstance* plugin) {
         style,
         posX, posY,
         winW, winH,
-        nullptr, nullptr,
+        m_mainHwnd, nullptr,
         GetModuleHandle(nullptr),
         this
     );
+
+    if (hwnd) {
+        if (HMODULE hDwm = LoadLibraryW(L"dwmapi.dll")) {
+            typedef HRESULT (WINAPI *PFN_DwmSetWindowAttribute)(HWND, DWORD, LPCVOID, DWORD);
+            FARPROC proc = GetProcAddress(hDwm, "DwmSetWindowAttribute");
+            if (proc) {
+                PFN_DwmSetWindowAttribute pfnSetAttr = nullptr;
+                std::memcpy(&pfnSetAttr, &proc, sizeof(proc));
+                BOOL useDark = m_isDark ? TRUE : FALSE;
+                if (FAILED(pfnSetAttr(hwnd, 20, &useDark, sizeof(useDark)))) {
+                    pfnSetAttr(hwnd, 19, &useDark, sizeof(useDark));
+                }
+            }
+            FreeLibrary(hDwm);
+        }
+    }
 
     if (!hwnd) {
         std::cerr << "Failed to create Win32 window for plugin: " << plugin->name() << "\n";
@@ -155,10 +179,60 @@ HWND PluginWindowManager::getWindow(IPluginInstance* plugin) const {
     return (it != m_openWindows.end()) ? it->second : nullptr;
 }
 
+void PluginWindowManager::updateTitleBars(bool isDark) {
+    updateTheme(isDark, m_bgCol);
+}
+
+void PluginWindowManager::updateTheme(bool isDark, COLORREF bgCol) {
+    m_isDark = isDark;
+    m_bgCol = bgCol;
+
+    if (m_bgBrush) {
+        DeleteObject(m_bgBrush);
+    }
+    m_bgBrush = CreateSolidBrush(bgCol);
+
+    if (HMODULE hDwm = LoadLibraryW(L"dwmapi.dll")) {
+        typedef HRESULT (WINAPI *PFN_DwmSetWindowAttribute)(HWND, DWORD, LPCVOID, DWORD);
+        FARPROC proc = GetProcAddress(hDwm, "DwmSetWindowAttribute");
+        if (proc) {
+            PFN_DwmSetWindowAttribute pfnSetAttr = nullptr;
+            std::memcpy(&pfnSetAttr, &proc, sizeof(proc));
+            BOOL useDark = isDark ? TRUE : FALSE;
+            for (const auto& [plugin, hwnd] : m_openWindows) {
+                if (hwnd && IsWindow(hwnd)) {
+                    if (FAILED(pfnSetAttr(hwnd, 20, &useDark, sizeof(useDark)))) {
+                        pfnSetAttr(hwnd, 19, &useDark, sizeof(useDark));
+                    }
+                    SetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND, reinterpret_cast<LONG_PTR>(m_bgBrush));
+                    InvalidateRect(hwnd, nullptr, TRUE);
+                }
+            }
+        }
+        FreeLibrary(hDwm);
+    }
+}
+
 LRESULT CALLBACK PluginWindowManager::windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     auto* plugin = reinterpret_cast<IPluginInstance*>(GetPropW(hwnd, L"PluginInstance"));
 
     switch (msg) {
+        case WM_ERASEBKGND: {
+            HDC hdc = reinterpret_cast<HDC>(wParam);
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            HBRUSH br = PluginWindowManager::instance().backgroundBrush();
+            if (br) {
+                FillRect(hdc, &rc, br);
+            }
+            return 1;
+        }
+        case WM_SIZE: {
+            if (plugin && wParam != SIZE_MINIMIZED) {
+                plugin->onGuiResize( static_cast<int>(LOWORD(lParam)), static_cast<int>(HIWORD(lParam)) );
+            }
+            break;
+        }
         case WM_CLOSE: {
             if (plugin) {
                 PluginWindowManager::instance().closePluginWindow(plugin);

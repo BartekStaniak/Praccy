@@ -265,21 +265,104 @@ void testTunerPitchDetection() {
     // 6. Test Common Presets (Root + Type: Drop D, DADGAD, Open D)
     cfg.setInstrument(tools::InstrumentType::Guitar);
     cfg.setStringCount(6);
-    // Drop D (Root D = index 2)
+    // Standard: E2, A2, D3, G3, B3, E4 -> { 64, 59, 55, 50, 45, 40 }
+    cfg.setTuningPreset(tools::TuningType::Standard, 4);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 64, 59, 55, 50, 45, 40 }));
+    // Drop D (Root D = index 2) -> { 64, 59, 55, 50, 45, 38 }
     cfg.setTuningPreset(tools::TuningType::Drop, 2);
-    // String 6 (lowest, index 5) should be D2 (38), String 1 (highest, index 0) should be E4 (64)
-    assert(cfg.stringMidiNotes[5] == 38);
-    assert(cfg.stringMidiNotes[0] == 64);
-
+    assert((cfg.stringMidiNotes == std::vector<int>{ 64, 59, 55, 50, 45, 38 }));
+    // Drop C (Root C = index 0) -> C2-G2-C3-F3-A3-D4 -> { 62, 57, 53, 48, 43, 36 }
+    cfg.setTuningPreset(tools::TuningType::Drop, 0);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 62, 57, 53, 48, 43, 36 }));
+    // E-Flat Standard / Half-Step Down -> D#2-G#2-C#3-F#3-A#3-D#4 -> { 63, 58, 54, 49, 44, 39 }
+    cfg.setTuningPreset(tools::TuningType::HalfStepDown);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 63, 58, 54, 49, 44, 39 }));
+    // Open D -> D2-A2-D3-F#3-A3-D4 -> { 62, 57, 54, 50, 45, 38 }
+    cfg.setTuningPreset(tools::TuningType::OpenD, 2);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 62, 57, 54, 50, 45, 38 }));
     // DADGAD
     cfg.setTuningPreset(tools::TuningType::DADGAD, 2);
     assert(cfg.stringMidiNotes[5] == 38); // D2
     assert(cfg.stringMidiNotes[0] == 62); // D4
 
-    // Open D
-    cfg.setTuningPreset(tools::TuningType::OpenD, 2);
-    assert(cfg.stringMidiNotes[5] == 38); // D2
-    assert(cfg.stringMidiNotes[0] == 62); // D4
+    // 7-String Guitar:
+    cfg.setStringCount(7);
+    cfg.setTuningPreset(tools::TuningType::Standard);
+    // Standard: B1-E2-A2-D3-G3-B3-E4 -> { 64, 59, 55, 50, 45, 40, 35 }
+    assert((cfg.stringMidiNotes == std::vector<int>{ 64, 59, 55, 50, 45, 40, 35 }));
+    // Drop A: A1-E2-A2-D3-G3-B3-E4 -> { 64, 59, 55, 50, 45, 40, 33 }
+    cfg.setTuningPreset(tools::TuningType::Drop);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 64, 59, 55, 50, 45, 40, 33 }));
+    // Half-Step Down: A#1-D#2-G#2-C#3-F#3-A#3-D#4 -> { 63, 58, 54, 49, 44, 39, 34 }
+    cfg.setTuningPreset(tools::TuningType::HalfStepDown);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 63, 58, 54, 49, 44, 39, 34 }));
+
+    // 8-String Guitar:
+    cfg.setStringCount(8);
+    cfg.setTuningPreset(tools::TuningType::Standard);
+    // Standard: F#1-B1-E2-A2-D3-G3-B3-E4 -> { 64, 59, 55, 50, 45, 40, 35, 30 }
+    assert((cfg.stringMidiNotes == std::vector<int>{ 64, 59, 55, 50, 45, 40, 35, 30 }));
+    // Drop E: E1-B1-E2-A2-D3-G3-B3-E4 -> { 64, 59, 55, 50, 45, 40, 35, 28 }
+    cfg.setTuningPreset(tools::TuningType::Drop);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 64, 59, 55, 50, 45, 40, 35, 28 }));
+
+    // 9-String Guitar:
+    cfg.setStringCount(9);
+    cfg.setTuningPreset(tools::TuningType::Standard);
+    // Standard (C#): C#1-F#1-B1-E2-A2-D3-G3-B3-E4 -> { 64, 59, 55, 50, 45, 40, 35, 30, 25 }
+    assert((cfg.stringMidiNotes == std::vector<int>{ 64, 59, 55, 50, 45, 40, 35, 30, 25 }));
+    // Standard (C): C1-F1-Bb1-Eb2-Ab2-Db3-Gb3-Bb3-Eb4 -> { 63, 58, 54, 49, 44, 39, 34, 29, 24 }
+    cfg.setTuningPreset(tools::TuningType::Standard, 0); // Root C
+    assert((cfg.stringMidiNotes == std::vector<int>{ 63, 58, 54, 49, 44, 39, 34, 29, 24 }));
+
+    // Bass Verification:
+    cfg.setInstrument(tools::InstrumentType::Bass);
+    cfg.setStringCount(4);
+    cfg.setTuningPreset(tools::TuningType::Standard);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 43, 38, 33, 28 })); // E1, A1, D2, G2
+    cfg.setTuningPreset(tools::TuningType::Drop);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 43, 38, 33, 26 })); // Drop D: D1, A1, D2, G2
+    cfg.setStringCount(5);
+    cfg.setTuningPreset(tools::TuningType::Standard);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 43, 38, 33, 28, 23 })); // B0, E1, A1, D2, G2
+    cfg.setTuningPreset(tools::TuningType::Drop);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 43, 38, 33, 28, 21 })); // Drop A: A0, E1, A1, D2, G2
+    cfg.setStringCount(6);
+    cfg.setTuningPreset(tools::TuningType::Standard);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 48, 43, 38, 33, 28, 23 })); // B0, E1, A1, D2, G2, C3
+    cfg.setTuningPreset(tools::TuningType::Drop);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 48, 43, 38, 33, 28, 21 })); // Drop A: A0, E1, A1, D2, G2, C3
+
+    // Bowed Verification:
+    cfg.setInstrument(tools::InstrumentType::ElectricBowed);
+    cfg.setStringCount(4);
+    cfg.setTuningPreset(tools::TuningType::Standard, 7); // Violin G3
+    assert((cfg.stringMidiNotes == std::vector<int>{ 76, 69, 62, 55 })); // E5, A4, D4, G3
+    cfg.setTuningPreset(tools::TuningType::Standard, 0); // Cello C2
+    assert((cfg.stringMidiNotes == std::vector<int>{ 57, 50, 43, 36 })); // A3, D3, G2, C2
+
+    // Ukulele Verification:
+    cfg.setInstrument(tools::InstrumentType::ElectricUkulele);
+    cfg.setTuningPreset(tools::TuningType::Standard);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 69, 64, 60, 67 })); // High-G: A4, E4, C4, G4
+    cfg.setTuningPreset(tools::TuningType::Drop);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 69, 64, 60, 55 })); // Low-G: A4, E4, C4, G3
+
+    // Banjo Verification:
+    cfg.setInstrument(tools::InstrumentType::ElectricBanjo);
+    cfg.setStringCount(5);
+    cfg.setTuningPreset(tools::TuningType::Standard);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 62, 59, 55, 50, 67 })); // Open G
+    cfg.setTuningPreset(tools::TuningType::Drop);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 62, 59, 55, 48, 67 })); // Drop C: D4, B3, G3, C3, G4
+
+    // Lap Steel Verification:
+    cfg.setInstrument(tools::InstrumentType::LapSteel);
+    cfg.setStringCount(6);
+    cfg.setTuningPreset(tools::TuningType::Standard);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 64, 60, 57, 55, 52, 48 })); // C6
+    cfg.setTuningPreset(tools::TuningType::OpenD);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 62, 57, 54, 50, 45, 38 })); // Open D: D4, A3, F#3, D3, A2, D2
 
     // 7. Test Custom Tuning
     cfg.setCustomStringNote(0, 64); // E4
@@ -1530,22 +1613,32 @@ void testThemeSwitchingAndTokenIntegrity() {
     assert(ui::themeTokens().id == ui::ThemeId::ObsidianStudio);
     assert(std::strcmp(ui::themeTokens().name, "Obsidian Studio") == 0);
     assert(ui::themeTokens().isDark == true);
+    assert(ui::themeTokens().borders.card.u32 != 0);
+    assert(ui::themeTokens().borders.subtle.u32 != 0);
 
     // 2. Switch through all themes and verify active tokens
     ui::applyTheme(ui::ThemeId::CyberMidnight);
     assert(ui::themeTokens().id == ui::ThemeId::CyberMidnight);
     assert(std::strcmp(ui::themeTokens().name, "Cyber / Midnight") == 0);
     assert(ui::themeTokens().isDark == true);
+    assert(ui::themeTokens().borders.card.u32 != 0);
+    assert(ui::themeTokens().borders.card.u32 != ui::getThemeTokens(ui::ThemeId::ObsidianStudio).borders.card.u32);
 
     ui::applyTheme(ui::ThemeId::NordicSlate);
     assert(ui::themeTokens().id == ui::ThemeId::NordicSlate);
     assert(std::strcmp(ui::themeTokens().name, "Nordic Slate") == 0);
     assert(ui::themeTokens().isDark == true);
+    assert(ui::themeTokens().borders.card.u32 != 0);
+    assert(ui::themeTokens().borders.card.u32 != ui::getThemeTokens(ui::ThemeId::CyberMidnight).borders.card.u32);
 
     ui::applyTheme(ui::ThemeId::VintageConsole);
     assert(ui::themeTokens().id == ui::ThemeId::VintageConsole);
     assert(std::strcmp(ui::themeTokens().name, "Vintage Console") == 0);
     assert(ui::themeTokens().isDark == false);
+    assert(ui::themeTokens().borders.card.u32 != 0);
+    assert(ui::themeTokens().borders.card.u32 != ui::getThemeTokens(ui::ThemeId::NordicSlate).borders.card.u32);
+    // Vintage Console card border must be warm analog tone (140, 126, 110)
+    assert(std::abs(ui::themeTokens().borders.card.r - (140.0f / 255.0f)) < 1e-3f);
 
     // 3. Out-of-bounds fallback clamping
     ui::applyTheme(static_cast<ui::ThemeId>(99));

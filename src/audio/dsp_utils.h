@@ -152,6 +152,13 @@ public:
     void reset() noexcept {
         m_peakLeft.store(0.0f, std::memory_order_relaxed);
         m_peakRight.store(0.0f, std::memory_order_relaxed);
+        m_holdLeft.store(0.0f, std::memory_order_relaxed);
+        m_holdRight.store(0.0f, std::memory_order_relaxed);
+        m_clipped.store(false, std::memory_order_relaxed);
+    }
+
+    void clearClip() noexcept {
+        m_clipped.store(false, std::memory_order_relaxed);
     }
 
     void process(const float* left, const float* right, uint32_t numSamples, double sampleRate = 48000.0) noexcept {
@@ -165,10 +172,15 @@ public:
         }
         const float targetR = right ? maxR : maxL;
 
+        if (maxL >= 0.998f || targetR >= 0.998f) {
+            m_clipped.store(true, std::memory_order_relaxed);
+        }
+
         // Responsive peak ballistics: instantaneous peak capture, snappy 120 ms exponential decay
         const float sr = (sampleRate > 8000.0) ? static_cast<float>(sampleRate) : 48000.0f;
         const float dt = static_cast<float>(numSamples) / sr;
         const float releaseCoeff = 1.0f - std::exp(-dt / 0.120f);
+        const float holdReleaseCoeff = 1.0f - std::exp(-dt / 1.500f);
 
         float curL = m_peakLeft.load(std::memory_order_relaxed);
         curL = (maxL >= curL) ? maxL : (curL + releaseCoeff * (maxL - curL));
@@ -177,14 +189,28 @@ public:
         float curR = m_peakRight.load(std::memory_order_relaxed);
         curR = (targetR >= curR) ? targetR : (curR + releaseCoeff * (targetR - curR));
         m_peakRight.store(curR < 1e-6f ? 0.0f : curR, std::memory_order_relaxed);
+
+        float holdL = m_holdLeft.load(std::memory_order_relaxed);
+        holdL = (maxL >= holdL) ? maxL : (holdL + holdReleaseCoeff * (maxL - holdL));
+        m_holdLeft.store(holdL < 1e-6f ? 0.0f : holdL, std::memory_order_relaxed);
+
+        float holdR = m_holdRight.load(std::memory_order_relaxed);
+        holdR = (targetR >= holdR) ? targetR : (holdR + holdReleaseCoeff * (targetR - holdR));
+        m_holdRight.store(holdR < 1e-6f ? 0.0f : holdR, std::memory_order_relaxed);
     }
 
     [[nodiscard]] float peakLeft() const noexcept { return m_peakLeft.load(std::memory_order_relaxed); }
     [[nodiscard]] float peakRight() const noexcept { return m_peakRight.load(std::memory_order_relaxed); }
+    [[nodiscard]] float holdLeft() const noexcept { return m_holdLeft.load(std::memory_order_relaxed); }
+    [[nodiscard]] float holdRight() const noexcept { return m_holdRight.load(std::memory_order_relaxed); }
+    [[nodiscard]] bool isClipped() const noexcept { return m_clipped.load(std::memory_order_relaxed); }
 
 private:
     std::atomic<float> m_peakLeft{0.0f};
     std::atomic<float> m_peakRight{0.0f};
+    std::atomic<float> m_holdLeft{0.0f};
+    std::atomic<float> m_holdRight{0.0f};
+    std::atomic<bool> m_clipped{false};
 };
 
 } // namespace praccy::audio

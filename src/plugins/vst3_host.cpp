@@ -745,6 +745,15 @@ void Vst3PluginInstance::getPreferredSize(int& width, int& height) const {
     height = 600;
 }
 
+void Vst3PluginInstance::onGuiResize(int width, int height) {
+    if (m_plugView && width > 64 && height > 64 && !m_faulted.load(std::memory_order_relaxed)) {
+        safeCallPluginGui([&]() {
+            Steinberg::ViewRect rect{0, 0, width, height};
+            m_plugView->onSize(&rect);
+        });
+    }
+}
+
 void Vst3PluginInstance::closeGui() {
     if (m_plugView) {
         safeCallPluginGui([&]() {

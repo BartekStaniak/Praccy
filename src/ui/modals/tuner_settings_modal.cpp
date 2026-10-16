@@ -102,8 +102,8 @@ void TunerSettingsModal::renderPitchStandardSection() {
 
     ImGui::AlignTextToFramePadding();
     ImGui::Text("Pitch Standard:");
-    ImGui::SameLine(150.0f);
-    ImGui::SetNextItemWidth(280.0f);
+    ImGui::SameLine(130.0f);
+    ImGui::SetNextItemWidth(std::max(140.0f, ImGui::GetContentRegionAvail().x - 8.0f));
     if (ImGui::BeginCombo("##QuickPitchStandardsCombo", previewBuf)) {
         for (int i = 0; i < static_cast<int>(IM_ARRAYSIZE(kStandards)); ++i) {
             const bool isSelected = (matchedIdx == i);
@@ -124,8 +124,8 @@ void TunerSettingsModal::renderPitchStandardSection() {
     // 2. Middle A Slider with click-to-edit float input and double-click reset
     ImGui::AlignTextToFramePadding();
     ImGui::Text("Middle A (A4):");
-    ImGui::SameLine(150.0f);
-    ImGui::SetNextItemWidth(280.0f);
+    ImGui::SameLine(130.0f);
+    ImGui::SetNextItemWidth(std::max(140.0f, ImGui::GetContentRegionAvail().x - 8.0f));
 
     if (m_pitchEditingText) {
         ImGui::SetKeyboardFocusHere();
@@ -187,7 +187,7 @@ void TunerSettingsModal::renderInstrumentSection() {
     // 1. Instrument Type Selector (string counts removed from names)
     ImGui::AlignTextToFramePadding();
     ImGui::Text("Instrument Type:");
-    ImGui::SameLine(150.0f);
+    ImGui::SameLine(135.0f);
 
     const char* instNames[] = {
         "Guitar",
@@ -200,7 +200,7 @@ void TunerSettingsModal::renderInstrumentSection() {
     };
     int currentInstIdx = static_cast<int>(cfg.instrument);
 
-    ImGui::SetNextItemWidth(280.0f);
+    ImGui::SetNextItemWidth(std::max(140.0f, ImGui::GetContentRegionAvail().x - 8.0f));
     if (ImGui::Combo("##InstrumentTypeCombo", &currentInstIdx, instNames, IM_ARRAYSIZE(instNames))) {
         cfg.setInstrument(static_cast<tools::InstrumentType>(currentInstIdx));
         m_tuner.setConfig(cfg);
@@ -211,7 +211,7 @@ void TunerSettingsModal::renderInstrumentSection() {
     // 2. Amount of Strings Dropdown
     ImGui::AlignTextToFramePadding();
     ImGui::Text("Amount of Strings:");
-    ImGui::SameLine(150.0f);
+    ImGui::SameLine(135.0f);
 
     std::vector<int> availableCounts;
     if (cfg.instrument == tools::InstrumentType::ElectricMandolin) {
@@ -236,7 +236,7 @@ void TunerSettingsModal::renderInstrumentSection() {
         }
     }
 
-    ImGui::SetNextItemWidth(280.0f);
+    ImGui::SetNextItemWidth(std::max(140.0f, ImGui::GetContentRegionAvail().x - 8.0f));
     if (ImGui::Combo("##StringCountCombo", &currentStrCountIdx, strCountCStrs, static_cast<int>(nCounts))) {
         cfg.setStringCount(availableCounts[currentStrCountIdx]);
         m_tuner.setConfig(cfg);
@@ -288,7 +288,9 @@ void TunerSettingsModal::renderPresetTuningSection() {
     int typeIdx = static_cast<int>(cfg.tuningType);
     ImGui::SetNextItemWidth(170.0f);
     if (ImGui::Combo("##TuningTypeCombo", &typeIdx, typeNames, IM_ARRAYSIZE(typeNames))) {
-        cfg.setTuningPreset(static_cast<tools::TuningType>(typeIdx), cfg.rootNoteIndex);
+        auto newType = static_cast<tools::TuningType>(typeIdx);
+        int newRoot = tools::TunerConfig::defaultRootNoteIndex(cfg.instrument, cfg.stringCount, newType);
+        cfg.setTuningPreset(newType, newRoot);
         m_tuner.setConfig(cfg);
     }
 
@@ -371,7 +373,7 @@ void TunerSettingsModal::renderPresetTuningSection() {
                 }
                 if (g_fontMono) ImGui::PopFont();
             } else {
-                ImGui::TextDisabled("MIDI %d", str.midiNote);
+                ImGui::TextDisabled("Ready (Pluck string)");
             }
         }
         ImGui::EndTable();
@@ -464,8 +466,8 @@ void TunerSettingsModal::renderCustomTuningSection() {
             ImGui::TableNextColumn();
             Spec::alignTableCellCenter(Spec::buttonHeight(), Spec::tableRowHeight());
             char minusId[32], plusId[32];
-            std::snprintf(minusId, sizeof(minusId), "- 1st##Minus_%zu", i);
-            std::snprintf(plusId, sizeof(plusId), "+ 1st##Plus_%zu", i);
+            std::snprintf(minusId, sizeof(minusId), "-1 st##Minus_%zu", i);
+            std::snprintf(plusId, sizeof(plusId), "+1 st##Plus_%zu", i);
 
             if (CenteredButton(minusId, ImVec2(52.0f, Spec::buttonHeight()))) {
                 cfg.setCustomStringNote(i, str.midiNote - 1);
@@ -559,15 +561,14 @@ void TunerSettingsModal::render() {
 
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ColorToken::transparent().vec4);
         if (ImGui::BeginChild("TunerSettingsContentRegion", ImVec2(0, contentHeight), false)) {
-            // Zone 1: Pitch Standard Section (Middle A / 440 Hz)
-            renderPitchStandardSection();
-
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-
-            // Zone 2: Instrument & String Count Section
-            renderInstrumentSection();
+            // Side-by-side 2-column top layout so all 6-9 target strings fit below without vertical clipping
+            if (ImGui::BeginTable("##TunerTopConfigGrid", 2, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_BordersInnerV)) {
+                ImGui::TableNextColumn();
+                renderPitchStandardSection();
+                ImGui::TableNextColumn();
+                renderInstrumentSection();
+                ImGui::EndTable();
+            }
 
             ImGui::Spacing();
             ImGui::Separator();
