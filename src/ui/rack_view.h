@@ -74,6 +74,7 @@ public:
 
     bool loadPresetChain(const std::string& name);
     const std::string& activePreset() const noexcept { return m_auditionedPreset; }
+    [[nodiscard]] const std::vector<std::string>& favoritePresets() const noexcept { return m_favoritePresets; }
 
 private:
     bool renderStatusPill(bool isRunning, const char* statusText);

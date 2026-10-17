@@ -7,11 +7,13 @@
 #include "../../plugins/vst3_host.h"
 #include "../../plugins/clap_host.h"
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <cstdio>
 #include <memory>
+#include <filesystem>
 
 namespace praccy::ui {
 
@@ -38,6 +40,22 @@ std::string cleanPluginName(std::string_view rawName) {
         name.pop_back();
     }
     return name;
+}
+
+bool matchesFavorite(const std::string& fav, const std::string& target) {
+    if (fav.empty() || target.empty()) return false;
+    if (fav == target) return true;
+
+    std::filesystem::path pFav(fav);
+    std::filesystem::path pTarget(target);
+    std::string favStem = pFav.stem().string();
+    std::string targetStem = pTarget.stem().string();
+
+    if (favStem == target || fav == targetStem || favStem == targetStem) return true;
+
+    std::string cleanFav = toLower(cleanPluginName(favStem));
+    std::string cleanTarget = toLower(cleanPluginName(targetStem));
+    return !cleanFav.empty() && cleanFav == cleanTarget;
 }
 
 int calculateFuzzyScore(std::string_view query, const plugins::PluginDescriptor& desc) {
@@ -121,6 +139,9 @@ PluginBrowserModal::PluginBrowserModal(plugins::PluginScanner& scanner, audio::G
     if (cfg.load()) {
         m_recentPlugins = cfg.recentPlugins;
         m_favoritePlugins = cfg.favoritePlugins;
+        m_scanner.setFavorites(m_favoritePlugins);
+    } else {
+        m_favoritePlugins = m_scanner.favorites();
     }
 }
 
@@ -140,6 +161,9 @@ void PluginBrowserModal::open(int targetBlockIndex, int targetBranchIndex) {
     if (cfg.load()) {
         m_recentPlugins = cfg.recentPlugins;
         m_favoritePlugins = cfg.favoritePlugins;
+        m_scanner.setFavorites(m_favoritePlugins);
+    } else {
+        m_favoritePlugins = m_scanner.favorites();
     }
 
     m_allPlugins = m_scanner.scannedPlugins();
@@ -174,9 +198,8 @@ void PluginBrowserModal::cycleScope() {
 }
 
 bool PluginBrowserModal::isFavorite(const std::string& pluginName) const {
-    std::string clean = cleanPluginName(pluginName);
     for (const auto& fav : m_favoritePlugins) {
-        if (fav == pluginName || cleanPluginName(fav) == clean) {
+        if (matchesFavorite(fav, pluginName)) {
             return true;
         }
     }
@@ -184,9 +207,8 @@ bool PluginBrowserModal::isFavorite(const std::string& pluginName) const {
 }
 
 void PluginBrowserModal::toggleFavorite(const std::string& pluginName) {
-    std::string targetClean = cleanPluginName(pluginName);
     auto it = std::find_if(m_favoritePlugins.begin(), m_favoritePlugins.end(), [&](const std::string& f) {
-        return f == pluginName || cleanPluginName(f) == targetClean;
+        return matchesFavorite(f, pluginName);
     });
 
     if (it != m_favoritePlugins.end()) {
@@ -199,6 +221,8 @@ void PluginBrowserModal::toggleFavorite(const std::string& pluginName) {
     cfg.load();
     cfg.favoritePlugins = m_favoritePlugins;
     cfg.save();
+
+    m_scanner.setFavorites(m_favoritePlugins);
 
     updateFilteredList();
 }
@@ -236,7 +260,7 @@ void PluginBrowserModal::updateFilteredList() {
 
     auto matchesScope = [this](const plugins::PluginDescriptor& p) -> bool {
         if (m_currentScope == PaletteScope::Favorites) {
-            return isFavorite(p.name);
+            return isFavorite(p.name) || isFavorite(p.path);
         } else if (m_currentScope == PaletteScope::Recents) {
             return std::find(m_recentPlugins.begin(), m_recentPlugins.end(), p.name) != m_recentPlugins.end();
         }
@@ -249,9 +273,8 @@ void PluginBrowserModal::updateFilteredList() {
             // 1. Favorites pinned at top
             std::vector<const plugins::PluginDescriptor*> favorites;
             for (const auto& favName : m_favoritePlugins) {
-                std::string cleanFav = cleanPluginName(favName);
                 for (const auto& p : allPlugins) {
-                    if (p.name == favName || cleanPluginName(p.name) == cleanFav) {
+                    if (matchesFavorite(favName, p.name) || matchesFavorite(favName, p.path)) {
                         if (std::find(favorites.begin(), favorites.end(), &p) == favorites.end()) {
                             favorites.push_back(&p);
                         }
@@ -290,7 +313,7 @@ void PluginBrowserModal::updateFilteredList() {
                 PaletteItem item;
                 item.descriptor = p;
                 item.score = 1000;
-                item.isFavorite = isFavorite(p->name);
+                item.isFavorite = isFavorite(p->name) || isFavorite(p->path);
                 item.isRecent = true;
                 m_filteredItems.push_back(item);
             }
@@ -312,14 +335,14 @@ void PluginBrowserModal::updateFilteredList() {
                 PaletteItem item;
                 item.descriptor = p;
                 item.score = 0;
-                item.isFavorite = isFavorite(p->name);
+                item.isFavorite = isFavorite(p->name) || isFavorite(p->path);
                 item.isRecent = false;
                 m_filteredItems.push_back(item);
             }
         } else if (m_currentScope == PaletteScope::Favorites) {
             std::vector<const plugins::PluginDescriptor*> favList;
             for (const auto& p : allPlugins) {
-                if (isFavorite(p.name)) {
+                if (isFavorite(p.name) || isFavorite(p.path)) {
                     favList.push_back(&p);
                 }
             }
@@ -341,7 +364,7 @@ void PluginBrowserModal::updateFilteredList() {
                         PaletteItem item;
                         item.descriptor = &p;
                         item.score = 0;
-                        item.isFavorite = isFavorite(p.name);
+                        item.isFavorite = isFavorite(p.name) || isFavorite(p.path);
                         item.isRecent = true;
                         m_filteredItems.push_back(item);
                         break;
@@ -356,7 +379,7 @@ void PluginBrowserModal::updateFilteredList() {
 
             int score = calculateFuzzyScore(m_searchQuery, p);
             if (score > 0) {
-                bool fav = isFavorite(p.name);
+                bool fav = isFavorite(p.name) || isFavorite(p.path);
                 if (fav) {
                     score += 250; // Search score boost for favorites
                 }
@@ -469,7 +492,11 @@ void PluginBrowserModal::renderPluginRow(int index, float rowH) {
     // Selectable background row
     char selId[32];
     std::snprintf(selId, sizeof(selId), "##SelRow_%d", index);
-    bool clicked = ImGui::Selectable(selId, isSelected, ImGuiSelectableFlags_SpanAllColumns, ImVec2(0.0f, rowH));
+    bool clicked = ImGui::Selectable(selId, isSelected,
+                                     ImGuiSelectableFlags_SpanAllColumns |
+                                     ImGuiSelectableFlags_AllowOverlap |
+                                     ImGuiSelectableFlags_NoPadWithHalfSpacing,
+                                     ImVec2(0.0f, rowH));
 
     if (isSelected) {
         dl->AddRectFilled(rowPos, ImVec2(rowPos.x + rowW, rowPos.y + rowH), tokens.surfaces.cardBgSelected, 4.0f);
@@ -583,6 +610,7 @@ void PluginBrowserModal::renderPluginRow(int index, float rowH) {
     }
 
     ImGui::PopID();
+    ImGui::SetCursorScreenPos(ImVec2(rowPos.x, rowPos.y + rowH));
 }
 
 void PluginBrowserModal::render() {
@@ -590,6 +618,13 @@ void PluginBrowserModal::render() {
 
     const auto& tokens = themeTokens();
     const ImGuiViewport* vp = ImGui::GetMainViewport();
+    if (vp) {
+        ImGui::GetBackgroundDrawList()->AddRectFilled(
+            vp->Pos,
+            ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y),
+            tokens.surfaces.modalOverlay.u32
+        );
+    }
 
     const float fontSize = ImGui::GetFontSize();
     const float dpiScale = std::max(1.0f, fontSize / 13.0f);
@@ -759,6 +794,8 @@ void PluginBrowserModal::render() {
         const float listHeight = std::max(140.0f * dpiScale, ImGui::GetContentRegionAvail().y - footerH);
         const float rowH = 34.0f * dpiScale;
         ImGui::PushStyleColor(ImGuiCol_ChildBg, tokens.surfaces.panelBg.vec4);
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 0.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_SelectableRounding, 4.0f);
         ImGui::BeginChild("##PaletteResultsList", ImVec2(0.0f, listHeight), false, ImGuiWindowFlags_AlwaysVerticalScrollbar);
 
         if (m_filteredItems.empty()) {
@@ -783,6 +820,7 @@ void PluginBrowserModal::render() {
             clipper.End();
         }
         ImGui::EndChild();
+        ImGui::PopStyleVar(2);
         ImGui::PopStyleColor();
 
         // High-DPI collision-free Footer Status Bar

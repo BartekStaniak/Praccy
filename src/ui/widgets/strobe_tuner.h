@@ -33,17 +33,25 @@ inline void DrawPowerGlyph(ImDrawList* dl, ImVec2 center, float radius, ImU32 co
  * @brief Crisp 6-tooth mechanical gear / cog glyph for settings button.
  */
 inline void DrawGearGlyph(ImDrawList* dl, ImVec2 center, float radius, ImU32 color) {
-    dl->AddCircle(center, radius * 0.40f, color, 12, 1.2f);
-    dl->AddCircle(center, radius * 0.72f, color, 12, 1.0f);
+    // 6 solid gear teeth radiating outward
     constexpr int kTeeth = 6;
+    const float rInner = radius * 0.48f;
+    const float rOuter = radius + 0.6f;
+    const float toothW = radius * 0.44f;
     for (int i = 0; i < kTeeth; ++i) {
-        float a = static_cast<float>(i) * (2.0f * IM_PI / static_cast<float>(kTeeth));
+        float a = static_cast<float>(i) * (IM_PI / 3.0f);
         float cosA = std::cos(a);
         float sinA = std::sin(a);
-        dl->AddLine(ImVec2(center.x + radius * 0.65f * cosA, center.y + radius * 0.65f * sinA),
-                    ImVec2(center.x + (radius + 1.3f) * cosA, center.y + (radius + 1.3f) * sinA),
-                    color, 1.4f);
+        dl->AddLine(ImVec2(center.x + rInner * cosA, center.y + rInner * sinA),
+                    ImVec2(center.x + rOuter * cosA, center.y + rOuter * sinA),
+                    color, toothW);
     }
+    // Solid annular gear body fusing teeth together
+    const float ringR = radius * 0.52f;
+    const float ringThick = radius * 0.38f;
+    dl->AddCircle(center, ringR, color, 16, ringThick);
+    // Crisp central axle hole
+    dl->AddCircle(center, radius * 0.28f, color, 12, 1.1f);
 }
 
 /**
@@ -196,7 +204,7 @@ inline void DrawStrobeTunerModule(const tools::TunerResult& result,
 
     const bool isTunerEnabled = tuner ? tuner->isEnabled() : true;
 
-    const float dialRadius = std::clamp((availH - 16.0f) * 0.5f, 24.0f, 42.0f);
+    const float dialRadius = std::clamp((availH - 22.0f) * 0.5f, 22.0f, 36.0f);
     const float dialMarginX = dialRadius + 8.0f;
     const ImVec2 dialCenter(startPos.x + dialMarginX, startPos.y + availH * 0.5f);
 

@@ -67,7 +67,9 @@ void TunerSettingsModal::renderPitchStandardSection() {
     float currentA4 = m_tuner.a4Reference();
 
     ImGui::TextColored(tokens.text.accent.vec4, "PITCH STANDARD (MIDDLE A / A4)");
-    ImGui::TextColored(tokens.text.muted.vec4, "Offsets target frequencies and pitch detection reference across all instruments.");
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
+    ImGui::TextColored(tokens.text.muted.vec4, "Offsets target frequencies and pitch reference across all instruments.");
+    ImGui::PopTextWrapPos();
     ImGui::Spacing();
 
     // 1. Quick Pitch Standards Dropdown
@@ -150,7 +152,7 @@ void TunerSettingsModal::renderPitchStandardSection() {
         }
     } else {
         float sliderVal = currentA4;
-        if (ImGui::SliderFloat("##PitchStandardSlider", &sliderVal, 400.0f, 480.0f, "%.1f Hz", ImGuiSliderFlags_AlwaysClamp)) {
+        if (ResettableSliderFloat("##PitchStandardSlider", &sliderVal, 400.0f, 480.0f, m_lastQuickPitchStandard, "%.1f Hz", ImGuiSliderFlags_AlwaysClamp)) {
             m_tuner.setA4Reference(sliderVal);
         }
 
@@ -561,7 +563,8 @@ void TunerSettingsModal::render() {
 
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ColorToken::transparent().vec4);
         if (ImGui::BeginChild("TunerSettingsContentRegion", ImVec2(0, contentHeight), false)) {
-            // Side-by-side 2-column top layout so all 6-9 target strings fit below without vertical clipping
+            // Side-by-side 2-column top layout with generous 14px column padding so text never touches the divider
+            ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(14.0f, 4.0f));
             if (ImGui::BeginTable("##TunerTopConfigGrid", 2, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_BordersInnerV)) {
                 ImGui::TableNextColumn();
                 renderPitchStandardSection();
@@ -569,6 +572,7 @@ void TunerSettingsModal::render() {
                 renderInstrumentSection();
                 ImGui::EndTable();
             }
+            ImGui::PopStyleVar();
 
             ImGui::Spacing();
             ImGui::Separator();

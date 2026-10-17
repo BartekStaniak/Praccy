@@ -185,10 +185,10 @@ void PracticeToolsModal::renderLooperCircularProgressRing() {
     const ImVec2 stateSize = ImGui::CalcTextSize(stateText);
     dl->AddText(ImVec2(center.x - stateSize.x * 0.5f, center.y - 22.0f), stateLabelColor, stateText);
 
-    // Bar & Beat Counter
+    // Bar & Beat Counter (avoid redundant "REC / REC... / REC" triple-stack while recording)
     char barBeatBuf[32];
     if (state == tools::LooperState::Recording) {
-        std::snprintf(barBeatBuf, sizeof(barBeatBuf), "REC...");
+        std::snprintf(barBeatBuf, sizeof(barBeatBuf), "CAPTURING");
     } else if (loopSec > 0.05) {
         std::snprintf(barBeatBuf, sizeof(barBeatBuf), "BAR %d . %d", m_looper.currentBar(), m_looper.currentBeat());
     } else {
@@ -201,7 +201,7 @@ void PracticeToolsModal::renderLooperCircularProgressRing() {
 
     char timeBuf[32];
     if (state == tools::LooperState::Recording) {
-        std::snprintf(timeBuf, sizeof(timeBuf), "REC");
+        std::snprintf(timeBuf, sizeof(timeBuf), "LIVE IN");
     } else if (loopSec > 0.05) {
         std::snprintf(timeBuf, sizeof(timeBuf), "%.1fs / %.1fs", progress * loopSec, loopSec);
     } else {
@@ -283,8 +283,12 @@ void PracticeToolsModal::renderLooperTab() {
     ImGui::SameLine(0, 14);
     if (g_fontMono) ImGui::PushFont(g_fontMono);
     ImGui::AlignTextToFramePadding();
-    ImGui::TextColored(tokens.text.muted.vec4, "%d Bars (%d Beats) @ %.0f BPM",
-                       m_looper.totalBars(), m_looper.totalBeats(), m_looper.bpm());
+    const int totBars = m_looper.totalBars();
+    const int totBeats = m_looper.totalBeats();
+    ImGui::TextColored(tokens.text.muted.vec4, "%d %s (%d %s) @ %.0f BPM",
+                       totBars, (totBars == 1 ? "Bar" : "Bars"),
+                       totBeats, (totBeats == 1 ? "Beat" : "Beats"),
+                       m_looper.bpm());
     if (g_fontMono) ImGui::PopFont();
 
     ImGui::Spacing();

@@ -37,8 +37,10 @@ bool AppConfig::load(const std::string& customPath) {
     customPluginCategories.clear();
     recentPlugins.clear();
     scannedPlugins.clear();
+    presetFavoritesInitialized = false;
     std::string line;
     while (std::getline(file, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
         if (line.empty() || line[0] == '#' || line[0] == ';') continue;
         auto eqPos = line.find('=');
         if (eqPos == std::string::npos) continue;
@@ -46,8 +48,10 @@ bool AppConfig::load(const std::string& customPath) {
         std::string key = line.substr(0, eqPos);
         std::string val = line.substr(eqPos + 1);
 
-        // Trim whitespace
+        // Trim whitespace and line endings
         while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.pop_back();
+        while (!key.empty() && (key.front() == ' ' || key.front() == '\t')) key.erase(key.begin());
+        while (!val.empty() && (val.back() == ' ' || val.back() == '\t' || val.back() == '\r' || val.back() == '\n')) val.pop_back();
         while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) val.erase(val.begin());
 
         if (key == "last_asio_driver") {
@@ -63,12 +67,16 @@ bool AppConfig::load(const std::string& customPath) {
             metronomeBpm = utils::parseFloat(val, 120.0f);
         } else if (key == "check_beta_updates") {
             checkBetaUpdates = (val == "1" || val == "true");
+        } else if (key == "preset_favorites_initialized") {
+            presetFavoritesInitialized = (val == "1" || val == "true");
         } else if (key == "custom_plugin_path") {
             customPluginPaths.push_back(val);
         } else if (key == "favorite_plugin") {
             favoritePlugins.push_back(val);
         } else if (key == "favorite_preset") {
-            favoritePresets.push_back(val);
+            if (!val.empty()) {
+                favoritePresets.push_back(val);
+            }
         } else if (key == "plugin_category") {
             auto sep = val.find('|');
             if (sep != std::string::npos) {
@@ -179,6 +187,7 @@ bool AppConfig::save(const std::string& customPath) const {
     file << "tuner_root_note=" << tunerRootNote << "\n";
     file << "tuner_custom_strings=" << tunerCustomStrings << "\n";
 
+    file << "preset_favorites_initialized=" << (presetFavoritesInitialized ? "1" : "0") << "\n";
     for (const auto& cp : customPluginPaths) {
         file << "custom_plugin_path=" << cp << "\n";
     }

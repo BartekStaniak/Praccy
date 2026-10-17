@@ -3,6 +3,16 @@
 #include <imgui.h>
 #include <cstdint>
 #include <atomic>
+#include <cstring>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace praccy::ui {
 
@@ -371,7 +381,7 @@ inline const ThemeTokens kThemes[static_cast<size_t>(ThemeId::Count)] = {
         },
         // Signal
         {
-            ColorToken(32, 120, 58), ColorToken(140, 130, 118), ColorToken(195, 45, 35),
+            ColorToken(32, 120, 58), ColorToken(102, 90, 78), ColorToken(195, 45, 35),
             ColorToken(200, 40, 30), ColorToken(195, 95, 20), ColorToken(32, 120, 58),
             ColorToken(140, 130, 118), ColorToken(32, 120, 58), ColorToken(32, 120, 58),
             ColorToken(205, 135, 25), ColorToken(200, 40, 30), ColorToken(40, 115, 175),
@@ -428,6 +438,29 @@ inline void applyTheme(ThemeId id) {
     if (ImGui::GetCurrentContext() == nullptr) {
         return;
     }
+
+#if defined(_WIN32)
+    if (const ImGuiViewport* vp = ImGui::GetMainViewport()) {
+        if (HWND hwnd = reinterpret_cast<HWND>(vp->PlatformHandleRaw ? vp->PlatformHandleRaw : vp->PlatformHandle)) {
+            if (HMODULE hDwm = LoadLibraryW(L"dwmapi.dll")) {
+                typedef HRESULT (WINAPI *PFN_DwmSetWindowAttribute)(HWND, DWORD, LPCVOID, DWORD);
+                FARPROC proc = GetProcAddress(hDwm, "DwmSetWindowAttribute");
+                if (proc) {
+                    PFN_DwmSetWindowAttribute pfnSetAttr = nullptr;
+                    std::memcpy(&pfnSetAttr, &proc, sizeof(proc));
+                    BOOL useDark = tokens.isDark ? TRUE : FALSE;
+                    if (FAILED(pfnSetAttr(hwnd, 20, &useDark, sizeof(useDark)))) {
+                        pfnSetAttr(hwnd, 19, &useDark, sizeof(useDark));
+                    }
+                    // Force Windows non-client titlebar repaint on theme switch
+                    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+                }
+                FreeLibrary(hDwm);
+            }
+        }
+    }
+#endif
 
     // Apply standard geometry according to 4px/8px design grid
     ImGuiStyle& style = ImGui::GetStyle();

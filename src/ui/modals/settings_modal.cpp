@@ -139,21 +139,25 @@ void SettingsModal::close() {
 void SettingsModal::renderAudioTab() {
     const auto& tokens = themeTokens();
     ImGui::Spacing();
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(14.0f, 4.0f));
     if (ImGui::BeginTable("##AudioSettingsTwoCol", 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersInnerV)) {
-        ImGui::TableSetupColumn("AsioCol", ImGuiTableColumnFlags_WidthStretch, 0.52f);
-        ImGui::TableSetupColumn("RiffCol", ImGuiTableColumnFlags_WidthStretch, 0.48f);
+        ImGui::TableSetupColumn("AsioCol", ImGuiTableColumnFlags_WidthStretch, 0.48f);
+        ImGui::TableSetupColumn("RiffCol", ImGuiTableColumnFlags_WidthStretch, 0.52f);
         ImGui::TableNextColumn();
     }
     ImGui::TextColored(tokens.text.accent.vec4, "ASIO DRIVER CONFIGURATION");
     ImGui::Separator();
     ImGui::Spacing();
 
-    // Driver selector combo
+    // Driver selector combo (responsive width so "Rescan Drivers" never collides with column divider)
     std::string currentDriverName = m_asio.driverInfo().name;
     if (currentDriverName.empty()) currentDriverName = "Select ASIO Driver...";
 
     ImGui::Text("Active ASIO Device:");
-    ImGui::SetNextItemWidth(340);
+    const float rescanBtnW = 116.0f;
+    const float colAvailW = ImGui::GetContentRegionAvail().x;
+    const float comboW = std::max(140.0f, colAvailW - rescanBtnW - 10.0f);
+    ImGui::SetNextItemWidth(comboW);
     if (ImGui::BeginCombo("##SettingsAsioDriversCombo", currentDriverName.c_str())) {
         for (int i = 0; i < static_cast<int>(m_cachedDrivers.size()); ++i) {
             const bool isSelected = (m_selectedDriverIdx == i);
@@ -180,8 +184,8 @@ void SettingsModal::renderAudioTab() {
         ImGui::EndCombo();
     }
 
-    ImGui::SameLine(0, 10);
-    if (CenteredButton("Rescan Drivers", ImVec2(120, Metrics::buttonHeight()))) {
+    ImGui::SameLine(0, 8);
+    if (CenteredButton("Rescan Drivers", ImVec2(rescanBtnW, Metrics::buttonHeight()))) {
         m_cachedDrivers = audio::AsioManager::enumerateDrivers();
     }
 
@@ -220,7 +224,7 @@ void SettingsModal::renderAudioTab() {
         std::snprintf(srPreview, sizeof(srPreview), "48000 Hz (48 kHz)");
     }
 
-    ImGui::SetNextItemWidth(340);
+    ImGui::SetNextItemWidth(std::max(160.0f, ImGui::GetContentRegionAvail().x - 4.0f));
     if (ImGui::BeginCombo("##SettingsSampleRateCombo", srPreview, hasDriver ? 0 : ImGuiComboFlags_NoArrowButton)) {
         if (hasDriver) {
             constexpr double standardRates[] = { 44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0 };
@@ -266,7 +270,7 @@ void SettingsModal::renderAudioTab() {
         std::snprintf(bufPreview, sizeof(bufPreview), "256 samples (5.33 ms latency)");
     }
 
-    ImGui::SetNextItemWidth(340);
+    ImGui::SetNextItemWidth(std::max(160.0f, ImGui::GetContentRegionAvail().x - 4.0f));
     if (ImGui::BeginCombo("##SettingsBufferSizeCombo", bufPreview, hasDriver ? 0 : ImGuiComboFlags_NoArrowButton)) {
         if (hasDriver) {
             constexpr int standardSizes[] = { 32, 64, 128, 256, 512, 1024, 2048, 4096 };
@@ -346,8 +350,10 @@ void SettingsModal::renderAudioTab() {
     double ramMb = ramBytes / (1024.0 * 1024.0);
 
     ImGui::Spacing();
-    ImGui::BulletText("Live RAM Footprint: %.1f MB (%.0f Hz stereo 32-bit float)", ramMb, sRate);
-    ImGui::TextDisabled("Continuously records audio in a lock-free circular buffer. Press Ctrl+Shift+R to export.");
+    ImGui::BulletText("RAM Footprint: %.1f MB (%.0f kHz 32-bit stereo)", ramMb, sRate / 1000.0);
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
+    ImGui::TextColored(tokens.text.muted.vec4, "Continuously records audio in a lock-free circular buffer. Press Ctrl+Shift+R to export.");
+    ImGui::PopTextWrapPos();
 
     ImGui::Spacing();
     ImGui::Text("Save Destination Directory:");
@@ -360,24 +366,25 @@ void SettingsModal::renderAudioTab() {
     }
 
     const float widgetH = Metrics::buttonHeight();
-    const float btnBrowseW = 85.0f;
-    const float btnOpenW = 60.0f;
-    const float btnResetW = (!m_cachedConfig.riffDirectory.empty()) ? 60.0f : 0.0f;
+    const float btnBrowseW = 92.0f;
+    const float btnOpenW = 82.0f;
+    const float btnResetW = (!m_cachedConfig.riffDirectory.empty()) ? 70.0f : 0.0f;
     const float spacingX = Metrics::kItemSpacingX;
-    const float totalBtnsW = btnBrowseW + spacingX + btnOpenW + (btnResetW > 0.0f ? (spacingX + btnResetW) : 0.0f);
-    const float availW = ImGui::GetContentRegionAvail().x;
-    const float inputW = std::max(180.0f, availW - totalBtnsW - spacingX);
 
+    // Place full-width path readout on its own row and action buttons directly beneath so the path never clips
     ImGui::PushStyleColor(ImGuiCol_FrameBg, tokens.surfaces.cardBg.vec4);
     char dirBuf[512];
     std::strncpy(dirBuf, displayDir.c_str(), sizeof(dirBuf));
     dirBuf[sizeof(dirBuf) - 1] = '\0';
-    ImGui::SetNextItemWidth(inputW);
+    ImGui::SetNextItemWidth(-1.0f);
     ImGui::InputText("##RiffSaveDir", dirBuf, sizeof(dirBuf), ImGuiInputTextFlags_ReadOnly);
     ImGui::PopStyleColor();
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("%s", displayDir.c_str());
+    }
 
-    ImGui::SameLine(0, spacingX);
-    if (ImGui::Button("Browse...##RiffDir", ImVec2(btnBrowseW, widgetH))) {
+    ImGui::Spacing();
+    if (CenteredButton("Browse...##RiffDir", ImVec2(btnBrowseW, widgetH))) {
 #if defined(_WIN32)
         HWND hwnd = nullptr;
         if (ImGui::GetCurrentContext()) {
@@ -421,6 +428,7 @@ void SettingsModal::renderAudioTab() {
     if (ImGui::GetCurrentTable() != nullptr) {
         ImGui::EndTable();
     }
+    ImGui::PopStyleVar(); // CellPadding
 }
 
 void SettingsModal::renderPluginsTab() {
@@ -596,7 +604,6 @@ void SettingsModal::renderThemeTab() {
         const ImU32 borderCol = isSelected ? tokens.borders.focus.u32
                               : (hovered ? tokens.borders.cardHovered.u32 : tokens.borders.subtle.u32);
         dl->AddRectFilled(pos, ImVec2(pos.x + cardW, pos.y + cardH), t.surfaces.panelBg.u32, 6.0f);
-        dl->AddRect(pos, ImVec2(pos.x + cardW, pos.y + cardH), borderCol, 6.0f, 0, isSelected ? 2.0f : 1.0f);
 
         dl->PushClipRect(pos, ImVec2(pos.x + cardW, pos.y + cardH), true);
 
@@ -604,6 +611,18 @@ void SettingsModal::renderThemeTab() {
         dl->AddRectFilled(pos, ImVec2(pos.x + cardW, pos.y + headerH), t.surfaces.headerBg.u32, 6.0f, ImDrawFlags_RoundCornersTop);
         const float headerTextY = pos.y + (headerH - ImGui::GetTextLineHeight()) * 0.5f;
         dl->AddText(ImVec2(pos.x + padX, headerTextY), t.text.primary.u32, themes[i]);
+
+        if (isSelected) {
+            const char* activeBadge = "ACTIVE";
+            const ImVec2 badgeTextSz = ImGui::CalcTextSize(activeBadge);
+            const float bH = 18.0f;
+            const float bW = badgeTextSz.x + 12.0f;
+            const float bX = pos.x + cardW - padX - bW;
+            const float bY = pos.y + (headerH - bH) * 0.5f;
+            dl->AddRectFilled(ImVec2(bX, bY), ImVec2(bX + bW, bY + bH), tokens.surfaces.cardBg.u32, bH * 0.5f);
+            dl->AddRect(ImVec2(bX, bY), ImVec2(bX + bW, bY + bH), tokens.borders.focus.u32, bH * 0.5f, 0, 1.0f);
+            dl->AddText(ImVec2(bX + 6.0f, bY + (bH - badgeTextSz.y) * 0.5f), tokens.borders.focus.u32, activeBadge);
+        }
 
         // 6 live color swatches (WindowBg, CardBg, Accent, Active, BranchA, BranchB)
         const ImU32 swatches[6] = {
@@ -619,6 +638,9 @@ void SettingsModal::renderThemeTab() {
 
         dl->AddText(nullptr, 0.0f, ImVec2(pos.x + padX, pos.y + subtitleY), t.text.secondary.u32, themeSubtitles[i], nullptr, wrapWidth);
         dl->PopClipRect();
+
+        // Draw selection / hover border on top of card contents so it is never occluded
+        dl->AddRect(pos, ImVec2(pos.x + cardW, pos.y + cardH), borderCol, 6.0f, 0, isSelected ? 2.0f : 1.0f);
 
         if (i == 1) ImGui::Spacing();
         ImGui::PopID();

@@ -893,6 +893,7 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
     std::string line;
 
     while (std::getline(file, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
         if (line.empty() || line[0] == '#' || line[0] == ';') continue;
         if (line.front() == '[' && line.back() == ']') {
             currentSection = line.substr(1, line.length() - 2);
@@ -902,6 +903,10 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
         if (eq != std::string::npos && !currentSection.empty()) {
             std::string k = line.substr(0, eq);
             std::string v = line.substr(eq + 1);
+            while (!k.empty() && (k.back() == ' ' || k.back() == '\t')) k.pop_back();
+            while (!k.empty() && (k.front() == ' ' || k.front() == '\t')) k.erase(k.begin());
+            while (!v.empty() && (v.back() == ' ' || v.back() == '\t' || v.back() == '\r' || v.back() == '\n')) v.pop_back();
+            while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.erase(v.begin());
             sections[currentSection][k] = v;
         }
     }

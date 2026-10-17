@@ -396,6 +396,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     praccy::tools::QuickLooper looper;
     looper.prepare(48000.0);
+    looper.setBpm(metronome.bpm());
+    looper.setBeatsPerBar(metronome.beatsPerBar());
 
     std::atomic<float> dspLoadPercent{0.0f};
     std::atomic<uint32_t> dspDropouts{0};
@@ -405,6 +407,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     praccy::plugins::PluginScanner scanner;
     if (configLoaded) {
+        scanner.loadFromConfig(appConfig);
         for (const auto& cp : appConfig.customPluginPaths) {
             scanner.addCustomSearchPath(cp);
         }
@@ -689,6 +692,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
     appConfig.customPluginPaths = scanner.searchPaths();
     scanner.exportToConfig(appConfig);
+    appConfig.presetFavoritesInitialized = true;
+    appConfig.favoritePresets = rackView.favoritePresets();
     appConfig.saveWindowPlacement(hwnd);
     appConfig.save();
 

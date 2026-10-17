@@ -552,6 +552,9 @@ void testAppConfigPersistence() {
         .clapId = "com.u-he.diva"
     });
 
+    cfg.favoritePresets = {"Modern High Gain Djent", "California Glassy Clean"};
+    cfg.presetFavoritesInitialized = true;
+
     assert(cfg.save(testPath) == true);
 
     state::AppConfig loaded;
@@ -564,6 +567,10 @@ void testAppConfigPersistence() {
     assert(loaded.lastLoadedPreset == "Modern High Gain Djent");
     assert(loaded.rackViewMode == state::AppConfig::RackViewMode::Modular);
     assert(loaded.customPluginPaths.size() >= 2);
+    assert(loaded.presetFavoritesInitialized == true);
+    assert(loaded.favoritePresets.size() == 2);
+    assert(loaded.favoritePresets[0] == "Modern High Gain Djent");
+    assert(loaded.favoritePresets[1] == "California Glassy Clean");
     assert(loaded.scannedPlugins.size() == 2);
     assert(loaded.scannedPlugins[0].name == "Pro-Q 3");
     assert(loaded.scannedPlugins[0].type == "VST3");
@@ -571,6 +578,33 @@ void testAppConfigPersistence() {
     assert(loaded.scannedPlugins[1].name == "Diva");
     assert(loaded.scannedPlugins[1].type == "CLAP");
     assert(loaded.scannedPlugins[1].clapId == "com.u-he.diva");
+
+    // Test explicit empty favorites with presetFavoritesInitialized = true
+    loaded.favoritePresets.clear();
+    assert(loaded.save(testPath) == true);
+    state::AppConfig loadedEmptyFavs;
+    assert(loadedEmptyFavs.load(testPath) == true);
+    assert(loadedEmptyFavs.presetFavoritesInitialized == true);
+    assert(loadedEmptyFavs.favoritePresets.empty());
+
+    // Test CRLF and whitespace trimming
+    {
+        std::ofstream crlfFile(testPath, std::ios::binary);
+        crlfFile << "preset_favorites_initialized=1\r\n";
+        crlfFile << "favorite_preset=Modern High Gain Djent\r\n";
+        crlfFile << "favorite_plugin=Praccy Drive  \r\n";
+        crlfFile << "last_loaded_preset=Custom Preset\r\n";
+        crlfFile.close();
+
+        state::AppConfig loadedCrlf;
+        assert(loadedCrlf.load(testPath) == true);
+        assert(loadedCrlf.presetFavoritesInitialized == true);
+        assert(loadedCrlf.favoritePresets.size() == 1);
+        assert(loadedCrlf.favoritePresets[0] == "Modern High Gain Djent");
+        assert(loadedCrlf.favoritePlugins.size() == 1);
+        assert(loadedCrlf.favoritePlugins[0] == "Praccy Drive");
+        assert(loadedCrlf.lastLoadedPreset == "Custom Preset");
+    }
 
     std::remove(testPath.c_str());
 
@@ -630,6 +664,8 @@ void testPluginScannerPersistence() {
         assert(pVst->vendor == "FabFilter");
         assert(scanner2.getPluginCategory("FabFilter Pro-Q 3") == "Dynamic EQ");
         assert(scanner2.isFavorite("FabFilter Pro-Q 3"));
+        assert(scanner2.isFavorite("C:\\Program Files\\Common Files\\VST3\\FabFilter Pro-Q 3.vst3"));
+        assert(scanner2.isFavorite("FabFilter Pro-Q 3.vst3"));
         assert(pVst->bundleFileName == "FabFilter Pro-Q 3.vst3");
 
         // Verify CLAP plugin retained across sessions with its type tag and category
@@ -640,6 +676,15 @@ void testPluginScannerPersistence() {
         assert(pClap->vendor == "u-he");
         assert(pClap->category == "Audio FX");
         assert(pClap->clapId == "com.u-he.diva");
+
+        // Verify path-based favorite matches plugin name and order is preserved
+        scanner2.toggleFavorite("C:\\Program Files\\Common Files\\CLAP\\Diva.clap");
+        assert(scanner2.isFavorite("Diva"));
+        assert(scanner2.isFavorite("Diva.clap"));
+        auto favs = scanner2.favorites();
+        assert(favs.size() == 2);
+        assert(favs[0] == "FabFilter Pro-Q 3");
+        assert(favs[1] == "C:\\Program Files\\Common Files\\CLAP\\Diva.clap");
     }
 
     std::remove(testIni.c_str());

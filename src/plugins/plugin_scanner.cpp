@@ -15,6 +15,49 @@ namespace praccy::plugins {
 
 using GetFactoryProc = Steinberg::IPluginFactory* (PLUGIN_API *)();
 
+namespace {
+
+std::string toLowerString(std::string_view str) {
+    std::string out(str);
+    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return out;
+}
+
+std::string cleanName(std::string_view rawName) {
+    std::string name(rawName);
+    if (name.size() >= 5) {
+        std::string ext = name.substr(name.size() - 5);
+        std::string extLower = toLowerString(ext);
+        if (extLower == ".vst3" || extLower == ".clap") {
+            name.resize(name.size() - 5);
+        }
+    }
+    while (!name.empty() && name.back() == ' ') {
+        name.pop_back();
+    }
+    return name;
+}
+
+bool matchesFavoriteString(const std::string& fav, const std::string& target) {
+    if (fav.empty() || target.empty()) return false;
+    if (fav == target) return true;
+
+    std::filesystem::path pFav(fav);
+    std::filesystem::path pTarget(target);
+    std::string favStem = pFav.stem().string();
+    std::string targetStem = pTarget.stem().string();
+
+    if (favStem == target || fav == targetStem || favStem == targetStem) return true;
+
+    std::string cleanFav = toLowerString(cleanName(favStem));
+    std::string cleanTarget = toLowerString(cleanName(targetStem));
+    return !cleanFav.empty() && cleanFav == cleanTarget;
+}
+
+} // namespace
+
 PluginScanner::PluginScanner(const std::string& configPath)
     : m_configPath(configPath)
 {
@@ -95,9 +138,13 @@ void PluginScanner::addPlugin(const PluginDescriptor& desc) {
 
 void PluginScanner::loadFromConfig(const state::AppConfig& cfg) {
     std::lock_guard<std::mutex> lock(m_mutex);
+    m_favorites.clear();
     for (const auto& fav : cfg.favoritePlugins) {
-        m_favorites.insert(fav);
+        if (!fav.empty() && std::find(m_favorites.begin(), m_favorites.end(), fav) == m_favorites.end()) {
+            m_favorites.push_back(fav);
+        }
     }
+    m_favoritesInitialized = true;
     for (const auto& [name, cat] : cfg.customPluginCategories) {
         m_categoryOverrides[name] = cat;
     }
@@ -168,7 +215,11 @@ void PluginScanner::exportToConfig(state::AppConfig& cfg) const {
         entry.clapId = p.clapId;
         cfg.scannedPlugins.push_back(std::move(entry));
     }
-    cfg.favoritePlugins.assign(m_favorites.begin(), m_favorites.end());
+    if (m_favoritesInitialized) {
+        cfg.favoritePlugins = m_favorites;
+    } else if (!m_favorites.empty()) {
+        cfg.favoritePlugins = m_favorites;
+    }
     cfg.customPluginCategories = m_categoryOverrides;
 }
 
@@ -670,26 +721,45 @@ void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vec
 
 bool PluginScanner::isFavorite(const std::string& nameOrPath) const {
     std::lock_guard<std::mutex> lock(m_mutex);
-    return m_favorites.find(nameOrPath) != m_favorites.end();
+    for (const auto& fav : m_favorites) {
+        if (matchesFavoriteString(fav, nameOrPath)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void PluginScanner::toggleFavorite(const std::string& nameOrPath) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_favorites.find(nameOrPath);
+    m_favoritesInitialized = true;
+    auto it = std::find_if(m_favorites.begin(), m_favorites.end(), [&](const std::string& f) {
+        return matchesFavoriteString(f, nameOrPath);
+    });
     if (it != m_favorites.end()) {
         m_favorites.erase(it);
     } else {
-        m_favorites.insert(nameOrPath);
+        m_favorites.push_back(nameOrPath);
     }
     state::AppConfig cfg;
     cfg.load(m_configPath);
-    cfg.favoritePlugins.assign(m_favorites.begin(), m_favorites.end());
+    cfg.favoritePlugins = m_favorites;
     cfg.save(m_configPath);
 }
 
 size_t PluginScanner::numFavorites() const {
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_favorites.size();
+}
+
+std::vector<std::string> PluginScanner::favorites() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_favorites;
+}
+
+void PluginScanner::setFavorites(const std::vector<std::string>& favs) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_favorites = favs;
+    m_favoritesInitialized = true;
 }
 
 void PluginScanner::setCustomCategory(const std::string& pluginName, const std::string& category) {
@@ -771,7 +841,14 @@ std::vector<PluginDescriptor> PluginScanner::getFilteredPlugins(
     for (const auto& p : m_plugins) {
         // Favorites filter
         if (favoritesOnly) {
-            if (m_favorites.find(p.name) == m_favorites.end() && m_favorites.find(p.path) == m_favorites.end()) {
+            bool isFav = false;
+            for (const auto& fav : m_favorites) {
+                if (matchesFavoriteString(fav, p.name) || matchesFavoriteString(fav, p.path)) {
+                    isFav = true;
+                    break;
+                }
+            }
+            if (!isFav) {
                 continue;
             }
         }

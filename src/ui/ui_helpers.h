@@ -86,6 +86,7 @@ inline bool ResettableSliderFloat(const char* label, float* v, float v_min, floa
         {ImGuiCol_SliderGrabActive, ColorToken::transparent().vec4},
         {ImGuiCol_Border, ColorToken::transparent().vec4}
     });
+    ScopedStyleVar grabSize(ImGuiStyleVar_GrabMinSize, 0.0f);
 
     bool changed = ImGui::SliderFloat(label, v, v_min, v_max, "", flags);
     const ImVec2 rMin = ImGui::GetItemRectMin();
@@ -121,8 +122,8 @@ inline bool ResettableSliderFloat(const char* label, float* v, float v_min, floa
     dl->AddRectFilled(rMin, rMax, tokens.surfaces.frameBg.u32, 4.0f);
     dl->AddRect(rMin, rMax, borderCol, 4.0f);
 
-    // 2. Bottom subtle rail track & unity/default tick mark
-    const float padX = 6.0f;
+    // 2. Rail track & unity/default tick mark
+    const float padX = 2.0f;
     const float trackX1 = rMin.x + padX;
     const float trackX2 = rMax.x - padX;
     const float trackW = std::max(1.0f, trackX2 - trackX1);
@@ -134,21 +135,43 @@ inline bool ResettableSliderFloat(const char* label, float* v, float v_min, floa
 
     // Subtle translucent fill bar (22% alpha) so foreground text always retains >10:1 WCAG contrast
     const bool isBipolar = (v_min < 0.0f && v_max > 0.0f);
-    const float fillX1 = isBipolar ? std::min(defX, valX) : rMin.x + 1.0f;
-    const float fillX2 = isBipolar ? std::max(defX, valX) : valX;
+    float fillX1 = rMin.x + 1.0f;
+    float fillX2 = rMin.x + 1.0f;
+    ImDrawFlags cornerFlags = ImDrawFlags_RoundCornersNone;
+
+    if (isBipolar) {
+        if (valNorm > defNorm + 0.001f) {
+            fillX1 = defX;
+            fillX2 = (valNorm >= 0.999f) ? (rMax.x - 1.0f) : std::min(rMax.x - 1.0f, valX + 1.0f);
+            cornerFlags = (valNorm >= 0.999f) ? ImDrawFlags_RoundCornersRight : ImDrawFlags_RoundCornersNone;
+        } else if (valNorm < defNorm - 0.001f) {
+            fillX1 = (valNorm <= 0.001f) ? (rMin.x + 1.0f) : std::max(rMin.x + 1.0f, valX - 1.0f);
+            fillX2 = defX;
+            cornerFlags = (valNorm <= 0.001f) ? ImDrawFlags_RoundCornersLeft : ImDrawFlags_RoundCornersNone;
+        }
+    } else {
+        if (valNorm > 0.001f) {
+            fillX1 = rMin.x + 1.0f;
+            fillX2 = (valNorm >= 0.999f) ? (rMax.x - 1.0f) : std::min(rMax.x - 1.0f, valX + 1.0f);
+            cornerFlags = (valNorm >= 0.999f) ? ImDrawFlags_RoundCornersAll : ImDrawFlags_RoundCornersLeft;
+        }
+    }
+
     if (fillX2 > fillX1 + 0.5f) {
         const ImU32 fillCol = active ? tokens.borders.focus.withAlpha(0.28f).u32
                                      : tokens.signal.active.withAlpha(0.22f).u32;
-        dl->AddRectFilled(ImVec2(fillX1, rMin.y + 1.0f), ImVec2(fillX2, rMax.y - 1.0f), fillCol, 3.0f);
+        dl->AddRectFilled(ImVec2(fillX1, rMin.y + 1.0f), ImVec2(fillX2, rMax.y - 1.0f), fillCol, 3.0f, cornerFlags);
     }
 
-    // Unity / default reference tick at bottom & top edge
-    dl->AddLine(ImVec2(defX, rMin.y + 1.0f), ImVec2(defX, rMin.y + 4.5f), tokens.borders.strong.u32, 1.2f);
-    dl->AddLine(ImVec2(defX, rMax.y - 4.5f), ImVec2(defX, rMax.y - 1.0f), tokens.borders.strong.u32, 1.2f);
+    // Unity / default reference tick at bottom & top edge (only if inside track)
+    if (defNorm > 0.02f && defNorm < 0.98f) {
+        dl->AddLine(ImVec2(defX, rMin.y + 1.0f), ImVec2(defX, rMin.y + 4.5f), tokens.borders.strong.u32, 1.2f);
+        dl->AddLine(ImVec2(defX, rMax.y - 4.5f), ImVec2(defX, rMax.y - 1.0f), tokens.borders.strong.u32, 1.2f);
+    }
 
-    // Crisp vertical cursor indicator line (2px wide) instead of text-obscuring block
+    // Crisp vertical cursor indicator line (2px wide) flush with track edges at 0% and 100%
     const ImU32 thumbCol = active ? tokens.borders.focus.u32 : tokens.text.accent.u32;
-    dl->AddLine(ImVec2(valX, rMin.y + 1.5f), ImVec2(valX, rMax.y - 1.5f), thumbCol, 2.2f);
+    dl->AddLine(ImVec2(valX, rMin.y + 1.5f), ImVec2(valX, rMax.y - 1.5f), thumbCol, 2.0f);
 
     // 3. High-contrast centered value readout
     if (format && format[0] != '\0') {

@@ -74,6 +74,8 @@ public:
     [[nodiscard]] bool isFavorite(const std::string& nameOrPath) const;
     void toggleFavorite(const std::string& nameOrPath);
     [[nodiscard]] size_t numFavorites() const;
+    [[nodiscard]] std::vector<std::string> favorites() const;
+    void setFavorites(const std::vector<std::string>& favs);
 
     void setCustomCategory(const std::string& pluginName, const std::string& category);
     void resetCustomCategory(const std::string& pluginName);
@@ -103,7 +105,8 @@ private:
 
     std::vector<std::string> m_searchPaths;
     std::vector<PluginDescriptor> m_plugins;
-    std::unordered_set<std::string> m_favorites;
+    std::vector<std::string> m_favorites;
+    bool m_favoritesInitialized{false};
     std::unordered_map<std::string, std::string> m_categoryOverrides;
     mutable std::mutex m_mutex;
     std::atomic<bool> m_isScanning{false};
