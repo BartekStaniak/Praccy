@@ -839,6 +839,9 @@ std::vector<uint8_t> ClapPluginInstance::saveState() const {
         ok = m_stateExt->save(m_plugin, &stream);
     });
 
+    if (ok && !buffer.empty()) {
+        updateStateHash(buffer);
+    }
     return ok ? buffer : std::vector<uint8_t>{};
 }
 
@@ -887,6 +890,9 @@ bool ClapPluginInstance::loadState(const std::vector<uint8_t>& state) {
                 }
             }
         }
+    }
+    if (ok) {
+        updateStateHash(state);
     }
     m_paramDrainGen.store(m_paramPushGen.load(std::memory_order_relaxed), std::memory_order_release);
     clearGuiParamEdit();

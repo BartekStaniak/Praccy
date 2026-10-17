@@ -453,20 +453,30 @@ void RackView::render() {
                 m_exportDawModal.open();
             }
 
-            // 6. Presets 1-8
-            for (int k = 0; k < 8 && k < static_cast<int>(m_scenes.numScenes()); ++k) {
-                if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_1 + k), false)) {
-                    if (m_scenes.applyScene(k, m_graph)) {
-                        syncMacrosFromGraph();
-                        triggerHudToast("PRESET " + std::to_string(k + 1) + " RECALLED");
-                        m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Recall Preset " + std::to_string(k + 1)),
-                                                   "Preset " + std::to_string(k + 1),
-                                                   state::UndoActionType::SceneSwitch);
+            auto isKeyCustomBound = [this](ImGuiKey key) -> bool {
+                for (const auto& kb : m_config.keyBindings) {
+                    if (kb.key == static_cast<int>(key)) return true;
+                }
+                return false;
+            };
+
+            // 6. Presets 1-8 (suppressed while Key Map mode is capturing or when key is bound to a custom target)
+            if (!m_keyMapMode) {
+                for (int k = 0; k < 8 && k < static_cast<int>(m_scenes.numScenes()); ++k) {
+                    const auto presetKey = static_cast<ImGuiKey>(ImGuiKey_1 + k);
+                    if (!isKeyCustomBound(presetKey) && ImGui::IsKeyPressed(presetKey, false)) {
+                        if (m_scenes.applyScene(k, m_graph)) {
+                            syncMacrosFromGraph();
+                            triggerHudToast("PRESET " + std::to_string(k + 1) + " RECALLED");
+                            m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Recall Preset " + std::to_string(k + 1)),
+                                                       "Preset " + std::to_string(k + 1),
+                                                       state::UndoActionType::SceneSwitch);
+                        }
                     }
                 }
             }
 
-            // 6. Focused Card Shortcuts: [, ], Q, 0
+            // 7. Focused Card Shortcuts: [, ], Q, 0
             if (!m_focusedSlot && m_focusedSlotIndex < 0 && m_graph.numNodes() > 0) {
                 for (size_t n = 0; n < m_graph.numNodes(); ++n) {
                     auto* node = m_graph.getNode(n);
@@ -478,14 +488,14 @@ void RackView::render() {
                 }
             }
 
-            if (m_focusedSlot || m_focusedSlotIndex >= 0) {
+            if (!m_keyMapMode && (m_focusedSlot || m_focusedSlotIndex >= 0)) {
                 if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket, false)) {
                     cycleAdjacentScenePreset(-1);
                 } else if (ImGui::IsKeyPressed(ImGuiKey_RightBracket, false)) {
                     cycleAdjacentScenePreset(+1);
                 }
 
-                if (ImGui::IsKeyPressed(ImGuiKey_Q, false)) {
+                if (!isKeyCustomBound(ImGuiKey_Q) && ImGui::IsKeyPressed(ImGuiKey_Q, false)) {
                     int blockIdx = -1;
                     int branchIdx = -1;
                     if (m_focusedBlockIndex >= 0) {
@@ -505,7 +515,7 @@ void RackView::render() {
                     }
                 }
 
-                if (m_focusedSlot && ImGui::IsKeyPressed(ImGuiKey_0, false)) {
+                if (m_focusedSlot && !isKeyCustomBound(ImGuiKey_0) && ImGui::IsKeyPressed(ImGuiKey_0, false)) {
                     m_focusedSlot->setBypassed(!m_focusedSlot->isBypassed());
                     triggerHudToast(m_focusedSlot->isBypassed() ? ("BYPASS: " + m_focusedSlot->name())
                                                                 : ("ACTIVE: " + m_focusedSlot->name()));
@@ -2179,6 +2189,10 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             if (hasGui) {
                 refreshGuiParamBaseline(slot);
                 plugins::PluginWindowManager::instance().openPluginWindow(pluginInst);
+                HWND hWin = plugins::PluginWindowManager::instance().getWindow(pluginInst);
+                if (hWin && m_config.enableLiveThumbnails && m_thumbnailMgr) {
+                    m_thumbnailMgr->captureWindowAsync(slot->name(), hWin, 30);
+                }
             } else {
                 m_dspTweakSlot = (m_dspTweakSlot == slot) ? nullptr : slot;
             }
@@ -2230,17 +2244,20 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             const bool knobDiscreteChange = changed && !ImGui::IsItemActive();
 
             const int effSlot = (blockIndex >= 0 ? blockIndex : slotIndex);
+            const int effBranchSlot = (blockIndex >= 0 ? slotIndex : -1);
             const bool isAwaitingMacro = m_keyMapMode && m_awaitingKeyTarget.active &&
                                          m_awaitingKeyTarget.slotIndex == effSlot &&
                                          m_awaitingKeyTarget.branchIndex == branchIndex &&
-                                         m_awaitingKeyTarget.branchSlotIndex == m;
+                                         m_awaitingKeyTarget.branchSlotIndex == effBranchSlot &&
+                                         m_awaitingKeyTarget.macroIndex == m;
 
             if (m_keyMapMode && ImGui::IsItemClicked()) {
                 m_awaitingKeyTarget.active = true;
                 m_awaitingKeyTarget.slotIndex = effSlot;
                 m_awaitingKeyTarget.blockIndex = blockIndex;
                 m_awaitingKeyTarget.branchIndex = branchIndex;
-                m_awaitingKeyTarget.branchSlotIndex = m;
+                m_awaitingKeyTarget.branchSlotIndex = effBranchSlot;
+                m_awaitingKeyTarget.macroIndex = m;
                 if (macro.isSlotTrim) {
                     m_awaitingKeyTarget.targetType = static_cast<uint32_t>(midi::BindingTargetType::SlotOutputGain);
                     m_awaitingKeyTarget.paramId = 0;
@@ -2248,21 +2265,23 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                     m_awaitingKeyTarget.targetType = static_cast<uint32_t>(midi::BindingTargetType::SlotDryWet);
                     m_awaitingKeyTarget.paramId = 0;
                 } else if (macro.bound) {
-                    m_awaitingKeyTarget.targetType = 10;
+                    m_awaitingKeyTarget.targetType = static_cast<uint32_t>(midi::BindingTargetType::PluginParameter);
                     m_awaitingKeyTarget.paramId = macro.paramId;
                 } else {
-                    m_awaitingKeyTarget.targetType = 10;
+                    m_awaitingKeyTarget.targetType = static_cast<uint32_t>(midi::BindingTargetType::PluginParameter);
                     m_awaitingKeyTarget.paramId = static_cast<uint32_t>(m);
                 }
                 m_awaitingKeyTarget.targetLabel = slot->name() + " " + macro.label;
                 triggerHudToast("PRESS KEY FOR: " + m_awaitingKeyTarget.targetLabel);
             } else if (m_midiMapMode && ImGui::IsItemClicked()) {
                 if (macro.isSlotTrim) {
-                    m_midi.startLearning(midi::BindingTargetType::SlotOutputGain, slotIndex, branchIndex);
+                    m_midi.startLearning(midi::BindingTargetType::SlotOutputGain, effSlot, branchIndex, -1, effBranchSlot, 0);
+                } else if (macro.isSlotMix) {
+                    m_midi.startLearning(midi::BindingTargetType::SlotDryWet, effSlot, branchIndex, -1, effBranchSlot, 0);
                 } else {
-                    m_midi.startLearning(midi::BindingTargetType::SlotDryWet, slotIndex, branchIndex);
+                    m_midi.startLearning(midi::BindingTargetType::PluginParameter, effSlot, branchIndex, -1, effBranchSlot, macro.paramId);
                 }
-                triggerHudToast("MIDI LEARN: " + slot->name() + " MACRO " + std::to_string(m + 1));
+                triggerHudToast("MIDI LEARN: " + slot->name() + " " + macro.label);
             } else if (!m_keyMapMode && changed) {
                 if (macro.bound) {
                     slot->setParameter(macro.paramId, macro.currentValue);
@@ -4920,6 +4939,7 @@ void RackView::processKeyMapCapture() {
                         const bool sameTarget = (entry.slotIndex == m_awaitingKeyTarget.slotIndex &&
                                                  entry.branchIndex == m_awaitingKeyTarget.branchIndex &&
                                                  entry.branchSlotIndex == m_awaitingKeyTarget.branchSlotIndex &&
+                                                 entry.macroIndex == m_awaitingKeyTarget.macroIndex &&
                                                  entry.targetType == m_awaitingKeyTarget.targetType &&
                                                  entry.paramId == m_awaitingKeyTarget.paramId);
                         return sameKey || sameTarget;
@@ -4931,6 +4951,7 @@ void RackView::processKeyMapCapture() {
             newEntry.slotIndex = m_awaitingKeyTarget.slotIndex;
             newEntry.branchIndex = m_awaitingKeyTarget.branchIndex;
             newEntry.branchSlotIndex = m_awaitingKeyTarget.branchSlotIndex;
+            newEntry.macroIndex = m_awaitingKeyTarget.macroIndex;
             newEntry.targetType = m_awaitingKeyTarget.targetType;
             newEntry.paramId = m_awaitingKeyTarget.paramId;
             bindings.push_back(newEntry);
@@ -5065,32 +5086,31 @@ void RackView::dispatchKeyBindings() {
                                            true);
                 m_undoManager.commitActiveTransaction();
             }
-        } else if (entry.targetType == 10) {
-            if (slot && entry.branchSlotIndex >= 0 && entry.branchSlotIndex < 4) {
-                const size_t mIdx = static_cast<size_t>(entry.branchSlotIndex);
+        } else if (entry.targetType == static_cast<uint32_t>(midi::BindingTargetType::PluginParameter)) {
+            const int rawMacroIdx = (entry.macroIndex >= 0 && entry.macroIndex < 4) ? entry.macroIndex : entry.branchSlotIndex;
+            if (slot && rawMacroIdx >= 0 && rawMacroIdx < 4) {
+                const size_t mIdx = static_cast<size_t>(rawMacroIdx);
                 auto& macro = slot->macros()[mIdx];
-                float val = macro.currentValue + 0.25f;
-                if (val > 1.01f) {
-                    val = 0.0f;
+                const float span = (macro.maxValue > macro.minValue) ? (macro.maxValue - macro.minValue) : 1.0f;
+                float val = macro.currentValue + 0.25f * span;
+                if (val > macro.maxValue + 0.01f * span) {
+                    val = macro.minValue;
                 }
+                val = std::clamp(val, macro.minValue, macro.maxValue);
                 macro.currentValue = val;
                 m_slotMacros[slot][mIdx].currentValue = val;
 
                 if (macro.isSlotMix) {
-                    slot->setDryWet(val);
+                    slot->setDryWet(val / 100.0f);
                 } else if (macro.isSlotTrim) {
-                    const float trimDb = -24.0f + val * 36.0f;
-                    slot->setOutputGainDb(trimDb);
+                    slot->setOutputGainDb(val);
                 } else {
                     slot->setParameter(macro.paramId, val);
-                    auto* plugin = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
-                    if (plugin && macro.paramId != 0xFFFFFFFF) {
-                        plugin->setParameterValue(macro.paramId, val);
-                    }
                 }
                 refreshGuiParamBaseline(slot);
+                const float normPct = ((val - macro.minValue) / span) * 100.0f;
                 char buf[64];
-                std::snprintf(buf, sizeof(buf), "%s %s: %.0f%%", slot->name().c_str(), macro.label.c_str(), static_cast<double>(val * 100.0f));
+                std::snprintf(buf, sizeof(buf), "%s %s: %.0f%%", slot->name().c_str(), macro.label.c_str(), static_cast<double>(normPct));
                 triggerHudToast(buf);
                 m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Macro " + macro.label),
                                            "Macro: " + macro.label,

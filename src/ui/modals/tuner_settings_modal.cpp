@@ -24,7 +24,7 @@ TunerSettingsModal::TunerSettingsModal(tools::InstrumentTuner& tuner)
 TunerSettingsModal::~TunerSettingsModal() = default;
 
 void TunerSettingsModal::updateCachedTuning() {
-    const auto& cfg = m_tuner.config();
+    const auto cfg = m_tuner.config();
     m_cachedStringNotes = cfg.getStringInfoList();
     m_cachedFullTuningTitle = cfg.fullTuningTitle();
     m_cachedA4Reference = m_tuner.a4Reference();
@@ -43,7 +43,7 @@ void TunerSettingsModal::close() {
     cfg.load();
     cfg.tunerEnabled = m_tuner.isEnabled();
     cfg.tunerA4Reference = m_tuner.a4Reference();
-    const auto& tcfg = m_tuner.config();
+    const auto tcfg = m_tuner.config();
     cfg.tunerInstrument = static_cast<int>(tcfg.instrument);
     cfg.tunerStringCount = tcfg.stringCount;
     cfg.tunerTuningMode = static_cast<int>(tcfg.mode);
@@ -195,7 +195,7 @@ void TunerSettingsModal::renderPitchStandardSection() {
 
 void TunerSettingsModal::renderInstrumentSection() {
     const auto& tokens = themeTokens();
-    auto& cfg = m_tuner.config();
+    auto cfg = m_tuner.config();
 
     ImGui::TextColored(tokens.text.accent.vec4, "INSTRUMENT & STRINGS");
     ImGui::Separator();
@@ -271,7 +271,7 @@ void TunerSettingsModal::renderInstrumentSection() {
 
 void TunerSettingsModal::renderPresetTuningSection() {
     const auto& tokens = themeTokens();
-    auto& cfg = m_tuner.config();
+    auto cfg = m_tuner.config();
 
     ImGui::Spacing();
     ImGui::TextColored(tokens.text.secondary.vec4, "Select Root String Note and Tuning Preset:");
@@ -418,7 +418,7 @@ void TunerSettingsModal::renderPresetTuningSection() {
 
 void TunerSettingsModal::renderCustomTuningSection() {
     const auto& tokens = themeTokens();
-    auto& cfg = m_tuner.config();
+    auto cfg = m_tuner.config();
 
     ImGui::Spacing();
     ImGui::TextColored(tokens.text.secondary.vec4, "Select the note and octave for each string independently:");
@@ -612,7 +612,7 @@ void TunerSettingsModal::render() {
             ImGui::Spacing();
 
             // Zone 3: Tuning Configurations: Presets OR Custom (Dropdown selector)
-            auto& cfg = m_tuner.config();
+            auto cfg = m_tuner.config();
 
             ImGui::TextColored(tokens.text.accent.vec4, "TUNING CONFIGURATION");
             ImGui::Separator();

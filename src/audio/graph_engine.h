@@ -195,6 +195,7 @@ public:
     }
     void addSlotToUiShadow(PluginSlot* slot) { m_uiSlots.push_back(slot); }
     [[nodiscard]] std::vector<std::unique_ptr<PluginSlot>>& activeSlots() noexcept { return m_activeSlots; }
+    void drainSlotCommandsIntoActive() noexcept;
 
     // Audio thread processing (Drains commands wait-free, pushes retired to reclaim queue)
     void process(AudioProcessContext& ctx);
@@ -347,6 +348,11 @@ public:
     void removeBranch(size_t index);
     [[nodiscard]] size_t numBranches() const noexcept;
     [[nodiscard]] ParallelBranch* getBranch(size_t index) noexcept;
+
+    // Audio-thread lock-free branch access (must ONLY be called on the audio thread or when audio is stopped)
+    void flushBranchCommandsIntoActive() noexcept { drainCommandQueueIntoActive(); }
+    [[nodiscard]] std::vector<std::unique_ptr<ParallelBranch>>& activeBranches() noexcept { return m_activeBranches; }
+    [[nodiscard]] const std::vector<std::unique_ptr<ParallelBranch>>& activeBranches() const noexcept { return m_activeBranches; }
 
     void setBlend(float blend) noexcept { m_blend.store(std::clamp(blend, -1.0f, 1.0f), std::memory_order_relaxed); }
     [[nodiscard]] float blend() const noexcept { return m_blend.load(std::memory_order_relaxed); }
@@ -524,6 +530,7 @@ public:
 
     void prepare(double sampleRate, uint32_t maxBlockSize);
     void process(const AudioBufferView& hardwareIn, AudioBufferView& hardwareOut);
+    void process(const AudioBufferView& hardwareIn, AudioBufferView& hardwareOut, const AudioProcessContext& transportCtx);
     void reset();
 
     // UI-thread mutations (Push to SPSC command queue, update UI shadow list)

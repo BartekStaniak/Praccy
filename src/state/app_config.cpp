@@ -158,6 +158,9 @@ bool AppConfig::load(const std::string& customPath) {
                 if (parts.size() >= 6) {
                     kb.paramId = utils::parseInteger<uint32_t>(parts[5], 0);
                 }
+                if (parts.size() >= 7) {
+                    kb.macroIndex = utils::parseInteger<int>(parts[6], -1);
+                }
                 keyBindings.push_back(kb);
             }
         } else if (key == "retroactive_buffer_minutes") {
@@ -279,7 +282,8 @@ bool AppConfig::save(const std::string& customPath) const {
              << kb.branchIndex << "|"
              << kb.branchSlotIndex << "|"
              << kb.targetType << "|"
-             << kb.paramId << "\n";
+             << kb.paramId << "|"
+             << kb.macroIndex << "\n";
     }
 
     return true;

@@ -10,6 +10,7 @@
 namespace praccy::audio { class GraphEngine; }
 namespace praccy::tools { class AudioPlayer; class QuickLooper; }
 namespace praccy::state { class SceneManager; }
+namespace praccy::plugins { class PluginScanner; }
 
 namespace praccy::ui {
 
@@ -33,6 +34,7 @@ struct DropContext {
     tools::QuickLooper* looper{nullptr};
     state::SceneManager* scenes{nullptr};
     audio::GraphEngine* graph{nullptr};
+    plugins::PluginScanner* scanner{nullptr};
     bool preferLooper{false};
 };
 

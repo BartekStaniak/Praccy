@@ -431,7 +431,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         player.loadWavFile(p.string());
     });
     g_dragDropRouter.setPresetHandler([&](const std::filesystem::path& p) {
-        if (scenes.loadFromFile(p.string())) {
+        auto* dawAdapter = praccy::state::UniversalDawInteropManager::instance().findAdapter(p);
+        if (dawAdapter) {
+            praccy::state::UniversalDawInteropManager::instance().importAndApply(p, graph, scenes, scanner);
+        } else if (scenes.loadFromFile(p.string())) {
             scenes.applyScene(0, graph);
         }
     });
@@ -475,8 +478,23 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             }
         }
 
-        // 2. Process Audio Graph Engine
-        graph.process(in, out);
+        // 2. Build Live Audio Transport Context (F-12) and Process Audio Graph Engine
+        const uint32_t outCh = out.numChannels();
+        const size_t numSamples = out.numSamples();
+        static int64_t s_projectTimeSamples = 0;
+
+        praccy::audio::AudioProcessContext ctx{};
+        ctx.input = in;
+        ctx.output = out;
+        ctx.sampleRate = asio.currentSampleRate();
+        ctx.numSamples = static_cast<uint32_t>(numSamples);
+        ctx.tempoBpm = (static_cast<double>(metronome.bpm()) > 1.0) ? static_cast<double>(metronome.bpm()) : 120.0;
+        ctx.timeSigNumerator = (metronome.beatsPerBar() > 0) ? metronome.beatsPerBar() : 4;
+        ctx.timeSigDenominator = 4;
+        ctx.projectTimeSamples = s_projectTimeSamples;
+
+        graph.process(in, out, ctx);
+        s_projectTimeSamples += static_cast<int64_t>(numSamples);
 
         // 3. Process Practice Tools (Looper, Backing Track Player, Metronome)
         looper.process(out, out);
@@ -484,23 +502,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         metronome.process(out);
 
         // 4. Retroactive Riff Buffer: capture live processed audio frames
-        const uint32_t outCh = out.numChannels();
-        const size_t numSamples = out.numSamples();
         if (numSamples > 0 && outCh > 0) {
             const float* outL = out.channel(0);
             const float* outR = (outCh > 1) ? out.channel(1) : outL;
             rackView.getRiffBuffer().push(outL, outR, numSamples);
         }
-
-        // Live Audio Transport Context Wiring (F-12)
-        static int64_t s_projectTimeSamples = 0;
-        s_projectTimeSamples += static_cast<int64_t>(numSamples);
-
-        [[maybe_unused]] praccy::audio::AudioProcessContext ctx{};
-        ctx.tempoBpm = (static_cast<double>(metronome.bpm()) > 1.0) ? static_cast<double>(metronome.bpm()) : 120.0;
-        ctx.timeSigNumerator = (metronome.beatsPerBar() > 0) ? metronome.beatsPerBar() : 4;
-        ctx.timeSigDenominator = 4;
-        ctx.projectTimeSamples = s_projectTimeSamples;
 
         // 5. Measure real-time DSP cycle duration vs available buffer time slice
         auto t1 = std::chrono::high_resolution_clock::now();

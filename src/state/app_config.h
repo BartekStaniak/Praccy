@@ -1,10 +1,10 @@
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wpragma-once-outside-header"
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wpragma-once-outside-header"
 #endif
 #pragma once
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic pop
+#if defined(__clang__)
+#pragma clang diagnostic pop
 #endif
 
 #include "../audio/input_config.h"
@@ -48,6 +48,7 @@ struct KeyBindingEntry {
     int slotIndex{-1};
     int branchIndex{-1};
     int branchSlotIndex{-1};
+    int macroIndex{-1};
     uint32_t targetType{0};
     uint32_t paramId{0};
 
@@ -56,6 +57,7 @@ struct KeyBindingEntry {
                slotIndex == other.slotIndex &&
                branchIndex == other.branchIndex &&
                branchSlotIndex == other.branchSlotIndex &&
+               macroIndex == other.macroIndex &&
                targetType == other.targetType &&
                paramId == other.paramId;
     }

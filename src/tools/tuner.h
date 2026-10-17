@@ -296,8 +296,10 @@ public:
         std::lock_guard<std::mutex> lock(m_configMutex);
         return m_config;
     }
-    [[nodiscard]] const TunerConfig& config() const noexcept { return m_config; }
-    [[nodiscard]] TunerConfig& config() noexcept { return m_config; }
+    [[nodiscard]] TunerConfig config() const {
+        std::lock_guard<std::mutex> lock(m_configMutex);
+        return m_config;
+    }
 
 private:
     void workerLoop();

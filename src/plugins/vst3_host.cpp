@@ -859,6 +859,9 @@ std::vector<uint8_t> Vst3PluginInstance::saveState() const {
             result = std::vector<uint8_t>(stream.buffer.begin(), stream.buffer.end());
         }
     });
+    if (!result.empty()) {
+        updateStateHash(result);
+    }
     return result;
 }
 
@@ -892,6 +895,9 @@ bool Vst3PluginInstance::loadState(const std::vector<uint8_t>& state) {
             desc.currentValue = fVal;
             m_paramQueue.try_enqueue({desc.id, normVal});
         }
+    }
+    if (success) {
+        updateStateHash(state);
     }
     clearGuiParamEdit();
     return success;

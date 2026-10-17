@@ -1,10 +1,10 @@
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wpragma-once-outside-header"
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wpragma-once-outside-header"
 #endif
 #pragma once
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic pop
+#if defined(__clang__)
+#pragma clang diagnostic pop
 #endif
 
 #include "../audio/graph_engine.h"

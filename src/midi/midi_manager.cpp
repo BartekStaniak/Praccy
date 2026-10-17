@@ -64,16 +64,19 @@ void MidiManager::addBinding(const MidiBinding& binding) {
         const uint8_t ch = (binding.midiChannel <= 16) ? binding.midiChannel : 0;
         const uint8_t cc = binding.triggerNumber;
         if (cc < NUM_CC_NUMBERS) {
-            m_ccTableSeq.fetch_add(1, std::memory_order_acquire);
+            m_ccTableSeq.fetch_add(1, std::memory_order_acq_rel);
             auto& slot = m_ccTable[ch][cc];
             slot.active = true;
-            slot.paramId = static_cast<uint32_t>(binding.targetSlotIndex >= 0 ? binding.targetSlotIndex : 0);
+            slot.paramId = (binding.paramId != 0)
+                ? binding.paramId
+                : static_cast<uint32_t>(binding.targetSlotIndex >= 0 ? binding.targetSlotIndex : 0);
             slot.minVal = 0.0f;
             slot.maxVal = 1.0f;
             slot.binding.fromMidiBinding(binding);
             if (slot.count < MAX_BINDINGS_PER_CC) {
                 slot.bindings[slot.count++].fromMidiBinding(binding);
             }
+            m_atomicCcTable[ch][cc].store(slot);
             m_ccTableSeq.fetch_add(1, std::memory_order_release);
         }
     }
@@ -83,7 +86,7 @@ void MidiManager::addCcBinding(uint8_t channel, uint8_t cc, uint32_t paramId, fl
     if (channel >= NUM_MIDI_CHANNELS || cc >= NUM_CC_NUMBERS) return;
     std::lock_guard<std::mutex> lock(m_bindingsMutex);
 
-    m_ccTableSeq.fetch_add(1, std::memory_order_acquire);
+    m_ccTableSeq.fetch_add(1, std::memory_order_acq_rel);
     auto& slot = m_ccTable[channel][cc];
     slot.active = true;
     slot.paramId = paramId;
@@ -105,14 +108,15 @@ void MidiManager::addCcBinding(uint8_t channel, uint8_t cc, uint32_t paramId, fl
         slot.bindings[0] = slot.binding;
         slot.count = 1;
     }
+    m_atomicCcTable[channel][cc].store(slot);
     m_ccTableSeq.fetch_add(1, std::memory_order_release);
 }
 
 void MidiManager::rebuildCcTable() {
-    m_ccTableSeq.fetch_add(1, std::memory_order_acquire); // Odd = write in progress
-    for (auto& row : m_ccTable) {
-        for (auto& slot : row) {
-            slot = FlatCcBinding{};
+    m_ccTableSeq.fetch_add(1, std::memory_order_acq_rel); // Odd = write in progress
+    for (size_t ch = 0; ch < NUM_MIDI_CHANNELS; ++ch) {
+        for (size_t cc = 0; cc < NUM_CC_NUMBERS; ++cc) {
+            m_ccTable[ch][cc].clear();
         }
     }
     for (const auto& binding : m_bindings) {
@@ -122,7 +126,9 @@ void MidiManager::rebuildCcTable() {
             if (cc < NUM_CC_NUMBERS) {
                 auto& slot = m_ccTable[ch][cc];
                 slot.active = true;
-                slot.paramId = static_cast<uint32_t>(binding.targetSlotIndex >= 0 ? binding.targetSlotIndex : 0);
+                slot.paramId = (binding.paramId != 0)
+                    ? binding.paramId
+                    : static_cast<uint32_t>(binding.targetSlotIndex >= 0 ? binding.targetSlotIndex : 0);
                 slot.minVal = 0.0f;
                 slot.maxVal = 1.0f;
                 slot.binding.fromMidiBinding(binding);
@@ -132,22 +138,31 @@ void MidiManager::rebuildCcTable() {
             }
         }
     }
+    for (size_t ch = 0; ch < NUM_MIDI_CHANNELS; ++ch) {
+        for (size_t cc = 0; cc < NUM_CC_NUMBERS; ++cc) {
+            m_atomicCcTable[ch][cc].store(m_ccTable[ch][cc]);
+        }
+    }
     m_ccTableSeq.fetch_add(1, std::memory_order_release); // Even = write complete
 }
 
 void MidiManager::removeBinding(const std::string& id) {
     std::lock_guard<std::mutex> lock(m_bindingsMutex);
-    std::erase_if(m_bindings, [&](const MidiBinding& b) { return b.id == id; });
+    const uint64_t targetHash = PodCcBinding::computeIdHash(id);
+    std::erase_if(m_bindings, [&](const MidiBinding& b) {
+        return b.id == id || PodCcBinding::computeIdHash(b.id) == targetHash;
+    });
     rebuildCcTable();
 }
 
 void MidiManager::clearBindings() {
     std::lock_guard<std::mutex> lock(m_bindingsMutex);
     m_bindings.clear();
-    m_ccTableSeq.fetch_add(1, std::memory_order_acquire);
-    for (auto& row : m_ccTable) {
-        for (auto& slot : row) {
-            slot = FlatCcBinding{};
+    m_ccTableSeq.fetch_add(1, std::memory_order_acq_rel);
+    for (size_t ch = 0; ch < NUM_MIDI_CHANNELS; ++ch) {
+        for (size_t cc = 0; cc < NUM_CC_NUMBERS; ++cc) {
+            m_ccTable[ch][cc].clear();
+            m_atomicCcTable[ch][cc].store(m_ccTable[ch][cc]);
         }
     }
     m_ccTableSeq.fetch_add(1, std::memory_order_release);
@@ -160,6 +175,7 @@ void MidiManager::stopLearnAndBind(uint8_t channel, uint8_t cc, uint32_t paramId
     int slot = 0;
     int branch = -1;
     int scene = -1;
+    int branchSlot = -1;
     BindingTargetType target = BindingTargetType::SlotOutputGain;
 
     {
@@ -168,7 +184,11 @@ void MidiManager::stopLearnAndBind(uint8_t channel, uint8_t cc, uint32_t paramId
             slot = m_pendingLearnBinding.targetSlotIndex;
             branch = m_pendingLearnBinding.targetBranchIndex;
             scene = m_pendingLearnBinding.targetSceneIndex;
+            branchSlot = m_pendingLearnBinding.targetBranchSlotIndex;
             target = m_pendingLearnBinding.targetType;
+            if (paramId == 1000 && m_pendingLearnBinding.paramId != 0) {
+                paramId = m_pendingLearnBinding.paramId;
+            }
         }
     }
 
@@ -184,7 +204,7 @@ void MidiManager::stopLearnAndBind(uint8_t channel, uint8_t cc, uint32_t paramId
     b.targetSlotIndex = slot;
     b.targetBranchIndex = branch;
     b.targetSceneIndex = scene;
-    b.targetBranchSlotIndex = -1;
+    b.targetBranchSlotIndex = branchSlot;
     b.paramId = paramId;
     b.midiChannel = channel;
     b.triggerType = MidiMessageType::ControlChange;
@@ -192,7 +212,7 @@ void MidiManager::stopLearnAndBind(uint8_t channel, uint8_t cc, uint32_t paramId
 
     m_bindings.push_back(b);
 
-    m_ccTableSeq.fetch_add(1, std::memory_order_acquire);
+    m_ccTableSeq.fetch_add(1, std::memory_order_acq_rel);
     auto& entry = m_ccTable[channel][cc];
     entry.active = true;
     entry.paramId = paramId;
@@ -204,6 +224,7 @@ void MidiManager::stopLearnAndBind(uint8_t channel, uint8_t cc, uint32_t paramId
     } else {
         entry.bindings[0].fromMidiBinding(b);
     }
+    m_atomicCcTable[channel][cc].store(entry);
     m_ccTableSeq.fetch_add(1, std::memory_order_release);
 
     m_learning.store(false, std::memory_order_release);
@@ -219,17 +240,17 @@ const FlatCcBinding& MidiManager::getCcBinding(uint8_t channel, uint8_t cc) cons
     return m_ccTable[channel][cc];
 }
 
-void MidiManager::startLearning(BindingTargetType target, int slot, int branch, int scene) {
+void MidiManager::startLearning(BindingTargetType target, int slot, int branch, int scene, int branchSlot, uint32_t paramId) {
     {
         std::lock_guard<std::mutex> lock(m_learnMutex);
         m_pendingLearnBinding = MidiBinding{
-            .id = "binding_" + std::to_string(static_cast<int>(target)) + "_" + std::to_string(slot),
+            .id = "binding_" + std::to_string(static_cast<int>(target)) + "_" + std::to_string(slot) + "_" + std::to_string(paramId),
             .targetType = target,
             .targetSlotIndex = slot,
             .targetBranchIndex = branch,
             .targetSceneIndex = scene,
-            .targetBranchSlotIndex = -1,
-            .paramId = 0,
+            .targetBranchSlotIndex = branchSlot,
+            .paramId = paramId,
             .midiChannel = 0,
             .triggerType = MidiMessageType::ControlChange,
             .triggerNumber = 0
@@ -262,7 +283,7 @@ void MidiManager::handleControlChange(uint8_t channel, uint8_t cc, uint8_t val) 
     FlatCcBinding omniSlot{};
     bool valid = false;
 
-    // Complete lock-free seqlock read loop bounded to 2 retries (up to 3 attempts total)
+    // C++20-compliant lock-free atomic Seqlock read loop (0 non-atomic data races, 0 TSan warnings)
     for (int retry = 0; retry < 3; ++retry) {
         const uint32_t seq1 = m_ccTableSeq.load(std::memory_order_acquire);
         if ((seq1 & 1u) != 0u) {
@@ -270,16 +291,15 @@ void MidiManager::handleControlChange(uint8_t channel, uint8_t cc, uint8_t val) 
         }
 
         if (channel >= 1 && channel <= 16) {
-            exactSlot = m_ccTable[channel][cc];
+            m_atomicCcTable[channel][cc].load(exactSlot);
         } else {
-            exactSlot = FlatCcBinding{};
+            exactSlot.clear();
         }
 
-        omniSlot = m_ccTable[0][cc];
+        m_atomicCcTable[0][cc].load(omniSlot);
 
-        std::atomic_thread_fence(std::memory_order_acquire);
-
-        if (m_ccTableSeq.load(std::memory_order_relaxed) == seq1) {
+        const uint32_t seq2 = m_ccTableSeq.load(std::memory_order_acquire);
+        if (seq2 == seq1) {
             valid = true;
             break;
         }

@@ -252,9 +252,8 @@ void AudioPlayer::process(audio::AudioBufferView& output) {
     if (!m_isPlaying.load(std::memory_order_relaxed) || !m_isLoaded.load(std::memory_order_relaxed)) return;
 
     const AudioTrackBuffer* buf = m_activeBuffer.load(std::memory_order_acquire);
-    m_audioReadingBuffer.store(buf, std::memory_order_release);
-    std::atomic_thread_fence(std::memory_order_seq_cst);
-    if (buf != m_activeBuffer.load(std::memory_order_acquire)) {
+    m_audioReadingBuffer.store(buf, std::memory_order_seq_cst);
+    if (buf != m_activeBuffer.load(std::memory_order_seq_cst)) {
         // Buffer swap in flight; release hazard pointer and return wait-free
         m_audioReadingBuffer.store(nullptr, std::memory_order_release);
         return;

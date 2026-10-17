@@ -481,10 +481,8 @@ void SettingsModal::renderPluginsTab() {
                 m_scanner.addCustomSearchPath(pathStr);
                 m_scanner.scanAll();
 
-                state::AppConfig cfg;
-                cfg.load();
-                cfg.customPluginPaths = m_scanner.searchPaths();
-                cfg.save();
+                m_cachedConfig.customPluginPaths = m_scanner.searchPaths();
+                m_cachedConfig.save();
             }
         }
 #endif
@@ -513,10 +511,8 @@ void SettingsModal::renderPluginsTab() {
                 ImGui::SameLine(0, 8.0f);
                 if (CenteredButton("Remove", ImVec2(64.0f, Metrics::smallButtonHeight()))) {
                     m_scanner.removeCustomSearchPath(i);
-                    state::AppConfig cfg;
-                    cfg.load();
-                    cfg.customPluginPaths = m_scanner.searchPaths();
-                    cfg.save();
+                    m_cachedConfig.customPluginPaths = m_scanner.searchPaths();
+                    m_cachedConfig.save();
                     ImGui::PopID();
                     break;
                 }
@@ -596,10 +592,8 @@ void SettingsModal::renderThemeTab() {
         if (ImGui::InvisibleButton("##ThemePreviewCard", ImVec2(cardW, cardH))) {
             applyTheme(static_cast<ThemeId>(i));
             themeIdx = i;
-            state::AppConfig cfg;
-            cfg.load();
-            cfg.themeId = i;
-            cfg.save();
+            m_cachedConfig.themeId = i;
+            m_cachedConfig.save();
         }
         const bool isSelected = (themeIdx == i);
         const bool hovered = ImGui::IsItemHovered();

@@ -31,7 +31,8 @@ public:
 
     static constexpr size_t MAX_PARAMS = 1024;
     static constexpr size_t BITMASK_WORDS = MAX_PARAMS / 64; // 16 words
-    static constexpr size_t OVERFLOW_CAPACITY = 64;
+    static constexpr size_t OVERFLOW_CAPACITY = 512;
+    static constexpr size_t OVERFLOW_WORDS = OVERFLOW_CAPACITY / 64; // 8 words
     static constexpr size_t OVERFLOW_MASK = OVERFLOW_CAPACITY - 1;
 
     ParamAutomationRegister() noexcept {
@@ -57,7 +58,9 @@ public:
         for (size_t i = 0; i < MAX_PARAMS; ++i) {
             m_values[i].store(0.0f, std::memory_order_relaxed);
         }
-        m_overflowDirtyMask.store(0ULL, std::memory_order_relaxed);
+        for (size_t w = 0; w < OVERFLOW_WORDS; ++w) {
+            m_overflowDirtyMask[w].store(0ULL, std::memory_order_relaxed);
+        }
         for (size_t s = 0; s < OVERFLOW_CAPACITY; ++s) {
             m_overflowTable[s].packed.store(0ULL, std::memory_order_relaxed);
         }
@@ -84,72 +87,29 @@ public:
             return;
         }
 
-        // Lock-free CAS overflow table for arbitrary 32-bit parameter IDs
+        // Lock-free linear-probing CAS overflow table for arbitrary 32-bit parameter IDs (>= 1024).
+        // Never evicts active keys out of probe order so getParameter() and concurrent writers remain 100% lossless.
         const uint64_t newPacked = packEntry(paramId, value);
         const size_t startSlot = hashParamId(paramId);
 
-        size_t emptySlot = OVERFLOW_CAPACITY;
-        size_t cleanSlot = OVERFLOW_CAPACITY;
-
         for (size_t probe = 0; probe < OVERFLOW_CAPACITY; ++probe) {
             const size_t slot = (startSlot + probe) & OVERFLOW_MASK;
-            uint64_t cur = m_overflowTable[slot].packed.load(std::memory_order_relaxed);
+            const size_t wordIdx = slot / 64;
+            const uint64_t bitMask = 1ULL << (slot % 64);
 
-            // 1. If slot already belongs to this paramId, update value with CAS loop (coalescing)
-            if (unpackParamId(cur) == paramId) {
-                while (unpackParamId(cur) == paramId) {
-                    if (m_overflowTable[slot].packed.compare_exchange_weak(
-                            cur, newPacked, std::memory_order_release, std::memory_order_relaxed)) {
-                        m_overflowDirtyMask.fetch_or(1ULL << slot, std::memory_order_release);
-                        return;
-                    }
+            uint64_t cur = m_overflowTable[slot].packed.load(std::memory_order_acquire);
+            while (true) {
+                if (cur != 0ULL && unpackParamId(cur) != paramId) {
+                    // Slot belongs to a different parameter ID; continue linear probe
+                    break;
                 }
-            }
-
-            // 2. Track first empty slot
-            if (cur == 0ULL && emptySlot == OVERFLOW_CAPACITY) {
-                emptySlot = slot;
-            }
-
-            // 3. Track first clean (already drained) slot for recycling if table is full
-            if (cleanSlot == OVERFLOW_CAPACITY && cur != 0ULL) {
-                const uint64_t mask = m_overflowDirtyMask.load(std::memory_order_relaxed);
-                if ((mask & (1ULL << slot)) == 0ULL) {
-                    cleanSlot = slot;
-                }
-            }
-        }
-
-        // Try claiming empty slot
-        if (emptySlot != OVERFLOW_CAPACITY) {
-            uint64_t expected = 0ULL;
-            if (m_overflowTable[emptySlot].packed.compare_exchange_strong(
-                    expected, newPacked, std::memory_order_release, std::memory_order_relaxed)) {
-                m_overflowDirtyMask.fetch_or(1ULL << emptySlot, std::memory_order_release);
-                return;
-            }
-            if (unpackParamId(expected) == paramId) {
-                m_overflowTable[emptySlot].packed.store(newPacked, std::memory_order_release);
-                m_overflowDirtyMask.fetch_or(1ULL << emptySlot, std::memory_order_release);
-                return;
-            }
-        }
-
-        // If no empty slot, recycle clean slot
-        if (cleanSlot != OVERFLOW_CAPACITY) {
-            uint64_t expected = m_overflowTable[cleanSlot].packed.load(std::memory_order_relaxed);
-            if ((m_overflowDirtyMask.load(std::memory_order_relaxed) & (1ULL << cleanSlot)) == 0ULL) {
-                if (m_overflowTable[cleanSlot].packed.compare_exchange_strong(
-                        expected, newPacked, std::memory_order_release, std::memory_order_relaxed)) {
-                    m_overflowDirtyMask.fetch_or(1ULL << cleanSlot, std::memory_order_release);
+                if (m_overflowTable[slot].packed.compare_exchange_weak(
+                        cur, newPacked, std::memory_order_acq_rel, std::memory_order_acquire)) {
+                    m_overflowDirtyMask[wordIdx].fetch_or(bitMask, std::memory_order_release);
                     return;
                 }
             }
         }
-
-        // Fallback: overwrite startSlot wait-free
-        m_overflowTable[startSlot].packed.store(newPacked, std::memory_order_release);
-        m_overflowDirtyMask.fetch_or(1ULL << startSlot, std::memory_order_release);
     }
 
     /**
@@ -165,7 +125,10 @@ public:
         for (size_t probe = 0; probe < OVERFLOW_CAPACITY; ++probe) {
             const size_t slot = (startSlot + probe) & OVERFLOW_MASK;
             const uint64_t entry = m_overflowTable[slot].packed.load(std::memory_order_relaxed);
-            if (entry != 0ULL && unpackParamId(entry) == paramId) {
+            if (entry == 0ULL) {
+                break;
+            }
+            if (unpackParamId(entry) == paramId) {
                 return unpackValue(entry);
             }
         }
@@ -181,7 +144,12 @@ public:
                 return true;
             }
         }
-        return m_overflowDirtyMask.load(std::memory_order_relaxed) != 0ULL;
+        for (size_t w = 0; w < OVERFLOW_WORDS; ++w) {
+            if (m_overflowDirtyMask[w].load(std::memory_order_relaxed) != 0ULL) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -194,15 +162,17 @@ public:
             return (m_dirtyMask[wordIdx].load(std::memory_order_relaxed) & bitMask) != 0ULL;
         }
 
-        const uint64_t dirtyMask = m_overflowDirtyMask.load(std::memory_order_relaxed);
-        if (dirtyMask == 0ULL) return false;
-
         const size_t startSlot = hashParamId(paramId);
         for (size_t probe = 0; probe < OVERFLOW_CAPACITY; ++probe) {
             const size_t slot = (startSlot + probe) & OVERFLOW_MASK;
-            const uint64_t entry = m_overflowTable[slot].packed.load(std::memory_order_relaxed);
-            if (entry != 0ULL && unpackParamId(entry) == paramId) {
-                return (dirtyMask & (1ULL << slot)) != 0ULL;
+            const uint64_t entry = m_overflowTable[slot].packed.load(std::memory_order_acquire);
+            if (entry == 0ULL) {
+                break;
+            }
+            if (unpackParamId(entry) == paramId) {
+                const size_t wordIdx = slot / 64;
+                const uint64_t bitMask = 1ULL << (slot % 64);
+                return (m_overflowDirtyMask[wordIdx].load(std::memory_order_relaxed) & bitMask) != 0ULL;
             }
         }
         return false;
@@ -230,16 +200,19 @@ public:
             }
         }
 
-        uint64_t overflowDirty = m_overflowDirtyMask.exchange(0ULL, std::memory_order_acq_rel);
-        while (overflowDirty != 0ULL) {
-            const unsigned long slot = countTrailingZeros64(overflowDirty);
-            const uint64_t entry = m_overflowTable[slot].packed.load(std::memory_order_acquire);
-            if (entry != 0ULL) {
-                const uint32_t paramId = unpackParamId(entry);
-                const float val = unpackValue(entry);
-                callback(paramId, val);
+        for (size_t w = 0; w < OVERFLOW_WORDS; ++w) {
+            uint64_t overflowDirty = m_overflowDirtyMask[w].exchange(0ULL, std::memory_order_acq_rel);
+            while (overflowDirty != 0ULL) {
+                const unsigned long bitIdx = countTrailingZeros64(overflowDirty);
+                const size_t slot = w * 64 + bitIdx;
+                const uint64_t entry = m_overflowTable[slot].packed.load(std::memory_order_acquire);
+                if (entry != 0ULL) {
+                    const uint32_t paramId = unpackParamId(entry);
+                    const float val = unpackValue(entry);
+                    callback(paramId, val);
+                }
+                overflowDirty &= overflowDirty - 1ULL;
             }
-            overflowDirty &= overflowDirty - 1ULL;
         }
     }
 
@@ -282,7 +255,7 @@ private:
     // Cache-line aligned members to eliminate false sharing between cores
     alignas(64) std::array<std::atomic<uint64_t>, BITMASK_WORDS> m_dirtyMask;
     alignas(64) std::array<std::atomic<float>, MAX_PARAMS> m_values;
-    alignas(64) std::atomic<uint64_t> m_overflowDirtyMask{0};
+    alignas(64) std::array<std::atomic<uint64_t>, OVERFLOW_WORDS> m_overflowDirtyMask{};
     alignas(64) std::array<OverflowEntry, OVERFLOW_CAPACITY> m_overflowTable;
 };
 

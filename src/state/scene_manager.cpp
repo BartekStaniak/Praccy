@@ -101,10 +101,6 @@ static void applyPresetToSlot(const PluginSlotPreset& sp,
 
     if (allowBinaryStateReload && !sp.state.empty() && inner) {
         inner->loadState(sp.state);
-    } else if (!sp.paramValues.empty() && inner) {
-        for (const auto& pv : sp.paramValues) {
-            inner->setParameterValue(pv.paramId, pv.value);
-        }
     }
 
     if (!sp.paramValues.empty()) {
@@ -154,9 +150,6 @@ static void applyPresetToSlot(const PluginSlotPreset& sp,
 
             if (sm.bound) {
                 slot->setParameter(mb.paramId, mb.value);
-                if (inner) {
-                    inner->setParameterValue(mb.paramId, mb.value);
-                }
             } else if (sm.isSlotTrim) {
                 sm.currentValue = slot->outputGainDb();
             } else if (sm.isSlotMix) {
@@ -409,12 +402,11 @@ bool SceneManager::canApplyInPlace(const ScenePreset& scene, audio::GraphEngine&
                                    dynamic_cast<plugins::ClapPluginInstance*>(inner) != nullptr ||
                                    sp.type == "VST3" || sp.type == "CLAP");
         if (isThirdParty) {
-            // F-02: Live UI-thread loadState() races with audio-thread process().
-            // For third-party VST3 or CLAP plugins, only allow in-place update if
-            // sp.state matches the currently loaded binary chunk (or is empty).
+            // F-02: Compare cached 64-bit FNV-1a state hash without calling inner->saveState() on live plugins.
             if (!sp.state.empty()) {
-                const auto currentState = inner->saveState();
-                if (currentState != sp.state) {
+                const uint64_t targetHash = plugins::IPluginInstance::computeStateHash(sp.state);
+                const uint64_t currentHash = inner->lastStateHash();
+                if (currentHash != 0ULL && currentHash != targetHash) {
                     return false;
                 }
             }
@@ -844,6 +836,14 @@ static void serializePreset(std::ostream& os, const ScenePreset& p, const std::s
             if (!node.slot.state.empty()) {
                 os << "node_" << n << "_state=" << bytesToHex(node.slot.state) << "\n";
             }
+            if (!node.slot.paramValues.empty()) {
+                os << "node_" << n << "_params=";
+                for (size_t p = 0; p < node.slot.paramValues.size(); ++p) {
+                    if (p > 0) os << ";";
+                    os << node.slot.paramValues[p].paramId << ":" << node.slot.paramValues[p].value;
+                }
+                os << "\n";
+            }
             os << "node_" << n << "_numMacros=" << node.slot.macros.size() << "\n";
             for (size_t m = 0; m < node.slot.macros.size(); ++m) {
                 const auto& mb = node.slot.macros[m];
@@ -883,6 +883,14 @@ static void serializePreset(std::ostream& os, const ScenePreset& p, const std::s
                     if (!sl.clapId.empty()) os << "node_" << n << "_b_" << b << "_s_" << s << "_clapId=" << praccy::utils::escapeIniField(sl.clapId) << "\n";
                     if (!sl.state.empty()) {
                         os << "node_" << n << "_b_" << b << "_s_" << s << "_state=" << bytesToHex(sl.state) << "\n";
+                    }
+                    if (!sl.paramValues.empty()) {
+                        os << "node_" << n << "_b_" << b << "_s_" << s << "_params=";
+                        for (size_t p = 0; p < sl.paramValues.size(); ++p) {
+                            if (p > 0) os << ";";
+                            os << sl.paramValues[p].paramId << ":" << sl.paramValues[p].value;
+                        }
+                        os << "\n";
                     }
                     os << "node_" << n << "_b_" << b << "_s_" << s << "_numMacros=" << sl.macros.size() << "\n";
                     for (size_t m = 0; m < sl.macros.size(); ++m) {
@@ -952,6 +960,27 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
         }
     }
 
+    auto parseParamValues = [](const std::unordered_map<std::string, std::string>& kv,
+                               const std::string& pfx,
+                               std::vector<PluginSlotPreset::ParamValue>& outParams) {
+        auto it = kv.find(pfx + "params");
+        if (it == kv.end() || it->second.empty()) return;
+        std::string_view sv(it->second);
+        size_t pos = 0;
+        while (pos < sv.size()) {
+            size_t semi = sv.find(';', pos);
+            std::string_view token = (semi == std::string_view::npos) ? sv.substr(pos) : sv.substr(pos, semi - pos);
+            size_t colon = token.find(':');
+            if (colon != std::string_view::npos) {
+                uint32_t pid = praccy::utils::parseInteger<uint32_t>(token.substr(0, colon), 0);
+                float pval = praccy::utils::parseFloat(token.substr(colon + 1), 0.0f);
+                outParams.push_back(PluginSlotPreset::ParamValue{pid, pval});
+            }
+            if (semi == std::string_view::npos) break;
+            pos = semi + 1;
+        }
+    };
+
     auto parseMacros = [](const std::unordered_map<std::string, std::string>& kv,
                           const std::string& pfx,
                           std::vector<PluginSlotPreset::MacroBinding>& outMacros) {
@@ -1000,6 +1029,7 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
                 if (kv.count(pfx + "state")) {
                     np.slot.state = hexToBytes(kv.at(pfx + "state"));
                 }
+                parseParamValues(kv, pfx, np.slot.paramValues);
                 parseMacros(kv, pfx, np.slot.macros);
             } else {
                 np.kind = NodePreset::Kind::ParallelBlock;
@@ -1032,6 +1062,7 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
                         if (kv.count(spfx + "state")) {
                             sl.state = hexToBytes(kv.at(spfx + "state"));
                         }
+                        parseParamValues(kv, spfx, sl.paramValues);
                         parseMacros(kv, spfx, sl.macros);
                         bp.slots.push_back(std::move(sl));
                     }
@@ -1043,8 +1074,23 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
         return sp;
     };
 
+    bool hasValidPresetSections = false;
+    for (const auto& [secName, _] : sections) {
+        if (secName.rfind("Scene_", 0) == 0 || secName.rfind("UserPreset_", 0) == 0) {
+            hasValidPresetSections = true;
+            break;
+        }
+    }
+    if (!hasValidPresetSections) {
+        if (m_scenes.empty()) {
+            initializeDefaultScenes();
+            initializeDefaultUserPresets();
+        }
+        return false;
+    }
+
     m_scenes.clear();
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 8; ++i) {
         std::string sec = "Scene_" + std::to_string(i);
         if (sections.count(sec)) {
             m_scenes.push_back(parsePreset(sections[sec]));

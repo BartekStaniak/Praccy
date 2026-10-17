@@ -43,3 +43,6 @@ Testing/
 *.patch
 run_audio.log
 test_archive_sandbox_legit/
+
+# Internal audit/agent directives
+*swarm*directive*.md

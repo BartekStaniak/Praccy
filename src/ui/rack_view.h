@@ -172,6 +172,7 @@ private:
         int blockIndex{-1};
         int branchIndex{-1};
         int branchSlotIndex{-1};
+        int macroIndex{-1};
         uint32_t targetType{0};
         uint32_t paramId{0};
         std::string targetLabel;

@@ -27,23 +27,31 @@ void QuickLooper::prepare(double sampleRate, uint32_t maxSeconds, uint32_t maxBl
     }
     (void)maxBlockSize;
 
-    m_sampleRate = sampleRate;
-    m_maxFrames = static_cast<size_t>(sampleRate * static_cast<double>(maxSeconds));
+    const size_t maxFrames = static_cast<size_t>(sampleRate * static_cast<double>(maxSeconds));
+    m_sampleRate.store(sampleRate, std::memory_order_relaxed);
+    m_maxFrames.store(maxFrames, std::memory_order_relaxed);
     try {
-        m_loopBufferL.assign(m_maxFrames, 0.0f);
-        m_loopBufferR.assign(m_maxFrames, 0.0f);
-        m_undoBufferL.assign(m_maxFrames, 0.0f);
-        m_undoBufferR.assign(m_maxFrames, 0.0f);
-        m_redoBufferL.assign(m_maxFrames, 0.0f);
-        m_redoBufferR.assign(m_maxFrames, 0.0f);
+        m_loopBufferL.assign(maxFrames, 0.0f);
+        m_loopBufferR.assign(maxFrames, 0.0f);
+        m_undoBufferL.assign(maxFrames, 0.0f);
+        m_undoBufferR.assign(maxFrames, 0.0f);
+        m_redoBufferL.assign(maxFrames, 0.0f);
+        m_redoBufferR.assign(maxFrames, 0.0f);
+        const size_t numBlocks = (maxFrames + kUndoBlockSize - 1) / kUndoBlockSize;
+        const size_t maskWords = (numBlocks + 63) / 64;
+        m_overdubbedBlockMask.assign(maskWords, 0ULL);
+        m_overdubbedBlockList.clear();
+        m_overdubbedBlockList.reserve(numBlocks);
     } catch (const std::bad_alloc&) {
-        m_maxFrames = 0;
+        m_maxFrames.store(0, std::memory_order_relaxed);
         m_loopBufferL.clear();
         m_loopBufferR.clear();
         m_undoBufferL.clear();
         m_undoBufferR.clear();
         m_redoBufferL.clear();
         m_redoBufferR.clear();
+        m_overdubbedBlockMask.clear();
+        m_overdubbedBlockList.clear();
     }
     m_cmdWriteHead.store(0, std::memory_order_relaxed);
     m_cmdReadHead.store(0, std::memory_order_relaxed);
@@ -163,7 +171,9 @@ void QuickLooper::executeCommand(LooperCommand cmd) {
                     break;
 
                 case LooperState::Playing: {
-                    // Switch to Overdubbing: mark undo ready (samples backed up sample-by-sample in process)
+                    // Switch to Overdubbing: reset block dirty mask so each touched 256-sample block is backed up once
+                    std::fill(m_overdubbedBlockMask.begin(), m_overdubbedBlockMask.end(), 0ULL);
+                    m_overdubbedBlockList.clear();
                     m_canUndo.store(true, std::memory_order_relaxed);
                     m_canRedo.store(false, std::memory_order_relaxed);
                     m_state.store(LooperState::Overdubbing, std::memory_order_relaxed);
@@ -179,18 +189,40 @@ void QuickLooper::executeCommand(LooperCommand cmd) {
         }
         case LooperCommand::Undo: {
             if (!m_canUndo.load(std::memory_order_relaxed)) break;
-            // O(1) buffer swaps
-            m_loopBufferL.swap(m_undoBufferL);
-            m_loopBufferR.swap(m_undoBufferR);
+            // If currently overdubbing, exit to Playing so undo snapshot stays consistent
+            if (m_state.load(std::memory_order_relaxed) == LooperState::Overdubbing) {
+                m_state.store(LooperState::Playing, std::memory_order_relaxed);
+            }
+            const size_t maxBuf = std::min(m_loopBufferL.size(), m_undoBufferL.size());
+            for (const size_t blk : m_overdubbedBlockList) {
+                const size_t start = blk * kUndoBlockSize;
+                if (start >= maxBuf) continue;
+                const size_t end = std::min(start + kUndoBlockSize, maxBuf);
+                std::swap_ranges(m_loopBufferL.begin() + static_cast<std::ptrdiff_t>(start),
+                                 m_loopBufferL.begin() + static_cast<std::ptrdiff_t>(end),
+                                 m_undoBufferL.begin() + static_cast<std::ptrdiff_t>(start));
+                std::swap_ranges(m_loopBufferR.begin() + static_cast<std::ptrdiff_t>(start),
+                                 m_loopBufferR.begin() + static_cast<std::ptrdiff_t>(end),
+                                 m_undoBufferR.begin() + static_cast<std::ptrdiff_t>(start));
+            }
             m_canUndo.store(false, std::memory_order_relaxed);
             m_canRedo.store(true, std::memory_order_relaxed);
             break;
         }
         case LooperCommand::Redo: {
             if (!m_canRedo.load(std::memory_order_relaxed)) break;
-            // O(1) buffer swaps back
-            m_loopBufferL.swap(m_undoBufferL);
-            m_loopBufferR.swap(m_undoBufferR);
+            const size_t maxBuf = std::min(m_loopBufferL.size(), m_undoBufferL.size());
+            for (const size_t blk : m_overdubbedBlockList) {
+                const size_t start = blk * kUndoBlockSize;
+                if (start >= maxBuf) continue;
+                const size_t end = std::min(start + kUndoBlockSize, maxBuf);
+                std::swap_ranges(m_loopBufferL.begin() + static_cast<std::ptrdiff_t>(start),
+                                 m_loopBufferL.begin() + static_cast<std::ptrdiff_t>(end),
+                                 m_undoBufferL.begin() + static_cast<std::ptrdiff_t>(start));
+                std::swap_ranges(m_loopBufferR.begin() + static_cast<std::ptrdiff_t>(start),
+                                 m_loopBufferR.begin() + static_cast<std::ptrdiff_t>(end),
+                                 m_undoBufferR.begin() + static_cast<std::ptrdiff_t>(start));
+            }
             m_canUndo.store(true, std::memory_order_relaxed);
             m_canRedo.store(false, std::memory_order_relaxed);
             break;
@@ -283,8 +315,9 @@ int QuickLooper::currentBar() const noexcept {
 }
 
 double QuickLooper::loopLengthSeconds() const noexcept {
-    if (!std::isfinite(m_sampleRate) || m_sampleRate <= 0.0) return 0.0;
-    return static_cast<double>(m_loopLength.load(std::memory_order_relaxed)) / m_sampleRate;
+    const double sr = m_sampleRate.load(std::memory_order_relaxed);
+    if (!std::isfinite(sr) || sr <= 0.0) return 0.0;
+    return static_cast<double>(m_loopLength.load(std::memory_order_relaxed)) / sr;
 }
 
 float QuickLooper::playheadNormalized() const noexcept {
@@ -331,12 +364,18 @@ void QuickLooper::process(const audio::AudioBufferView& in, audio::AudioBufferVi
         }
     } stateGuard(m_stateLock);
 
-    if (stateGuard.acquired) {
-        drainCommands();
+    if (!stateGuard.acquired) {
+        // UI thread holds m_stateLock (e.g. swapping WAV buffers); never touch m_loopBufferL/R unlocked
+        if (out.numChannels() > 0 && in.numChannels() > 0 && out.channel(0) != in.channel(0)) {
+            out.copyFrom(in);
+        }
+        return;
     }
+    drainCommands();
 
     LooperState s = m_state.load(std::memory_order_relaxed);
-    if (s == LooperState::Empty || s == LooperState::Stopped) return;
+    const size_t maxFrames = m_maxFrames.load(std::memory_order_relaxed);
+    if (s == LooperState::Empty || s == LooperState::Stopped || maxFrames == 0) return;
 
     const uint32_t numSamples = out.numSamples();
     float* outL = out.channel(0);
@@ -351,20 +390,20 @@ void QuickLooper::process(const audio::AudioBufferView& in, audio::AudioBufferVi
     if (s == LooperState::Recording) {
         // Record incoming audio into loop buffer
         for (uint32_t i = 0; i < numSamples; ++i) {
-            if (curHead < m_maxFrames) {
+            if (curHead < maxFrames && curHead < m_loopBufferL.size()) {
                 m_loopBufferL[curHead] = inL ? inL[i] : 0.0f;
                 m_loopBufferR[curHead] = inR ? inR[i] : (inL ? inL[i] : 0.0f);
                 curHead++;
             } else {
                 // Auto-close loop if max duration reached
-                m_loopLength.store(m_maxFrames, std::memory_order_relaxed);
+                m_loopLength.store(maxFrames, std::memory_order_relaxed);
                 m_state.store(LooperState::Playing, std::memory_order_relaxed);
                 curHead = 0;
                 break;
             }
         }
     } else if (s == LooperState::Playing || s == LooperState::Overdubbing) {
-        if (curLen == 0) return;
+        if (curLen == 0 || m_loopBufferL.empty()) return;
 
         for (uint32_t i = 0; i < numSamples; ++i) {
             if (curHead >= curLen) {
@@ -375,11 +414,20 @@ void QuickLooper::process(const audio::AudioBufferView& in, audio::AudioBufferVi
             outL[i] += m_loopBufferL[curHead] * vol;
             outR[i] += m_loopBufferR[curHead] * vol;
 
-            // If overdubbing, copy pre-overdub sample sample-by-sample and accumulate incoming guitar
+            // If overdubbing, back up each 256-sample block at most once per overdub session
             if (s == LooperState::Overdubbing) {
-                if (curHead < m_undoBufferL.size() && curHead < m_undoBufferR.size()) {
-                    m_undoBufferL[curHead] = m_loopBufferL[curHead];
-                    m_undoBufferR[curHead] = m_loopBufferR[curHead];
+                const size_t blkIdx = curHead / kUndoBlockSize;
+                const size_t wordIdx = blkIdx / 64;
+                const uint64_t bitMask = 1ULL << (blkIdx % 64);
+                if (wordIdx < m_overdubbedBlockMask.size() && (m_overdubbedBlockMask[wordIdx] & bitMask) == 0ULL) {
+                    m_overdubbedBlockMask[wordIdx] |= bitMask;
+                    if (m_overdubbedBlockList.size() < m_overdubbedBlockList.capacity()) {
+                        m_overdubbedBlockList.push_back(blkIdx);
+                    }
+                    const size_t blkStart = blkIdx * kUndoBlockSize;
+                    const size_t copyCount = std::min(kUndoBlockSize, m_loopBufferL.size() - blkStart);
+                    std::memcpy(&m_undoBufferL[blkStart], &m_loopBufferL[blkStart], copyCount * sizeof(float));
+                    std::memcpy(&m_undoBufferR[blkStart], &m_loopBufferR[blkStart], copyCount * sizeof(float));
                 }
                 float addL = inL ? inL[i] : 0.0f;
                 float addR = inR ? inR[i] : addL;
@@ -402,15 +450,18 @@ bool QuickLooper::loadWavFile(const std::string& filePath) {
             return false;
         }
 
-        if (m_maxFrames == 0) {
-            prepare(m_sampleRate > 0.0 ? m_sampleRate : 48000.0, 60);
+        if (m_maxFrames.load(std::memory_order_relaxed) == 0) {
+            const double srInit = m_sampleRate.load(std::memory_order_relaxed);
+            prepare(srInit > 0.0 ? srInit : 48000.0, 60);
         }
+        const double sr = m_sampleRate.load(std::memory_order_relaxed);
+        const size_t maxFrames = m_maxFrames.load(std::memory_order_relaxed);
 
         // Resample if needed
         std::vector<float> finalL;
         std::vector<float> finalR;
-        if (wavData.sampleRate != static_cast<uint32_t>(m_sampleRate) && wavData.sampleRate > 0) {
-            double ratio = m_sampleRate / static_cast<double>(wavData.sampleRate);
+        if (wavData.sampleRate != static_cast<uint32_t>(sr) && wavData.sampleRate > 0) {
+            double ratio = sr / static_cast<double>(wavData.sampleRate);
             size_t targetFrames = static_cast<size_t>(static_cast<double>(wavData.numFrames) * ratio);
             finalL.resize(targetFrames);
             finalR.resize(targetFrames);
@@ -429,12 +480,12 @@ bool QuickLooper::loadWavFile(const std::string& filePath) {
             finalR = std::move(wavData.samplesR);
         }
 
-        size_t copyFrames = std::min(finalL.size(), m_maxFrames);
+        size_t copyFrames = std::min(finalL.size(), maxFrames);
         if (copyFrames == 0) return false;
 
-        // Ensure finalL and finalR are sized to m_maxFrames on caller thread
-        finalL.resize(m_maxFrames, 0.0f);
-        finalR.resize(m_maxFrames, 0.0f);
+        // Ensure finalL and finalR are sized to maxFrames on caller thread
+        finalL.resize(maxFrames, 0.0f);
+        finalR.resize(maxFrames, 0.0f);
 
         // Hand over to the looper under m_stateLock
         {

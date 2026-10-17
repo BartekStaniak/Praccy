@@ -44,7 +44,7 @@ public:
 
     [[nodiscard]] const FlatCcBinding& getCcBinding(uint8_t channel, uint8_t cc) const noexcept;
 
-    void startLearning(BindingTargetType target, int slot = -1, int branch = -1, int scene = -1);
+    void startLearning(BindingTargetType target, int slot = -1, int branch = -1, int scene = -1, int branchSlot = -1, uint32_t paramId = 0);
     void cancelLearning();
     [[nodiscard]] bool isLearning() const noexcept { return m_learning.load(std::memory_order_relaxed); }
 
@@ -67,9 +67,32 @@ public:
     /// Flat O(1) lookup table: [0..16][0..127] where index 0 = Omni, 1..16 = Ch 1..16
     FlatCcBinding m_ccTable[NUM_MIDI_CHANNELS][NUM_CC_NUMBERS]{};
 
+    struct AtomicCcSlot {
+        static constexpr size_t NUM_WORDS = (sizeof(FlatCcBinding) + sizeof(uint64_t) - 1) / sizeof(uint64_t);
+        std::array<std::atomic<uint64_t>, NUM_WORDS> words{};
+
+        void store(const FlatCcBinding& src) noexcept {
+            alignas(8) uint64_t raw[NUM_WORDS]{};
+            std::memcpy(raw, &src, sizeof(FlatCcBinding));
+            for (size_t i = 0; i < NUM_WORDS; ++i) {
+                words[i].store(raw[i], std::memory_order_relaxed);
+            }
+        }
+
+        void load(FlatCcBinding& dst) const noexcept {
+            alignas(8) uint64_t raw[NUM_WORDS]{};
+            for (size_t i = 0; i < NUM_WORDS; ++i) {
+                raw[i] = words[i].load(std::memory_order_relaxed);
+            }
+            std::memcpy(&dst, raw, sizeof(FlatCcBinding));
+        }
+    };
+
 private:
     static void CALLBACK midiInProc(HMIDIIN hMidiIn, UINT wMsg, DWORD_PTR dwInstance, DWORD_PTR dwParam1, DWORD_PTR dwParam2);
     void rebuildCcTable();
+
+    AtomicCcSlot m_atomicCcTable[NUM_MIDI_CHANNELS][NUM_CC_NUMBERS]{};
 
     HMIDIIN m_handle{nullptr};
     uint32_t m_currentDeviceId{0};

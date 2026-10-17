@@ -71,6 +71,24 @@ public:
     [[nodiscard]] virtual std::vector<uint8_t> saveState() const = 0;
     virtual bool loadState(const std::vector<uint8_t>& state) = 0;
 
+    [[nodiscard]] static uint64_t computeStateHash(const std::vector<uint8_t>& data) noexcept {
+        if (data.empty()) return 0ULL;
+        uint64_t hash = 14695981039346656037ULL;
+        for (uint8_t b : data) {
+            hash ^= static_cast<uint64_t>(b);
+            hash *= 1099511628211ULL;
+        }
+        return hash == 0ULL ? 1ULL : hash;
+    }
+
+    [[nodiscard]] uint64_t lastStateHash() const noexcept {
+        return m_lastStateHash.load(std::memory_order_acquire);
+    }
+
+    void updateStateHash(const std::vector<uint8_t>& state) const noexcept {
+        m_lastStateHash.store(computeStateHash(state), std::memory_order_release);
+    }
+
     // GUI parameter edit notifications (wait-free, lock-free)
     void notifyGuiParamEdited(uint32_t paramId, bool gestureEnded = false) noexcept {
         m_lastGuiEditedParamId.store(paramId, std::memory_order_relaxed);
@@ -159,6 +177,7 @@ protected:
     std::atomic<bool> m_guiGestureEnded{false};
     std::atomic<bool> m_guiEditingActive{false};
     std::atomic<uint32_t> m_lastGuiEditedParamId{0};
+    mutable std::atomic<uint64_t> m_lastStateHash{0};
 };
 
 } // namespace praccy::plugins

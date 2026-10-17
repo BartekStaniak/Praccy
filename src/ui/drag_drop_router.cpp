@@ -127,19 +127,31 @@ bool DragDropRouter::handleDrop(const std::string& path, DropContext& ctx) const
                 }
             }
             return true;
-        case DroppedFileType::Preset:
+        case DroppedFileType::Preset: {
+            std::filesystem::path p(path);
+            auto* dawAdapter = state::UniversalDawInteropManager::instance().findAdapter(p);
+            if (dawAdapter && ctx.scenes && ctx.graph) {
+                if (ctx.scanner) {
+                    return state::UniversalDawInteropManager::instance().importAndApply(p, *ctx.graph, *ctx.scenes, *ctx.scanner);
+                }
+                plugins::PluginScanner fallbackScanner;
+                return state::UniversalDawInteropManager::instance().importAndApply(p, *ctx.graph, *ctx.scenes, fallbackScanner);
+            }
             if (ctx.scenes) {
                 return ctx.scenes->loadFromFile(path);
             }
             return false;
+        }
         case DroppedFileType::SignalChain:
             if (ctx.scenes && ctx.graph) {
                 std::filesystem::path p(path);
                 auto* dawAdapter = state::UniversalDawInteropManager::instance().findAdapter(p);
                 if (dawAdapter) {
-                    plugins::PluginScanner scanner;
-                    scanner.scanSync();
-                    return state::UniversalDawInteropManager::instance().importAndApply(p, *ctx.graph, *ctx.scenes, scanner);
+                    if (ctx.scanner) {
+                        return state::UniversalDawInteropManager::instance().importAndApply(p, *ctx.graph, *ctx.scenes, *ctx.scanner);
+                    }
+                    plugins::PluginScanner fallbackScanner;
+                    return state::UniversalDawInteropManager::instance().importAndApply(p, *ctx.graph, *ctx.scenes, fallbackScanner);
                 } else {
                     ctx.scenes->loadPresetChain(p.stem().string(), *ctx.graph);
                     return true;

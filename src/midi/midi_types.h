@@ -66,7 +66,8 @@ enum class BindingTargetType {
     BranchGain,
     BranchPan,
     SceneSelect,
-    MasterVolume
+    MasterVolume,
+    PluginParameter = 10
 };
 
 struct MidiBinding {
@@ -88,7 +89,8 @@ static constexpr size_t NUM_MIDI_CHANNELS = 17; // 0 = Omni, 1..16 = Ch 1..16
 static constexpr size_t NUM_CC_NUMBERS = 128;   // CC 0..127
 
 struct PodCcBinding {
-    char id[32]{};
+    char id[16]{};
+    uint64_t idHash{0};
     BindingTargetType targetType{BindingTargetType::SlotBypass};
     int targetSlotIndex{-1};
     int targetBranchIndex{-1};
@@ -98,6 +100,19 @@ struct PodCcBinding {
     uint8_t midiChannel{0};
     MidiMessageType triggerType{MidiMessageType::ControlChange};
     uint8_t triggerNumber{0};
+
+    [[nodiscard]] static constexpr uint64_t computeIdHash(std::string_view str) noexcept {
+        uint64_t hash = 14695981039346656037ULL;
+        for (unsigned char c : str) {
+            hash ^= static_cast<uint64_t>(c);
+            hash *= 1099511628211ULL;
+        }
+        return hash;
+    }
+
+    [[nodiscard]] bool matchesId(std::string_view queryId) const noexcept {
+        return idHash != 0 && idHash == computeIdHash(queryId);
+    }
 
     [[nodiscard]] MidiBinding toMidiBinding() const {
         char ssoId[16]{};
@@ -125,10 +140,11 @@ struct PodCcBinding {
         };
     }
 
-    void fromMidiBinding(const MidiBinding& b) {
+    void fromMidiBinding(const MidiBinding& b) noexcept {
         std::memset(id, 0, sizeof(id));
+        idHash = computeIdHash(b.id);
         if (!b.id.empty() && b.id.length() <= 15) {
-            std::strncpy(id, b.id.c_str(), sizeof(id) - 1);
+            std::memcpy(id, b.id.data(), b.id.length());
         } else {
             std::snprintf(id, sizeof(id), "c%X_%X_%d_%u",
                           static_cast<unsigned>(b.midiChannel & 0x1Fu),
@@ -156,6 +172,31 @@ struct FlatCcBinding {
     uint8_t count{0};
     PodCcBinding bindings[MAX_BINDINGS_PER_CC]{};
     PodCcBinding binding{};
+
+    void clear() noexcept {
+        paramId = 0;
+        minVal = 0.0f;
+        maxVal = 1.0f;
+        active = false;
+        count = 0;
+        auto clearPod = [](PodCcBinding& b) noexcept {
+            std::memset(b.id, 0, sizeof(b.id));
+            b.idHash = 0;
+            b.targetType = BindingTargetType::SlotBypass;
+            b.targetSlotIndex = -1;
+            b.targetBranchIndex = -1;
+            b.targetSceneIndex = -1;
+            b.targetBranchSlotIndex = -1;
+            b.paramId = 0;
+            b.midiChannel = 0;
+            b.triggerType = MidiMessageType::ControlChange;
+            b.triggerNumber = 0;
+        };
+        clearPod(binding);
+        for (size_t i = 0; i < MAX_BINDINGS_PER_CC; ++i) {
+            clearPod(bindings[i]);
+        }
+    }
 };
 static_assert(std::is_trivially_copyable_v<FlatCcBinding>, "FlatCcBinding must be 100% trivially copyable");
 

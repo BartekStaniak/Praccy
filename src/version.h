@@ -1,10 +1,10 @@
 #pragma once
 
 #define PRACCY_VERSION_MAJOR 2
-#define PRACCY_VERSION_MINOR 6
+#define PRACCY_VERSION_MINOR 7
 #define PRACCY_VERSION_PATCH 0
-#define PRACCY_VERSION_BUILD 0
-#define PRACCY_VERSION_RAW   "2.6.0"
+#define PRACCY_VERSION_BUILD 1
+#define PRACCY_VERSION_RAW   "2.7-beta1"
 #define PRACCY_VERSION_STR   "v" PRACCY_VERSION_RAW
 
 #ifdef __cplusplus

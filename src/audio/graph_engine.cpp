@@ -89,13 +89,12 @@ void PluginSlot::process(AudioProcessContext& ctx) {
     auto procView = m_processBuffer.view(numSamples);
     procView.clear();
 
-    // Process through inner plugin node with non-aliasing input (innerInput) and output (procView)
-    AudioProcessContext innerCtx{
-        .input = innerInput,
-        .output = procView,
-        .sampleRate = ctx.sampleRate,
-        .numSamples = numSamples
-    };
+    // Process through inner plugin node with non-aliasing input (innerInput) and output (procView), preserving transport context
+    AudioProcessContext innerCtx = ctx;
+    innerCtx.input = innerInput;
+    innerCtx.output = procView;
+    innerCtx.sampleRate = ctx.sampleRate;
+    innerCtx.numSamples = numSamples;
     m_innerNode->process(innerCtx);
 
     // Scrub NaN/Inf and clamp runaway spikes from third-party plugins
@@ -418,24 +417,17 @@ void ParallelBranch::flushStashedReclamations() noexcept {
     }
 }
 
-void ParallelBranch::process(AudioProcessContext& ctx) {
-    m_isAudioRunning.store(true, std::memory_order_release);
-    const uint32_t numSamples = ctx.numSamples;
-    if (numSamples == 0) return;
-
-    // 0. Drain deferred overflow into reclaim queue
+void ParallelBranch::drainSlotCommandsIntoActive() noexcept {
     flushStashedReclamations();
 
-    // 1. Drain pending commands from UI thread (Wait-Free)
     SlotCommand cmd;
     while (m_commandQueue.try_dequeue(cmd)) {
         switch (cmd.type) {
             case SlotCommandType::Add: {
                 if (cmd.slot) {
                     if (m_activeSlots.size() < MAX_BRANCH_SLOTS) {
-                        m_activeSlots.push_back(std::move(cmd.slot)); // AddSlot
+                        m_activeSlots.push_back(std::move(cmd.slot));
                     } else {
-                        // Max capacity reached: reject to reclaim queue without destructing here
                         if (!m_reclaimQueue.try_enqueue(std::move(cmd.slot))) {
                             stashForReclamation(std::move(cmd.slot));
                         }
@@ -447,7 +439,7 @@ void ParallelBranch::process(AudioProcessContext& ctx) {
                 if (cmd.slot) {
                     if (m_activeSlots.size() < MAX_BRANCH_SLOTS) {
                         size_t idx = std::min(cmd.index, m_activeSlots.size());
-                        m_activeSlots.insert(m_activeSlots.begin() + idx, std::move(cmd.slot));
+                        m_activeSlots.insert(m_activeSlots.begin() + static_cast<ptrdiff_t>(idx), std::move(cmd.slot));
                     } else {
                         if (!m_reclaimQueue.try_enqueue(std::move(cmd.slot))) {
                             stashForReclamation(std::move(cmd.slot));
@@ -459,8 +451,8 @@ void ParallelBranch::process(AudioProcessContext& ctx) {
             case SlotCommandType::Reorder: {
                 if (cmd.index < m_activeSlots.size() && cmd.targetIndex < m_activeSlots.size() && cmd.index != cmd.targetIndex) {
                     auto s = std::move(m_activeSlots[cmd.index]);
-                    m_activeSlots.erase(m_activeSlots.begin() + cmd.index);
-                    m_activeSlots.insert(m_activeSlots.begin() + cmd.targetIndex, std::move(s));
+                    m_activeSlots.erase(m_activeSlots.begin() + static_cast<ptrdiff_t>(cmd.index));
+                    m_activeSlots.insert(m_activeSlots.begin() + static_cast<ptrdiff_t>(cmd.targetIndex), std::move(s));
                 }
                 break;
             }
@@ -470,7 +462,7 @@ void ParallelBranch::process(AudioProcessContext& ctx) {
                     it = std::find_if(m_activeSlots.begin(), m_activeSlots.end(),
                         [&](const auto& s) { return s.get() == cmd.targetSlot; });
                 } else if (cmd.index < m_activeSlots.size()) {
-                    it = m_activeSlots.begin() + cmd.index;
+                    it = m_activeSlots.begin() + static_cast<ptrdiff_t>(cmd.index);
                 }
 
                 if (it != m_activeSlots.end()) {
@@ -495,6 +487,15 @@ void ParallelBranch::process(AudioProcessContext& ctx) {
             }
         }
     }
+}
+
+void ParallelBranch::process(AudioProcessContext& ctx) {
+    m_isAudioRunning.store(true, std::memory_order_release);
+    const uint32_t numSamples = ctx.numSamples;
+    if (numSamples == 0) return;
+
+    // 1. Drain pending commands from UI thread (Wait-Free, 0 locks)
+    drainSlotCommandsIntoActive();
 
     // 2. Audio Processing through active slots with zero-copy ping-pong buffering
     AudioBufferView curIn = m_branchBuffer.view(numSamples);
@@ -503,12 +504,11 @@ void ParallelBranch::process(AudioProcessContext& ctx) {
 
     for (auto& slot : m_activeSlots) {
         if (!slot) continue;
-        AudioProcessContext slotCtx{
-            .input = curIn,
-            .output = curOut,
-            .sampleRate = ctx.sampleRate,
-            .numSamples = numSamples
-        };
+        AudioProcessContext slotCtx = ctx;
+        slotCtx.input = curIn;
+        slotCtx.output = curOut;
+        slotCtx.sampleRate = ctx.sampleRate;
+        slotCtx.numSamples = numSamples;
         slot->process(slotCtx);
         std::swap(curIn, curOut);
     }
@@ -583,6 +583,8 @@ void ParallelBranch::process(AudioProcessContext& ctx) {
 
 ParallelSplitMergeBlock::ParallelSplitMergeBlock(std::string name)
     : m_name(std::move(name)) {
+    m_uiBranches.reserve(16);
+    m_activeBranches.reserve(16);
     m_deferredReclaimBranches.reserve(16);
 }
 
@@ -1079,10 +1081,14 @@ void GraphEngine::drainCommandQueueIntoActive() {
                 if (cmd.indexA < m_activeNodes.size() && cmd.node) {
                     auto originalNode = std::move(m_activeNodes[cmd.indexA]);
                     auto* parallelBlock = dynamic_cast<ParallelSplitMergeBlock*>(cmd.node.get());
-                    if (parallelBlock && parallelBlock->numBranches() > 0) {
-                        auto* branchA = parallelBlock->getBranch(0);
+                    if (parallelBlock) {
+                        parallelBlock->flushBranchCommandsIntoActive();
+                    }
+                    if (parallelBlock && !parallelBlock->activeBranches().empty() && parallelBlock->activeBranches()[0]) {
+                        auto* branchA = parallelBlock->activeBranches()[0].get();
+                        branchA->drainSlotCommandsIntoActive();
                         auto* slotA = dynamic_cast<PluginSlot*>(originalNode.get());
-                        if (slotA && branchA) {
+                        if (slotA && branchA && branchA->activeSlots().size() < ParallelBranch::MAX_BRANCH_SLOTS) {
                             originalNode.release();
                             branchA->activeSlots().push_back(std::unique_ptr<PluginSlot>(slotA));
                         } else {
@@ -1098,11 +1104,15 @@ void GraphEngine::drainCommandQueueIntoActive() {
             case GraphCommandType::DissolveParallel: {
                 if (cmd.indexA < m_activeNodes.size()) {
                     auto blockNode = std::move(m_activeNodes[cmd.indexA]);
-                    m_activeNodes.erase(m_activeNodes.begin() + cmd.indexA);
+                    m_activeNodes.erase(m_activeNodes.begin() + static_cast<ptrdiff_t>(cmd.indexA));
                     auto* block = dynamic_cast<ParallelSplitMergeBlock*>(blockNode.get());
-                    if (block && cmd.indexB < block->numBranches()) {
-                        auto* br = block->getBranch(cmd.indexB);
+                    if (block) {
+                        block->flushBranchCommandsIntoActive();
+                    }
+                    if (block && cmd.indexB < block->activeBranches().size() && block->activeBranches()[cmd.indexB]) {
+                        auto* br = block->activeBranches()[cmd.indexB].get();
                         if (br) {
+                            br->drainSlotCommandsIntoActive();
                             auto& actSlots = br->activeSlots();
                             size_t insertPos = cmd.indexA;
                             for (auto& s : actSlots) {
@@ -1457,6 +1467,13 @@ bool GraphEngine::dispatchParameterThreadSafe(int slotIdx, int branchIdx, int br
 }
 
 void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& hardwareOut) {
+    AudioProcessContext defaultTransport{};
+    defaultTransport.sampleRate = m_sampleRate;
+    defaultTransport.numSamples = hardwareIn.numSamples();
+    process(hardwareIn, hardwareOut, defaultTransport);
+}
+
+void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& hardwareOut, const AudioProcessContext& transportCtx) {
     m_isAudioRunning.store(true, std::memory_order_release);
     const uint32_t numSamples = hardwareIn.numSamples();
     if (numSamples == 0) return;
@@ -1601,10 +1618,14 @@ void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& ha
                 if (cmd.indexA < m_activeNodes.size() && cmd.node) {
                     auto originalNode = std::move(m_activeNodes[cmd.indexA]);
                     auto* parallelBlock = dynamic_cast<ParallelSplitMergeBlock*>(cmd.node.get());
-                    if (parallelBlock && parallelBlock->numBranches() > 0) {
-                        auto* branchA = parallelBlock->getBranch(0);
+                    if (parallelBlock) {
+                        parallelBlock->flushBranchCommandsIntoActive();
+                    }
+                    if (parallelBlock && !parallelBlock->activeBranches().empty() && parallelBlock->activeBranches()[0]) {
+                        auto* branchA = parallelBlock->activeBranches()[0].get();
+                        branchA->drainSlotCommandsIntoActive();
                         auto* slotA = dynamic_cast<PluginSlot*>(originalNode.get());
-                        if (slotA && branchA) {
+                        if (slotA && branchA && branchA->activeSlots().size() < ParallelBranch::MAX_BRANCH_SLOTS) {
                             originalNode.release();
                             branchA->activeSlots().push_back(std::unique_ptr<PluginSlot>(slotA));
                         } else {
@@ -1625,11 +1646,15 @@ void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& ha
             case GraphCommandType::DissolveParallel: {
                 if (cmd.indexA < m_activeNodes.size()) {
                     auto blockNode = std::move(m_activeNodes[cmd.indexA]);
-                    m_activeNodes.erase(m_activeNodes.begin() + cmd.indexA);
+                    m_activeNodes.erase(m_activeNodes.begin() + static_cast<ptrdiff_t>(cmd.indexA));
                     auto* block = dynamic_cast<ParallelSplitMergeBlock*>(blockNode.get());
-                    if (block && cmd.indexB < block->numBranches()) {
-                        auto* br = block->getBranch(cmd.indexB);
+                    if (block) {
+                        block->flushBranchCommandsIntoActive();
+                    }
+                    if (block && cmd.indexB < block->activeBranches().size() && block->activeBranches()[cmd.indexB]) {
+                        auto* br = block->activeBranches()[cmd.indexB].get();
                         if (br) {
+                            br->drainSlotCommandsIntoActive();
                             auto& actSlots = br->activeSlots();
                             size_t insertPos = cmd.indexA;
                             for (auto& s : actSlots) {
@@ -1720,12 +1745,11 @@ void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& ha
         AudioBufferView curOutFading = m_scratchBuffer.view(numSamples);
         for (auto& node : m_fadingOutNodes) {
             if (!node) continue;
-            AudioProcessContext ctx{
-                .input = curInFading,
-                .output = curOutFading,
-                .sampleRate = m_sampleRate,
-                .numSamples = numSamples
-            };
+            AudioProcessContext ctx = transportCtx;
+            ctx.input = curInFading;
+            ctx.output = curOutFading;
+            ctx.sampleRate = m_sampleRate;
+            ctx.numSamples = numSamples;
             node->process(ctx);
             std::swap(curInFading, curOutFading);
         }
@@ -1741,12 +1765,11 @@ void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& ha
         AudioBufferView curOutAct = m_scratchBuffer.view(numSamples);
         for (auto& node : m_activeNodes) {
             if (!node) continue;
-            AudioProcessContext ctx{
-                .input = curInAct,
-                .output = curOutAct,
-                .sampleRate = m_sampleRate,
-                .numSamples = numSamples
-            };
+            AudioProcessContext ctx = transportCtx;
+            ctx.input = curInAct;
+            ctx.output = curOutAct;
+            ctx.sampleRate = m_sampleRate;
+            ctx.numSamples = numSamples;
             node->process(ctx);
             std::swap(curInAct, curOutAct);
         }
@@ -1790,12 +1813,11 @@ void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& ha
         AudioBufferView curOut = m_scratchBuffer.view(numSamples);
         for (auto& node : m_activeNodes) {
             if (!node) continue;
-            AudioProcessContext ctx{
-                .input = curIn,
-                .output = curOut,
-                .sampleRate = m_sampleRate,
-                .numSamples = numSamples
-            };
+            AudioProcessContext ctx = transportCtx;
+            ctx.input = curIn;
+            ctx.output = curOut;
+            ctx.sampleRate = m_sampleRate;
+            ctx.numSamples = numSamples;
             node->process(ctx);
             std::swap(curIn, curOut);
         }

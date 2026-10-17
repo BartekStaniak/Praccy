@@ -66,17 +66,21 @@ public:
     void process(const audio::AudioBufferView& in, audio::AudioBufferView& out);
 
 private:
-    double m_sampleRate{48000.0};
-    size_t m_maxFrames{48000 * 60};
+    static constexpr size_t kUndoBlockSize = 256;
+
+    std::atomic<double> m_sampleRate{48000.0};
+    std::atomic<size_t> m_maxFrames{48000 * 60};
 
     std::vector<float> m_loopBufferL;
     std::vector<float> m_loopBufferR;
 
-    // Preallocated buffers for wait-free layer undo/redo
+    // Preallocated buffers and block-level bitmask for wait-free, partial/multi-pass-safe layer undo/redo
     std::vector<float> m_undoBufferL;
     std::vector<float> m_undoBufferR;
     std::vector<float> m_redoBufferL;
     std::vector<float> m_redoBufferR;
+    std::vector<uint64_t> m_overdubbedBlockMask;
+    std::vector<size_t> m_overdubbedBlockList;
 
     std::atomic<bool> m_canUndo{false};
     std::atomic<bool> m_canRedo{false};
