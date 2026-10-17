@@ -15,8 +15,8 @@ set(PRACCY_VER_MINOR ${CMAKE_MATCH_1})
 string(REGEX MATCH "#define PRACCY_VERSION_PATCH ([0-9]+)" _ "${_PRACCY_VER_H}")
 set(PRACCY_VER_PATCH ${CMAKE_MATCH_1})
 
-# Version: 2.7-beta1
-set(PRACCY_VERSION_STRING "2.7-beta1")
+# Version: 2.7-beta2
+set(PRACCY_VERSION_STRING "2.7-beta2")
 
 project(Praccy VERSION ${PRACCY_VER_MAJOR}.${PRACCY_VER_MINOR}.${PRACCY_VER_PATCH} LANGUAGES CXX C RC)
 
@@ -193,7 +193,7 @@ target_link_libraries(Praccy PRIVATE
 target_compile_options(Praccy PRIVATE ${PRACCY_STRICT_FLAGS})
 
 # ============================================================================
-# Test Targets (16 test targets)
+# Test Targets (17 test targets)
 # ============================================================================
 enable_testing()
 
@@ -308,3 +308,10 @@ target_include_directories(test_challenger_stage1_audio PRIVATE tests)
 target_link_libraries(test_challenger_stage1_audio PRIVATE praccy_core)
 target_compile_options(test_challenger_stage1_audio PRIVATE ${PRACCY_STRICT_FLAGS})
 add_test(NAME test_challenger_stage1_audio COMMAND test_challenger_stage1_audio)
+
+# 17. Remediation Characterization Tests
+add_executable(test_remediation_characterization tests/test_remediation_characterization.cpp)
+target_include_directories(test_remediation_characterization PRIVATE tests)
+target_link_libraries(test_remediation_characterization PRIVATE praccy_core)
+target_compile_options(test_remediation_characterization PRIVATE ${PRACCY_STRICT_FLAGS})
+add_test(NAME test_remediation_characterization COMMAND test_remediation_characterization)

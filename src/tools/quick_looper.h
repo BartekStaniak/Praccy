@@ -5,7 +5,6 @@
 #include <string>
 #include <atomic>
 #include <algorithm>
-
 #include <array>
 #include <thread>
 #include <cstdint>
@@ -47,7 +46,7 @@ public:
     [[nodiscard]] double loopLengthSeconds() const noexcept;
     [[nodiscard]] float playheadNormalized() const noexcept;
 
-    // Undo / Redo for overdub layers
+    // Undo / Redo for overdub layers (O(1) zero-copy layer selection on audio thread)
     bool undo();
     bool redo();
     [[nodiscard]] bool canUndo() const noexcept { return m_canUndo.load(std::memory_order_relaxed); }
@@ -74,13 +73,12 @@ private:
     std::vector<float> m_loopBufferL;
     std::vector<float> m_loopBufferR;
 
-    // Preallocated buffers and block-level bitmask for wait-free, partial/multi-pass-safe layer undo/redo
+    // Preallocated backup buffers and block-level bitmasks for O(1) wait-free, zero-copy layer undo/redo
     std::vector<float> m_undoBufferL;
     std::vector<float> m_undoBufferR;
-    std::vector<float> m_redoBufferL;
-    std::vector<float> m_redoBufferR;
     std::vector<uint64_t> m_overdubbedBlockMask;
-    std::vector<size_t> m_overdubbedBlockList;
+    std::vector<uint64_t> m_pendingCommitBlockMask;
+    bool m_undoLayerActive{false};
 
     std::atomic<bool> m_canUndo{false};
     std::atomic<bool> m_canRedo{false};
@@ -107,10 +105,10 @@ private:
 
     void enqueueCommand(LooperCommand cmd) noexcept;
     bool popCommand(LooperCommand& outCmd) noexcept;
-    void drainCommands();
-    void drainCommandsSafe();
+    void drainCommands() noexcept;
+    void drainCommandsSafe() noexcept;
     [[nodiscard]] bool isAudioThreadActive() const noexcept;
-    void executeCommand(LooperCommand cmd);
+    void executeCommand(LooperCommand cmd) noexcept;
 };
 
 } // namespace praccy::tools

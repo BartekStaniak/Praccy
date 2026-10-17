@@ -1,4 +1,5 @@
 #include "plugin_window.h"
+#include <dwmapi.h>
 #include <iostream>
 
 namespace praccy::plugins {
@@ -49,12 +50,12 @@ bool PluginWindowManager::openPluginWindow(IPluginInstance* plugin) {
     int prefH = 600;
     plugin->getPreferredSize(prefW, prefH);
 
-    // If window already open, bring to front, ensure topmost, restore
+    // If window already open, bring to front, restore without forcing global HWND_TOPMOST
     auto it = m_openWindows.find(plugin);
     if (it != m_openWindows.end() && IsWindow(it->second)) {
         HWND existingHwnd = it->second;
         ShowWindow(existingHwnd, SW_RESTORE);
-        SetWindowPos(existingHwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+        SetWindowPos(existingHwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
         BringWindowToTop(existingHwnd);
         SetForegroundWindow(existingHwnd);
         return true;
@@ -94,18 +95,9 @@ bool PluginWindowManager::openPluginWindow(IPluginInstance* plugin) {
     );
 
     if (hwnd) {
-        if (HMODULE hDwm = LoadLibraryW(L"dwmapi.dll")) {
-            typedef HRESULT (WINAPI *PFN_DwmSetWindowAttribute)(HWND, DWORD, LPCVOID, DWORD);
-            FARPROC proc = GetProcAddress(hDwm, "DwmSetWindowAttribute");
-            if (proc) {
-                PFN_DwmSetWindowAttribute pfnSetAttr = nullptr;
-                std::memcpy(&pfnSetAttr, &proc, sizeof(proc));
-                BOOL useDark = m_isDark ? TRUE : FALSE;
-                if (FAILED(pfnSetAttr(hwnd, 20, &useDark, sizeof(useDark)))) {
-                    pfnSetAttr(hwnd, 19, &useDark, sizeof(useDark));
-                }
-            }
-            FreeLibrary(hDwm);
+        BOOL useDark = m_isDark ? TRUE : FALSE;
+        if (FAILED(DwmSetWindowAttribute(hwnd, 20, &useDark, sizeof(useDark)))) {
+            DwmSetWindowAttribute(hwnd, 19, &useDark, sizeof(useDark));
         }
     }
 
@@ -138,8 +130,8 @@ bool PluginWindowManager::openPluginWindow(IPluginInstance* plugin) {
     m_openWindows[plugin] = hwnd;
     m_windowToPlugin[hwnd] = plugin;
 
-    // Position centered and on top
-    SetWindowPos(hwnd, HWND_TOPMOST, posX, posY, winW, winH, SWP_SHOWWINDOW);
+    // Position centered and at top of owner z-order without locking HWND_TOPMOST over external apps
+    SetWindowPos(hwnd, HWND_TOP, posX, posY, winW, winH, SWP_SHOWWINDOW);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
     BringWindowToTop(hwnd);
@@ -192,24 +184,15 @@ void PluginWindowManager::updateTheme(bool isDark, COLORREF bgCol) {
     }
     m_bgBrush = CreateSolidBrush(bgCol);
 
-    if (HMODULE hDwm = LoadLibraryW(L"dwmapi.dll")) {
-        typedef HRESULT (WINAPI *PFN_DwmSetWindowAttribute)(HWND, DWORD, LPCVOID, DWORD);
-        FARPROC proc = GetProcAddress(hDwm, "DwmSetWindowAttribute");
-        if (proc) {
-            PFN_DwmSetWindowAttribute pfnSetAttr = nullptr;
-            std::memcpy(&pfnSetAttr, &proc, sizeof(proc));
-            BOOL useDark = isDark ? TRUE : FALSE;
-            for (const auto& [plugin, hwnd] : m_openWindows) {
-                if (hwnd && IsWindow(hwnd)) {
-                    if (FAILED(pfnSetAttr(hwnd, 20, &useDark, sizeof(useDark)))) {
-                        pfnSetAttr(hwnd, 19, &useDark, sizeof(useDark));
-                    }
-                    SetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND, reinterpret_cast<LONG_PTR>(m_bgBrush));
-                    InvalidateRect(hwnd, nullptr, TRUE);
-                }
+    BOOL useDark = isDark ? TRUE : FALSE;
+    for (const auto& [plugin, hwnd] : m_openWindows) {
+        if (hwnd && IsWindow(hwnd)) {
+            if (FAILED(DwmSetWindowAttribute(hwnd, 20, &useDark, sizeof(useDark)))) {
+                DwmSetWindowAttribute(hwnd, 19, &useDark, sizeof(useDark));
             }
+            SetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND, reinterpret_cast<LONG_PTR>(m_bgBrush));
+            InvalidateRect(hwnd, nullptr, TRUE);
         }
-        FreeLibrary(hDwm);
     }
 }
 

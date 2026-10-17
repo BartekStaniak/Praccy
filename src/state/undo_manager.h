@@ -56,6 +56,11 @@ public:
 
     UndoManager() = default;
 
+    /// Check if an incoming continuous transaction would coalesce into the active top transaction
+    [[nodiscard]] bool shouldCoalesce(UndoActionType actionType,
+                                      const std::string& targetKey,
+                                      bool force = false) const noexcept;
+
     /// Record a state snapshot with coalescing logic
     void pushSnapshot(ScenePreset snapshot,
                       std::string description = "Parameter Tweak",

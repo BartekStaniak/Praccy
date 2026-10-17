@@ -185,6 +185,10 @@ public:
         m_clipped.store(false, std::memory_order_relaxed);
     }
 
+    void resetClip() noexcept {
+        clearClip();
+    }
+
     void process(const float* left, const float* right, uint32_t numSamples, double sampleRate = 48000.0) noexcept {
         float maxL = 0.0f;
         float maxR = 0.0f;
@@ -245,4 +249,3 @@ private:
 }
 
 } // namespace praccy::audio
-

@@ -19,9 +19,8 @@ namespace praccy::audio {
  * Implements a flat table of 1024 atomic floats indexed by parameter ID, backed by
  * an atomic 64-bit dirty mask array (16 x uint64_t words). UI and MIDI threads write
  * parameter updates wait-free. Arbitrary 32-bit parameter IDs (>= 1024) are handled
- * wait-free via a 64-slot lock-free CAS overflow hash table. The real-time audio thread
- * drains dirty parameters at block boundaries wait-free with zero dynamic memory allocations,
- * automatically coalescing rapid parameter sweeps.
+ * wait-free via a 512-slot lock-free bounded-CAS overflow hash table with clean-slot
+ * reclamation so high parameter IDs never permanently exhaust table capacity.
  */
 class ParamAutomationRegister {
 public:
@@ -34,6 +33,7 @@ public:
     static constexpr size_t OVERFLOW_CAPACITY = 512;
     static constexpr size_t OVERFLOW_WORDS = OVERFLOW_CAPACITY / 64; // 8 words
     static constexpr size_t OVERFLOW_MASK = OVERFLOW_CAPACITY - 1;
+    static constexpr size_t MAX_CAS_RETRIES = 8;
 
     ParamAutomationRegister() noexcept {
         resetBeforePrepareOnly();
@@ -76,7 +76,7 @@ public:
     /**
      * @brief Writes a parameter value and marks it dirty.
      * Handles both direct table (< 1024) and arbitrary 32-bit IDs (>= 1024) wait-free with zero allocations.
-     * Called from UI or MIDI thread. Lock-free, wait-free.
+     * Called from UI or MIDI thread. Lock-free, bounded wait-free.
      */
     inline void setParameter(uint32_t paramId, float value) noexcept {
         if (paramId < MAX_PARAMS) {
@@ -87,10 +87,10 @@ public:
             return;
         }
 
-        // Lock-free linear-probing CAS overflow table for arbitrary 32-bit parameter IDs (>= 1024).
-        // Never evicts active keys out of probe order so getParameter() and concurrent writers remain 100% lossless.
         const uint64_t newPacked = packEntry(paramId, value);
         const size_t startSlot = hashParamId(paramId);
+        size_t reclaimableSlot = OVERFLOW_CAPACITY;
+        uint64_t reclaimableExpected = 0ULL;
 
         for (size_t probe = 0; probe < OVERFLOW_CAPACITY; ++probe) {
             const size_t slot = (startSlot + probe) & OVERFLOW_MASK;
@@ -98,15 +98,33 @@ public:
             const uint64_t bitMask = 1ULL << (slot % 64);
 
             uint64_t cur = m_overflowTable[slot].packed.load(std::memory_order_acquire);
-            while (true) {
+            for (size_t retry = 0; retry < MAX_CAS_RETRIES; ++retry) {
                 if (cur != 0ULL && unpackParamId(cur) != paramId) {
-                    // Slot belongs to a different parameter ID; continue linear probe
+                    if (reclaimableSlot == OVERFLOW_CAPACITY) {
+                        const uint64_t dirtyWord = m_overflowDirtyMask[wordIdx].load(std::memory_order_relaxed);
+                        if ((dirtyWord & bitMask) == 0ULL) {
+                            reclaimableSlot = slot;
+                            reclaimableExpected = cur;
+                        }
+                    }
                     break;
                 }
                 if (m_overflowTable[slot].packed.compare_exchange_weak(
                         cur, newPacked, std::memory_order_acq_rel, std::memory_order_acquire)) {
                     m_overflowDirtyMask[wordIdx].fetch_or(bitMask, std::memory_order_release);
                     return;
+                }
+            }
+        }
+
+        // If all 512 slots were occupied by distinct historical IDs, reclaim the first already-drained clean slot
+        if (reclaimableSlot < OVERFLOW_CAPACITY) {
+            const size_t wordIdx = reclaimableSlot / 64;
+            const uint64_t bitMask = 1ULL << (reclaimableSlot % 64);
+            if ((m_overflowDirtyMask[wordIdx].load(std::memory_order_acquire) & bitMask) == 0ULL) {
+                if (m_overflowTable[reclaimableSlot].packed.compare_exchange_strong(
+                        reclaimableExpected, newPacked, std::memory_order_acq_rel, std::memory_order_acquire)) {
+                    m_overflowDirtyMask[wordIdx].fetch_or(bitMask, std::memory_order_release);
                 }
             }
         }
@@ -252,12 +270,10 @@ private:
 #endif
     }
 
-    // Cache-line aligned members to eliminate false sharing between cores
-    alignas(64) std::array<std::atomic<uint64_t>, BITMASK_WORDS> m_dirtyMask;
-    alignas(64) std::array<std::atomic<float>, MAX_PARAMS> m_values;
+    alignas(64) std::array<std::atomic<uint64_t>, BITMASK_WORDS> m_dirtyMask{};
+    alignas(64) std::array<std::atomic<float>, MAX_PARAMS> m_values{};
     alignas(64) std::array<std::atomic<uint64_t>, OVERFLOW_WORDS> m_overflowDirtyMask{};
-    alignas(64) std::array<OverflowEntry, OVERFLOW_CAPACITY> m_overflowTable;
+    alignas(64) std::array<OverflowEntry, OVERFLOW_CAPACITY> m_overflowTable{};
 };
 
 } // namespace praccy::audio
-

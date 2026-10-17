@@ -15,14 +15,17 @@ AudioPlayer::~AudioPlayer() {
 }
 
 void AudioPlayer::prepare(double sampleRate) {
-    m_sampleRate = sampleRate;
+    if (!std::isfinite(sampleRate) || sampleRate <= 0.0) {
+        sampleRate = 48000.0;
+    }
+    m_sampleRate.store(sampleRate, std::memory_order_release);
     m_activeSampleRate.store(sampleRate, std::memory_order_relaxed);
 }
 
 void AudioPlayer::retireBuffer(AudioTrackBuffer* oldBuf) {
     if (!oldBuf) return;
 
-    while (m_audioReadingBuffer.load(std::memory_order_seq_cst) == oldBuf) {
+    while (m_audioReadingBuffer.load(std::memory_order_acquire) == oldBuf) {
         std::this_thread::yield();
     }
     delete oldBuf;
@@ -87,13 +90,26 @@ bool AudioPlayer::executeLoad(const std::string& filePath, std::stop_token stopT
     m_loadProgress.store(0.40f, std::memory_order_relaxed);
 
     auto newTrack = std::make_unique<AudioTrackBuffer>();
+    const double hostSr = m_sampleRate.load(std::memory_order_acquire);
+    const double safeHostSr = (std::isfinite(hostSr) && hostSr >= 8000.0) ? hostSr : 48000.0;
 
-    // Resample to m_sampleRate if needed
-    if (wavData.sampleRate != static_cast<uint32_t>(m_sampleRate) && wavData.sampleRate > 0) {
-        double ratio = m_sampleRate / static_cast<double>(wavData.sampleRate);
-        size_t targetFrames = static_cast<size_t>(static_cast<double>(wavData.numFrames) * ratio);
-        newTrack->samplesL.resize(targetFrames);
-        newTrack->samplesR.resize(targetFrames);
+    // Resample to host sample rate if needed (guarded against extreme ratios or OOM)
+    if (wavData.sampleRate >= utils::WavReader::kMinSampleRate &&
+        wavData.sampleRate <= utils::WavReader::kMaxSampleRate &&
+        wavData.sampleRate != static_cast<uint32_t>(safeHostSr)) {
+        const double ratio = safeHostSr / static_cast<double>(wavData.sampleRate);
+        constexpr size_t kMaxResampledFrames = 48000ULL * 60ULL * 60ULL; // 1 hour ceiling
+        const size_t targetFrames = std::min<size_t>(
+            kMaxResampledFrames,
+            static_cast<size_t>(static_cast<double>(wavData.numFrames) * ratio));
+        if (targetFrames == 0) return false;
+
+        try {
+            newTrack->samplesL.resize(targetFrames);
+            newTrack->samplesR.resize(targetFrames);
+        } catch (const std::bad_alloc&) {
+            return false;
+        }
 
         for (size_t i = 0; i < targetFrames; ++i) {
             if ((i & 0x3FFF) == 0) {
@@ -102,7 +118,7 @@ bool AudioPlayer::executeLoad(const std::string& filePath, std::stop_token stopT
                 m_loadProgress.store(p, std::memory_order_relaxed);
             }
             double srcIdx = static_cast<double>(i) / ratio;
-            size_t idx0 = static_cast<size_t>(srcIdx);
+            size_t idx0 = std::min(static_cast<size_t>(srcIdx), wavData.numFrames - 1);
             size_t idx1 = std::min(idx0 + 1, wavData.numFrames - 1);
             float frac = static_cast<float>(srcIdx - static_cast<double>(idx0));
 
@@ -156,7 +172,7 @@ bool AudioPlayer::executeLoad(const std::string& filePath, std::stop_token stopT
 
     // Update atomic metadata cache before exchanging m_activeBuffer
     m_activeNumFrames.store(newTrack->numFrames, std::memory_order_release);
-    m_activeSampleRate.store(m_sampleRate, std::memory_order_release);
+    m_activeSampleRate.store(safeHostSr, std::memory_order_release);
 
     // Atomic pointer swap
     AudioTrackBuffer* oldBuf = m_activeBuffer.exchange(newTrack.release(), std::memory_order_acq_rel);
@@ -251,7 +267,7 @@ std::vector<std::pair<float, float>> AudioPlayer::waveformPeaks800() const {
 void AudioPlayer::process(audio::AudioBufferView& output) {
     if (!m_isPlaying.load(std::memory_order_relaxed) || !m_isLoaded.load(std::memory_order_relaxed)) return;
 
-    const AudioTrackBuffer* buf = m_activeBuffer.load(std::memory_order_acquire);
+    const AudioTrackBuffer* buf = m_activeBuffer.load(std::memory_order_seq_cst);
     m_audioReadingBuffer.store(buf, std::memory_order_seq_cst);
     if (buf != m_activeBuffer.load(std::memory_order_seq_cst)) {
         // Buffer swap in flight; release hazard pointer and return wait-free
@@ -299,6 +315,7 @@ void AudioPlayer::process(audio::AudioBufferView& output) {
                 break;
             }
         }
+
         outL[s] += buf->samplesL[curHead] * vol;
         outR[s] += buf->samplesR[curHead] * vol;
         curHead++;

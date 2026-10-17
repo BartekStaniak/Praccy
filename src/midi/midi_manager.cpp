@@ -56,8 +56,17 @@ void MidiManager::closeDevice() {
     }
 }
 
+void MidiManager::drainLearnedPodFromMidiThread() {
+    if (m_hasPendingLearnedPod.exchange(false, std::memory_order_acq_rel)) {
+        PodCcBinding pod{};
+        m_learnedPodForUiSync.load(pod);
+        m_bindings.push_back(pod.toMidiBinding());
+    }
+}
+
 void MidiManager::addBinding(const MidiBinding& binding) {
     std::lock_guard<std::mutex> lock(m_bindingsMutex);
+    drainLearnedPodFromMidiThread();
     m_bindings.push_back(binding);
 
     if (binding.triggerType == MidiMessageType::ControlChange) {
@@ -79,12 +88,23 @@ void MidiManager::addBinding(const MidiBinding& binding) {
             m_atomicCcTable[ch][cc].store(slot);
             m_ccTableSeq.fetch_add(1, std::memory_order_release);
         }
+    } else {
+        m_ccTableSeq.fetch_add(1, std::memory_order_acq_rel);
+        uint32_t idx = m_atomicNonCcCount.load(std::memory_order_relaxed);
+        if (idx < MAX_NON_CC_BINDINGS) {
+            PodCcBinding pod{};
+            pod.fromMidiBinding(binding);
+            m_atomicNonCcBindings[idx].store(pod);
+            m_atomicNonCcCount.store(idx + 1, std::memory_order_release);
+        }
+        m_ccTableSeq.fetch_add(1, std::memory_order_release);
     }
 }
 
 void MidiManager::addCcBinding(uint8_t channel, uint8_t cc, uint32_t paramId, float minVal, float maxVal) {
     if (channel >= NUM_MIDI_CHANNELS || cc >= NUM_CC_NUMBERS) return;
     std::lock_guard<std::mutex> lock(m_bindingsMutex);
+    drainLearnedPodFromMidiThread();
 
     m_ccTableSeq.fetch_add(1, std::memory_order_acq_rel);
     auto& slot = m_ccTable[channel][cc];
@@ -119,6 +139,7 @@ void MidiManager::rebuildCcTable() {
             m_ccTable[ch][cc].clear();
         }
     }
+    uint32_t nonCcIdx = 0;
     for (const auto& binding : m_bindings) {
         if (binding.triggerType == MidiMessageType::ControlChange) {
             const uint8_t ch = (binding.midiChannel <= 16) ? binding.midiChannel : 0;
@@ -136,8 +157,13 @@ void MidiManager::rebuildCcTable() {
                     slot.bindings[slot.count++].fromMidiBinding(binding);
                 }
             }
+        } else if (nonCcIdx < MAX_NON_CC_BINDINGS) {
+            PodCcBinding pod{};
+            pod.fromMidiBinding(binding);
+            m_atomicNonCcBindings[nonCcIdx++].store(pod);
         }
     }
+    m_atomicNonCcCount.store(nonCcIdx, std::memory_order_relaxed);
     for (size_t ch = 0; ch < NUM_MIDI_CHANNELS; ++ch) {
         for (size_t cc = 0; cc < NUM_CC_NUMBERS; ++cc) {
             m_atomicCcTable[ch][cc].store(m_ccTable[ch][cc]);
@@ -148,6 +174,7 @@ void MidiManager::rebuildCcTable() {
 
 void MidiManager::removeBinding(const std::string& id) {
     std::lock_guard<std::mutex> lock(m_bindingsMutex);
+    drainLearnedPodFromMidiThread();
     const uint64_t targetHash = PodCcBinding::computeIdHash(id);
     std::erase_if(m_bindings, [&](const MidiBinding& b) {
         return b.id == id || PodCcBinding::computeIdHash(b.id) == targetHash;
@@ -157,8 +184,10 @@ void MidiManager::removeBinding(const std::string& id) {
 
 void MidiManager::clearBindings() {
     std::lock_guard<std::mutex> lock(m_bindingsMutex);
+    m_hasPendingLearnedPod.store(false, std::memory_order_relaxed);
     m_bindings.clear();
     m_ccTableSeq.fetch_add(1, std::memory_order_acq_rel);
+    m_atomicNonCcCount.store(0, std::memory_order_relaxed);
     for (size_t ch = 0; ch < NUM_MIDI_CHANNELS; ++ch) {
         for (size_t cc = 0; cc < NUM_CC_NUMBERS; ++cc) {
             m_ccTable[ch][cc].clear();
@@ -171,6 +200,7 @@ void MidiManager::clearBindings() {
 void MidiManager::stopLearnAndBind(uint8_t channel, uint8_t cc, uint32_t paramId, float minVal, float maxVal) {
     if (channel >= NUM_MIDI_CHANNELS || cc >= NUM_CC_NUMBERS) return;
     std::lock_guard<std::mutex> lock(m_bindingsMutex);
+    drainLearnedPodFromMidiThread();
 
     int slot = 0;
     int branch = -1;
@@ -241,26 +271,30 @@ const FlatCcBinding& MidiManager::getCcBinding(uint8_t channel, uint8_t cc) cons
 }
 
 void MidiManager::startLearning(BindingTargetType target, int slot, int branch, int scene, int branchSlot, uint32_t paramId) {
+    MidiBinding pending{
+        .id = "binding_" + std::to_string(static_cast<int>(target)) + "_" + std::to_string(slot) + "_" + std::to_string(paramId),
+        .targetType = target,
+        .targetSlotIndex = slot,
+        .targetBranchIndex = branch,
+        .targetSceneIndex = scene,
+        .targetBranchSlotIndex = branchSlot,
+        .paramId = paramId,
+        .midiChannel = 0,
+        .triggerType = MidiMessageType::ControlChange,
+        .triggerNumber = 0
+    };
+    PodCcBinding pod{};
+    pod.fromMidiBinding(pending);
+    m_pendingLearnPod.store(pod);
     {
         std::lock_guard<std::mutex> lock(m_learnMutex);
-        m_pendingLearnBinding = MidiBinding{
-            .id = "binding_" + std::to_string(static_cast<int>(target)) + "_" + std::to_string(slot) + "_" + std::to_string(paramId),
-            .targetType = target,
-            .targetSlotIndex = slot,
-            .targetBranchIndex = branch,
-            .targetSceneIndex = scene,
-            .targetBranchSlotIndex = branchSlot,
-            .paramId = paramId,
-            .midiChannel = 0,
-            .triggerType = MidiMessageType::ControlChange,
-            .triggerNumber = 0
-        };
+        m_pendingLearnBinding = std::move(pending);
     }
     m_learning.store(true, std::memory_order_release);
 }
 
 void MidiManager::cancelLearning() {
-    m_learning.store(false);
+    m_learning.store(false, std::memory_order_release);
 }
 
 void CALLBACK MidiManager::midiInProc(HMIDIIN /*hMidiIn*/, UINT wMsg, DWORD_PTR dwInstance, DWORD_PTR dwParam1, DWORD_PTR /*dwParam2*/) {
@@ -311,7 +345,6 @@ void MidiManager::handleControlChange(uint8_t channel, uint8_t cc, uint8_t val) 
 
     const float norm = static_cast<float>(val) / 127.0f;
 
-    // If flat binding callback is set, invoke directly with zero heap allocations
     if (m_flatBindingCallback) {
         if (exactSlot.active) {
             const float mapped = exactSlot.minVal + norm * (exactSlot.maxVal - exactSlot.minVal);
@@ -322,7 +355,6 @@ void MidiManager::handleControlChange(uint8_t channel, uint8_t cc, uint8_t val) 
             m_flatBindingCallback(omniSlot, mapped);
         }
     } else if (m_bindingCallback) {
-        // Channel-specific lookup
         if (exactSlot.active) {
             if (exactSlot.count > 0) {
                 for (uint8_t i = 0; i < exactSlot.count; ++i) {
@@ -333,7 +365,6 @@ void MidiManager::handleControlChange(uint8_t channel, uint8_t cc, uint8_t val) 
             }
         }
 
-        // Omni channel lookup
         if (omniSlot.active) {
             if (omniSlot.count > 0) {
                 for (uint8_t i = 0; i < omniSlot.count; ++i) {
@@ -360,40 +391,90 @@ void MidiManager::handleMidiMessage(uint8_t status, uint8_t d1, uint8_t d2) {
     const uint8_t channel = msg.channel();
     const auto type = msg.type();
 
-    // Handle MIDI Learn
-    if (m_learning.load(std::memory_order_acquire)) {
-        if (type == MidiMessageType::ControlChange || type == MidiMessageType::ProgramChange || type == MidiMessageType::NoteOn) {
-            MidiBinding learned;
-            {
-                std::lock_guard<std::mutex> lock(m_learnMutex);
-                m_pendingLearnBinding.midiChannel = channel;
-                m_pendingLearnBinding.triggerType = type;
-                m_pendingLearnBinding.triggerNumber = (type == MidiMessageType::ProgramChange) ? msg.programNumber() : d1;
-                learned = m_pendingLearnBinding;
+    // 1. Lock-free, zero-allocation MIDI Learn on real-time MIDI thread
+    if (type == MidiMessageType::ControlChange || type == MidiMessageType::ProgramChange || type == MidiMessageType::NoteOn) {
+        if (m_learning.exchange(false, std::memory_order_acq_rel)) {
+            PodCcBinding learnedPod{};
+            m_pendingLearnPod.load(learnedPod);
+            learnedPod.midiChannel = channel;
+            learnedPod.triggerType = type;
+            learnedPod.triggerNumber = (type == MidiMessageType::ProgramChange) ? msg.programNumber() : d1;
+
+            if (type == MidiMessageType::ControlChange && learnedPod.triggerNumber < NUM_CC_NUMBERS) {
+                const uint8_t ch = (channel <= 16) ? channel : 0;
+                const uint8_t cc = learnedPod.triggerNumber;
+                m_ccTableSeq.fetch_add(1, std::memory_order_acq_rel);
+                auto& slot = m_ccTable[ch][cc];
+                slot.active = true;
+                slot.paramId = (learnedPod.paramId != 0)
+                    ? learnedPod.paramId
+                    : static_cast<uint32_t>(learnedPod.targetSlotIndex >= 0 ? learnedPod.targetSlotIndex : 0);
+                slot.minVal = 0.0f;
+                slot.maxVal = 1.0f;
+                slot.binding = learnedPod;
+                if (slot.count < MAX_BINDINGS_PER_CC) {
+                    slot.bindings[slot.count++] = learnedPod;
+                }
+                m_atomicCcTable[ch][cc].store(slot);
+                m_ccTableSeq.fetch_add(1, std::memory_order_release);
+            } else {
+                m_ccTableSeq.fetch_add(1, std::memory_order_acq_rel);
+                const uint32_t idx = m_atomicNonCcCount.load(std::memory_order_relaxed);
+                if (idx < MAX_NON_CC_BINDINGS) {
+                    m_atomicNonCcBindings[idx].store(learnedPod);
+                    m_atomicNonCcCount.store(idx + 1, std::memory_order_release);
+                }
+                m_ccTableSeq.fetch_add(1, std::memory_order_release);
             }
-            addBinding(learned);
-            m_learning.store(false, std::memory_order_release);
+
+            m_learnedPodForUiSync.store(learnedPod);
+            m_hasPendingLearnedPod.store(true, std::memory_order_release);
             return;
         }
     }
 
-    // High-performance O(1) dispatch for Control Change messages (zero mutex locks, zero allocations)
+    // 2. High-performance O(1) dispatch for Control Change messages (zero mutex locks, zero allocations)
     if (type == MidiMessageType::ControlChange) {
         handleControlChange(channel, d1, d2);
         return;
     }
 
-    // Fallback linear dispatch for non-CC messages (ProgramChange, NoteOn)
-    std::lock_guard<std::mutex> lock(m_bindingsMutex);
-    for (const auto& binding : m_bindings) {
-        if (binding.midiChannel != 0 && binding.midiChannel != channel) continue;
-        if (binding.triggerType != type) continue;
+    // 3. Lock-free seqlock dispatch for non-CC messages (ProgramChange, NoteOn) — zero mutex locks, zero heap allocations
+    if (!m_bindingCallback) return;
+    if (type != MidiMessageType::ProgramChange && type != MidiMessageType::NoteOn) return;
 
-        if (type == MidiMessageType::ProgramChange && binding.triggerNumber == msg.programNumber()) {
-            if (m_bindingCallback) m_bindingCallback(binding, 1.0f);
-        } else if (type == MidiMessageType::NoteOn && binding.triggerNumber == d1) {
+    std::array<PodCcBinding, MAX_NON_CC_BINDINGS> localPods{};
+    uint32_t count = 0;
+    bool valid = false;
+
+    for (int retry = 0; retry < 3; ++retry) {
+        const uint32_t seq1 = m_ccTableSeq.load(std::memory_order_acquire);
+        if ((seq1 & 1u) != 0u) continue;
+
+        count = std::min<uint32_t>(m_atomicNonCcCount.load(std::memory_order_acquire), static_cast<uint32_t>(MAX_NON_CC_BINDINGS));
+        for (uint32_t i = 0; i < count; ++i) {
+            m_atomicNonCcBindings[i].load(localPods[i]);
+        }
+
+        const uint32_t seq2 = m_ccTableSeq.load(std::memory_order_acquire);
+        if (seq2 == seq1) {
+            valid = true;
+            break;
+        }
+    }
+
+    if (!valid) return;
+
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto& pod = localPods[i];
+        if (pod.midiChannel != 0 && pod.midiChannel != channel) continue;
+        if (pod.triggerType != type) continue;
+
+        if (type == MidiMessageType::ProgramChange && pod.triggerNumber == msg.programNumber()) {
+            m_bindingCallback(pod.toMidiBinding(), 1.0f);
+        } else if (type == MidiMessageType::NoteOn && pod.triggerNumber == d1) {
             const float norm = static_cast<float>(d2) / 127.0f;
-            if (m_bindingCallback) m_bindingCallback(binding, norm);
+            m_bindingCallback(pod.toMidiBinding(), norm);
         }
     }
 }

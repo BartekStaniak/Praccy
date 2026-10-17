@@ -57,10 +57,12 @@ void Metronome::process(audio::AudioBufferView& output) {
     }
 
     const float bpm = m_bpm.load(std::memory_order_relaxed);
-    const int beatsPerBar = m_beatsPerBar.load(std::memory_order_relaxed);
+    const int beatsPerBar = std::max(1, m_beatsPerBar.load(std::memory_order_relaxed));
+    const int denom = std::max(1, m_timeSigDenominator.load(std::memory_order_relaxed));
     const float volGain = audio::DspUtils::dbToGain(m_volumeDb.load(std::memory_order_relaxed));
 
-    const double samplesPerBeat = (60.0 / static_cast<double>(bpm)) * m_sampleRate;
+    const double beatScale = 4.0 / static_cast<double>(denom);
+    const double samplesPerBeat = (60.0 / static_cast<double>(bpm)) * beatScale * m_sampleRate;
     const uint32_t numSamples = output.numSamples();
     const uint32_t numCh = output.numChannels();
 

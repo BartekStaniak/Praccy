@@ -3,6 +3,7 @@
 #include "../audio/audio_buffer.h"
 #include <atomic>
 #include <cstdint>
+#include <algorithm>
 
 namespace praccy::tools {
 
@@ -23,6 +24,12 @@ public:
     void setBeatsPerBar(int beats) noexcept { m_beatsPerBar.store(std::clamp(beats, 1, 16), std::memory_order_relaxed); }
     [[nodiscard]] int beatsPerBar() const noexcept { return m_beatsPerBar.load(std::memory_order_relaxed); }
 
+    void setTimeSigDenominator(int denom) noexcept {
+        if (denom != 2 && denom != 4 && denom != 8 && denom != 16) denom = 4;
+        m_timeSigDenominator.store(denom, std::memory_order_relaxed);
+    }
+    [[nodiscard]] int timeSigDenominator() const noexcept { return m_timeSigDenominator.load(std::memory_order_relaxed); }
+
     void setPlaying(bool playing) noexcept {
         if (playing) {
             m_resetRequested.store(true, std::memory_order_release);
@@ -42,6 +49,7 @@ private:
     double m_sampleRate{48000.0};
     std::atomic<float> m_bpm{120.0f};
     std::atomic<int> m_beatsPerBar{4};
+    std::atomic<int> m_timeSigDenominator{4};
     std::atomic<bool> m_playing{false};
     std::atomic<bool> m_resetRequested{false};
     std::atomic<float> m_volumeDb{-6.0f};

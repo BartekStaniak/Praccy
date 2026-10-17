@@ -183,32 +183,6 @@ struct TunerResult {
 };
 
 /**
- * @brief Direct Form II Transposed biquad filter with NaN/Inf poisoning recovery.
- */
-class BiquadFilter {
-public:
-    void reset() noexcept {
-        m_z1 = 0.0f;
-        m_z2 = 0.0f;
-    }
-
-    void setCoefficients(float b0, float b1, float b2, float a1, float a2) noexcept {
-        m_b0 = b0;
-        m_b1 = b1;
-        m_b2 = b2;
-        m_a1 = a1;
-        m_a2 = a2;
-    }
-
-    float process(float in) noexcept;
-
-private:
-    float m_b0{1.0f}, m_b1{0.0f}, m_b2{0.0f};
-    float m_a1{0.0f}, m_a2{0.0f};
-    float m_z1{0.0f}, m_z2{0.0f};
-};
-
-/**
  * @brief Lock-free Single-Producer Single-Consumer (SPSC) circular ring buffer for raw audio samples.
  * Bounded power-of-2 capacity, wait-free operations on both producer and consumer threads.
  */

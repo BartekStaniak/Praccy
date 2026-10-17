@@ -64,6 +64,9 @@ public:
     void onGuiRestartComponent(Steinberg::int32 flags) noexcept;
 
 private:
+    void suspendAndFenceAudio() noexcept;
+    void resumeAudio() noexcept;
+
     HMODULE m_module{nullptr};
     Steinberg::IPluginFactory* m_factory{nullptr};
     Steinberg::Vst::IComponent* m_component{nullptr};
@@ -99,6 +102,8 @@ private:
 
     std::atomic<DWORD> m_audioThreadId{0};
     std::atomic<bool> m_suppressHandlerCallbacks{false};
+    std::atomic<bool> m_suspendProcessing{false};
+    std::atomic<uint32_t> m_activeProcessCallbacks{0};
 
     mutable std::mutex m_paramCacheMutex;
     mutable std::vector<PluginParameterDesc> m_paramDescs;

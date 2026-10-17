@@ -1,4 +1,5 @@
 #include "dawproject_adapter.h"
+#include "../../version.h"
 #include "../../utils/archive_utils.h"
 #include "../../utils/xml_parser.h"
 #include "../../utils/guid_utils.h"
@@ -221,7 +222,7 @@ bool DawprojectAdapter::exportFromScene(const ScenePreset& scene, const std::fil
         std::ofstream mf(tempDir / "manifest.xml", std::ios::trunc);
         if (!mf.is_open()) return false;
         mf << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
-        mf << "<manifest formatVersion=\"1.0\" application=\"Praccy\" appVersion=\"2.6.0\" />\n";
+        mf << "<manifest formatVersion=\"1.0\" application=\"Praccy\" appVersion=\"" << praccy::kDawprojectAppVersion << "\" />\n";
     }
 
     // 2. project.xml and binary state files
@@ -231,7 +232,7 @@ bool DawprojectAdapter::exportFromScene(const ScenePreset& scene, const std::fil
     std::ostringstream px;
     px << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
     px << "<project version=\"1.0\">\n";
-    px << "  <application name=\"Praccy\" version=\"2.6.0\" />\n";
+    px << "  <application name=\"Praccy\" version=\"" << praccy::kDawprojectAppVersion << "\" />\n";
     px << "  <transport tempo=\"" << scene.tempoBpm << "\" timeSignatureNumerator=\""
        << static_cast<int>(scene.timeSigNumerator) << "\" timeSignatureDenominator=\""
        << static_cast<int>(scene.timeSigDenominator) << "\" />\n";
@@ -301,7 +302,6 @@ bool DawprojectAdapter::exportFromScene(const ScenePreset& scene, const std::fil
         pf << px.str();
     }
 
-    // 3. Zip into output path
     return utils::ArchiveUtils::zipDirectory(tempDir, outputPath);
 }
 

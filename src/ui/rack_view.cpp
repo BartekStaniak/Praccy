@@ -26,10 +26,6 @@
 
 namespace praccy::ui {
 
-#ifndef resetClip
-#define resetClip clearClip
-#endif
-
 static inline ImVec2 evaluateCubicBezier(ImVec2 p0, ImVec2 c0, ImVec2 c1, ImVec2 p1, float u) {
     const float u1 = 1.0f - u;
     const float w0 = u1 * u1 * u1;
@@ -289,6 +285,7 @@ void RackView::applyAudioSettings(double sRate, uint32_t bufSize) {
     if (sRate <= 0.0) sRate = 48000.0;
     if (bufSize == 0) bufSize = 256;
     m_asio.stop();
+    m_graph.setAudioRunning(false);
     if (m_asio.canSampleRate(sRate)) {
         m_asio.setSampleRate(sRate);
     }
@@ -854,6 +851,7 @@ void RackView::renderPracticeRibbon() {
 
             const char* timeSigOptions[] = { "4/4", "3/4", "2/4", "6/8" };
             const int timeSigBeats[] = { 4, 3, 2, 6 };
+            const int timeSigDenoms[] = { 4, 4, 4, 8 };
             int currentSigIdx = 0;
             int currentBeats = m_metronome.beatsPerBar();
             for (int i = 0; i < 4; ++i) {
@@ -862,6 +860,7 @@ void RackView::renderPracticeRibbon() {
             ImGui::SetNextItemWidth(sigW);
             if (ImGui::Combo("##TimeSig", &currentSigIdx, timeSigOptions, 4)) {
                 m_metronome.setBeatsPerBar(timeSigBeats[currentSigIdx]);
+                m_metronome.setTimeSigDenominator(timeSigDenoms[currentSigIdx]);
                 m_looper.setBeatsPerBar(timeSigBeats[currentSigIdx]);
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Time Signature");
@@ -1633,9 +1632,10 @@ void RackView::renderSignalRack() {
             }
         } else if (node->type() == audio::NodeType::ParallelSplitMerge) {
             auto* block = dynamic_cast<audio::ParallelSplitMergeBlock*>(node);
-            drawCubicHermiteCable(dl, toScreen(currentX, centerY), toScreen(currentX + 24.0f, centerY),
+            const float parInWireW = ui::px(24.0f);
+            drawCubicHermiteCable(dl, toScreen(currentX, centerY), toScreen(currentX + parInWireW, centerY),
                                  prevPeak, false, animTime);
-            currentX += 24.0f;
+            currentX += parInWireW;
 
             ImGui::SetCursorPos(ImVec2(currentX, 0.0f));
             renderParallelBlock(block, static_cast<int>(i), centerY);
@@ -1654,8 +1654,8 @@ void RackView::renderSignalRack() {
     ImGui::BeginGroup();
     ImGui::PushStyleColor(ImGuiCol_ChildBg, static_cast<ImVec4>(tokens.surfaces.cardBg));
     ImGui::BeginChild("InsertSerialCard", ImVec2(insertCardW, serialCardH), true, ImGuiWindowFlags_NoScrollbar);
-    ImGui::SetCursorPos(ImVec2((insertCardW - 48.0f) * 0.5f, (serialCardH - 48.0f) * 0.5f));
-    if (renderCenteredPlusButton("##AddPluginSerial", ImVec2(48.0f, 48.0f), 11.0f)) {
+    ImGui::SetCursorPos(ImVec2((insertCardW - ui::px(48.0f)) * 0.5f, (serialCardH - ui::px(48.0f)) * 0.5f));
+    if (renderCenteredPlusButton("##AddPluginSerial", ImVec2(ui::px(48.0f), ui::px(48.0f)), ui::px(11.0f))) {
         m_pluginBrowserModal->open(-1, -1);
     }
     if (ImGui::IsItemHovered()) {
@@ -1707,11 +1707,12 @@ void RackView::renderSignalRack() {
     currentX += outputCardW;
 
     // 3. Right / Bottom Extent Boundaries: Extend canvas ONLY when content exceeds viewport
-    const bool needScrollX = (currentX + 32.0f > viewportWidth);
+    const float scrollPadX = ui::px(32.0f);
+    const bool needScrollX = (currentX + scrollPadX > viewportWidth);
     const bool needScrollY = (rackTotalH > viewportHeight);
 
     if (needScrollX || needScrollY) {
-        const float targetX = needScrollX ? (currentX + 32.0f) : 0.0f;
+        const float targetX = needScrollX ? (currentX + scrollPadX) : 0.0f;
         const float targetY = needScrollY ? rackTotalH : 0.0f;
         ImGui::SetCursorPos(ImVec2(targetX, targetY));
         ImGui::Dummy(ImVec2(0.0f, 0.0f));
@@ -2310,11 +2311,13 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
 
             if (!m_keyMapMode && !m_midiMapMode && (knobDeactivatedAfterEdit || knobDiscreteChange)) {
                 refreshGuiParamBaseline(slot);
+                const std::string targetKey = slot->name() + ":" + macro.label;
+                const bool skipBinary = m_undoManager.shouldCoalesce(state::UndoActionType::ParameterTweak, targetKey);
                 m_undoManager.pushSnapshot(
-                    state::SceneManager::captureGraphSnapshot(m_graph, "Tweak " + macro.label),
+                    state::SceneManager::captureGraphSnapshot(m_graph, "Tweak " + macro.label, !skipBinary),
                     "Macro: " + macro.label,
                     state::UndoActionType::ParameterTweak,
-                    slot->name() + ":" + macro.label
+                    targetKey
                 );
                 if (knobDeactivatedAfterEdit) {
                     m_undoManager.commitActiveTransaction();

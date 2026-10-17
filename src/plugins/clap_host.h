@@ -144,6 +144,8 @@ private:
     static bool CLAP_ABI clapHostRegisterTimer(const clap_host_t* host, uint32_t period_ms, clap_id* timer_id);
     static bool CLAP_ABI clapHostUnregisterTimer(const clap_host_t* host, clap_id timer_id);
 
+    void suspendAndFenceAudio() noexcept;
+    void resumeAudio() noexcept;
     void flushPendingParamsIfStopped();
     void drainGuiOutParamQueue() const;
 
@@ -195,6 +197,8 @@ private:
     ClapEventBuffer m_eventBuffer;
     bool m_isActivated{false};
     std::atomic<bool> m_isProcessing{false};
+    std::atomic<bool> m_suspendProcessing{false};
+    std::atomic<uint32_t> m_activeProcessCallbacks{0};
     std::atomic<DWORD> m_audioThreadId{0};
     std::atomic<uint64_t> m_paramPushGen{0};
     std::atomic<uint64_t> m_paramDrainGen{0};

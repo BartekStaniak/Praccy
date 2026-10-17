@@ -25,6 +25,14 @@ namespace praccy::audio {
  */
 class PluginSlot : public AudioNode {
 public:
+    static constexpr size_t MAX_CACHED_PARAM_RANGES = 256;
+
+    struct CachedParamRange {
+        uint32_t id{0};
+        float minVal{0.0f};
+        float maxVal{1.0f};
+    };
+
     explicit PluginSlot(std::unique_ptr<AudioNode> innerNode);
 
     void prepare(double sampleRate, uint32_t maxBlockSize) override;
@@ -60,6 +68,9 @@ public:
     void setParameter(uint32_t paramId, float value) noexcept {
         m_automationRegister.setParameter(paramId, value);
     }
+    void setParameterNormalized(uint32_t paramId, float normalizedValue) noexcept;
+    void refreshCachedParameterRanges() noexcept;
+
     [[nodiscard]] float getParameter(uint32_t paramId) const noexcept {
         return m_automationRegister.getParameter(paramId);
     }
@@ -96,6 +107,9 @@ private:
     std::atomic<float> m_dryWet{1.0f};      // 1.0 = 100% wet
     std::atomic<float> m_inputGainDb{0.0f};  // 0 dB
     std::atomic<float> m_outputGainDb{0.0f}; // 0 dB
+
+    std::array<CachedParamRange, MAX_CACHED_PARAM_RANGES> m_paramRanges{};
+    std::atomic<size_t> m_numParamRanges{0};
 
     ParamAutomationRegister m_automationRegister;
     EqualPowerRamp m_bypassRamp;
@@ -174,12 +188,14 @@ public:
     static constexpr size_t QUEUE_CAPACITY = 64;
     static constexpr size_t PDC_BUFFER_SIZE = 16384;
     static constexpr size_t PDC_BUFFER_MASK = PDC_BUFFER_SIZE - 1;
+    static constexpr size_t DEFERRED_RECLAIM_CAPACITY = 2048;
 
     explicit ParallelBranch(std::string name);
     ~ParallelBranch();
 
     void prepare(double sampleRate, uint32_t maxBlockSize);
     void reset();
+    void setAudioRunning(bool running) noexcept { m_isAudioRunning.store(running, std::memory_order_release); }
 
     // UI-thread mutations (Push to SPSC command queue, update UI shadow list)
     void addSlot(std::unique_ptr<PluginSlot> slot);
@@ -188,12 +204,15 @@ public:
     std::unique_ptr<PluginSlot> takeSlot(size_t index);
     void reorderSlots(size_t fromIndex, size_t toIndex);
 
-    // Thread-safe UI readouts (Reads UI shadow list, zero lock contention)
-    [[nodiscard]] size_t numSlots() const noexcept { return m_uiSlots.size(); }
-    [[nodiscard]] PluginSlot* getSlot(size_t index) noexcept {
-        return (index < m_uiSlots.size()) ? m_uiSlots[index] : nullptr;
+    // Thread-safe UI readouts
+    [[nodiscard]] size_t numSlots() const noexcept;
+    [[nodiscard]] PluginSlot* getSlot(size_t index) noexcept;
+    [[nodiscard]] PluginSlot* getSlotLockFree(size_t index) const noexcept {
+        const size_t count = m_rtNumSlots.load(std::memory_order_acquire);
+        if (index >= count || index >= MAX_BRANCH_SLOTS) return nullptr;
+        return m_rtSlots[index].load(std::memory_order_acquire);
     }
-    void addSlotToUiShadow(PluginSlot* slot) { m_uiSlots.push_back(slot); }
+    void addSlotToUiShadow(PluginSlot* slot);
     [[nodiscard]] std::vector<std::unique_ptr<PluginSlot>>& activeSlots() noexcept { return m_activeSlots; }
     void drainSlotCommandsIntoActive() noexcept;
 
@@ -240,11 +259,15 @@ public:
 private:
     void stashForReclamation(std::unique_ptr<PluginSlot> slot) noexcept;
     void flushStashedReclamations() noexcept;
+    void syncRtSlotsLocked() noexcept;
 
     std::string m_name;
+    mutable std::mutex m_slotMutex;
 
-    // 1. UI-Thread Shadow Registry (Only accessed from UI thread)
+    // 1. UI-Thread Shadow Registry (guarded by m_slotMutex)
     std::vector<PluginSlot*> m_uiSlots;
+    std::array<std::atomic<PluginSlot*>, MAX_BRANCH_SLOTS> m_rtSlots{};
+    std::atomic<size_t> m_rtNumSlots{0};
 
     // 2. Audio-Thread Active Slots (Only accessed from Audio thread in process())
     std::vector<std::unique_ptr<PluginSlot>> m_activeSlots;
@@ -256,8 +279,6 @@ private:
     moodycamel::ReaderWriterQueue<std::unique_ptr<PluginSlot>> m_reclaimQueue{1024};
 
     // 5. Fail-Safe Audio Thread Stash (Prevents destruction on audio thread if queue is saturated)
-    std::array<std::unique_ptr<PluginSlot>, 16> m_stashedReclamations;
-    size_t m_stashedCount{0};
     std::vector<std::unique_ptr<PluginSlot>> m_deferredReclaim;
     std::atomic<bool> m_isAudioRunning{false};
 
@@ -331,6 +352,8 @@ struct BranchCommand {
 class ParallelSplitMergeBlock : public AudioNode {
 public:
     static constexpr size_t BRANCH_QUEUE_CAPACITY = 64;
+    static constexpr size_t MAX_BRANCHES = 16;
+    static constexpr size_t DEFERRED_BRANCH_RECLAIM_CAPACITY = 256;
 
     explicit ParallelSplitMergeBlock(std::string name = "Parallel Split/Merge");
     ~ParallelSplitMergeBlock() override;
@@ -338,6 +361,7 @@ public:
     void prepare(double sampleRate, uint32_t maxBlockSize) override;
     void process(AudioProcessContext& ctx) override;
     void reset() override;
+    void setAudioRunning(bool running) noexcept;
 
     [[nodiscard]] NodeType type() const noexcept override { return NodeType::ParallelSplitMerge; }
     [[nodiscard]] const std::string& name() const noexcept override { return m_name; }
@@ -348,6 +372,11 @@ public:
     void removeBranch(size_t index);
     [[nodiscard]] size_t numBranches() const noexcept;
     [[nodiscard]] ParallelBranch* getBranch(size_t index) noexcept;
+    [[nodiscard]] ParallelBranch* getBranchLockFree(size_t index) const noexcept {
+        const size_t count = m_rtNumBranches.load(std::memory_order_acquire);
+        if (index >= count || index >= MAX_BRANCHES) return nullptr;
+        return m_rtBranches[index].load(std::memory_order_acquire);
+    }
 
     // Audio-thread lock-free branch access (must ONLY be called on the audio thread or when audio is stopped)
     void flushBranchCommandsIntoActive() noexcept { drainCommandQueueIntoActive(); }
@@ -363,12 +392,15 @@ public:
 private:
     void drainCommandQueueIntoActive();
     void stashBranchForReclamation(std::unique_ptr<ParallelBranch> branch) noexcept;
+    void syncRtBranchesLocked() noexcept;
 
     std::string m_name;
     mutable std::mutex m_branchMutex;
 
     // 1. UI-Thread Branch Shadow Registry (guarded by m_branchMutex)
     std::vector<ParallelBranch*> m_uiBranches;
+    std::array<std::atomic<ParallelBranch*>, MAX_BRANCHES> m_rtBranches{};
+    std::atomic<size_t> m_rtNumBranches{0};
 
     // 2. Audio-Thread Active Branches (owned exclusively by Audio thread in process())
     std::vector<std::unique_ptr<ParallelBranch>> m_activeBranches;
@@ -517,13 +549,14 @@ struct GraphCommand {
 /**
  * @brief Master Audio Graph Engine managing the entire realtime signal path.
  * Real-time safety contract: strictly 0 heap allocations, 0 mutex locks, and 0 blocking file I/O
- * in the ASIO audio callback. Structural mutations execute at block boundaries via SPSC queue
- * with a 64-sample equal-power micro-crossfade.
+ * in the ASIO audio callback and WinMM MIDI callback. Structural mutations execute at block
+ * boundaries via SPSC queue with a 64-sample equal-power micro-crossfade.
  */
 class GraphEngine {
 public:
     static constexpr size_t GRAPH_QUEUE_CAPACITY = 512;
     static constexpr size_t MAX_GRAPH_NODES = 128;
+    static constexpr size_t DEFERRED_RECLAIM_CAPACITY = 4096;
 
     GraphEngine();
     ~GraphEngine();
@@ -532,6 +565,7 @@ public:
     void process(const AudioBufferView& hardwareIn, AudioBufferView& hardwareOut);
     void process(const AudioBufferView& hardwareIn, AudioBufferView& hardwareOut, const AudioProcessContext& transportCtx);
     void reset();
+    void setAudioRunning(bool running) noexcept;
 
     // UI-thread mutations (Push to SPSC command queue, update UI shadow list)
     void addSerialNode(std::unique_ptr<AudioNode> node);
@@ -554,11 +588,11 @@ public:
 
     void processReclamation() noexcept;
 
-    // UI readouts (Reads UI shadow list, zero lock contention)
+    // UI readouts
     [[nodiscard]] size_t numNodes() const noexcept;
     [[nodiscard]] AudioNode* getNode(size_t index) noexcept;
 
-    // Thread-safe parameter dispatch (Never returns raw pointers, locks m_uiMutex internally)
+    // Wait-free, lock-free parameter dispatch (0 mutex locks on MIDI/Audio threads)
     bool dispatchParameterThreadSafe(int slotIdx, int branchIdx, int branchSlotIdx,
                                      uint32_t paramId, float normalizedValue) noexcept;
 
@@ -596,6 +630,7 @@ private:
     void stashChainForReclamation(std::unique_ptr<NodeChain> chain) noexcept;
     void flushStashedReclamations() noexcept;
     void drainCommandQueueIntoActive();
+    void syncRtNodesLocked() noexcept;
 
     double m_sampleRate{48000.0};
     uint32_t m_maxBlockSize{256};
@@ -612,8 +647,10 @@ private:
     LevelMeter m_inputMeter;
     LevelMeter m_outputMeter;
 
-    // 1. UI-Thread Shadow Registry (Only accessed from UI thread)
+    // 1. UI-Thread Shadow Registry & Wait-Free Atomic Topology Mirror
     std::vector<AudioNode*> m_uiNodes;
+    std::array<std::atomic<AudioNode*>, MAX_GRAPH_NODES> m_rtNodes{};
+    std::atomic<size_t> m_rtNumNodes{0};
 
     // 2. Audio-Thread Active Nodes (Only accessed from Audio thread in process() or prepare())
     std::vector<std::unique_ptr<AudioNode>> m_activeNodes;
@@ -626,15 +663,14 @@ private:
     moodycamel::ReaderWriterQueue<std::unique_ptr<NodeChain>> m_chainReclaimQueue{1024};
 
     // 5. Fail-Safe Audio Thread Stash (Prevents destruction on audio thread if queue is saturated)
-    std::array<std::unique_ptr<AudioNode>, 16> m_stashedReclamations;
-    size_t m_stashedCount{0};
     std::vector<std::unique_ptr<AudioNode>> m_deferredReclaim;
     std::array<std::unique_ptr<NodeChain>, 16> m_stashedChains;
     size_t m_stashedChainCount{0};
 
-    // UI thread mutex (Guards UI shadow modifications, NEVER locked on audio thread!)
+    // UI thread mutex (Guards UI shadow modifications, NEVER locked on audio or MIDI threads!)
     mutable std::mutex m_uiMutex;
     std::atomic<bool> m_isAudioRunning{false};
+    std::atomic<bool> m_cancelSceneCrossfade{false};
 
     OwnedAudioBuffer m_mainProcessingBuffer;
     OwnedAudioBuffer m_scratchBuffer;

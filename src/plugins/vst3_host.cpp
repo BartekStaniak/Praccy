@@ -4,6 +4,9 @@
 #include <iostream>
 #include <algorithm>
 #include <vector>
+#if defined(_M_X64) || defined(__x86_64__)
+#include <immintrin.h>
+#endif
 
 #include <pluginterfaces/base/ibstream.h>
 #include <pluginterfaces/vst/ivstmessage.h>
@@ -215,6 +218,21 @@ struct Vst3PluginInstance::Impl {
 
 Vst3PluginInstance::Vst3PluginInstance() : m_impl(std::make_unique<Impl>()) {
     m_impl->componentHandler.owner.store(this, std::memory_order_release);
+}
+
+void Vst3PluginInstance::suspendAndFenceAudio() noexcept {
+    m_suspendProcessing.store(true, std::memory_order_release);
+    if (GetCurrentThreadId() != m_audioThreadId.load(std::memory_order_relaxed)) {
+        while (m_activeProcessCallbacks.load(std::memory_order_acquire) != 0) {
+#if defined(_M_X64) || defined(__x86_64__)
+            _mm_pause();
+#endif
+        }
+    }
+}
+
+void Vst3PluginInstance::resumeAudio() noexcept {
+    m_suspendProcessing.store(false, std::memory_order_release);
 }
 
 void Vst3PluginInstance::onGuiBeginEdit(Steinberg::Vst::ParamID paramId) noexcept {
@@ -479,6 +497,7 @@ std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::
 }
 
 Vst3PluginInstance::~Vst3PluginInstance() {
+    suspendAndFenceAudio();
     closeGui();
     if (m_impl) {
         m_impl->componentHandler.detachHost();
@@ -562,10 +581,14 @@ Vst3PluginInstance::~Vst3PluginInstance() {
 }
 
 void Vst3PluginInstance::prepare(double sampleRate, uint32_t maxBlockSize) {
+    suspendAndFenceAudio();
     m_sampleRate = sampleRate;
     m_maxBlockSize = maxBlockSize;
 
-    if (!m_component || !m_processor) return;
+    if (!m_component || !m_processor) {
+        resumeAudio();
+        return;
+    }
 
     m_component->activateBus(Steinberg::Vst::kAudio, Steinberg::Vst::kInput, 0, true);
     m_component->activateBus(Steinberg::Vst::kAudio, Steinberg::Vst::kOutput, 0, true);
@@ -590,10 +613,27 @@ void Vst3PluginInstance::prepare(double sampleRate, uint32_t maxBlockSize) {
     m_impl->processContext.timeSigNumerator = 4;
     m_impl->processContext.timeSigDenominator = 4;
     m_impl->processContext.projectTimeSamples = 0;
+    resumeAudio();
 }
 
 void Vst3PluginInstance::process(audio::AudioProcessContext& ctx) {
-    if (!m_processor || ctx.numSamples == 0 || m_faulted.load(std::memory_order_relaxed)) {
+    if (!m_processor || ctx.numSamples == 0 ||
+        m_faulted.load(std::memory_order_relaxed) ||
+        m_suspendProcessing.load(std::memory_order_acquire)) {
+        ctx.output.copyFrom(ctx.input);
+        return;
+    }
+
+    m_activeProcessCallbacks.fetch_add(1, std::memory_order_acq_rel);
+    struct ActiveCallbackGuard {
+        std::atomic<uint32_t>& counter;
+        ~ActiveCallbackGuard() noexcept {
+            counter.fetch_sub(1, std::memory_order_release);
+        }
+    } callbackGuard{m_activeProcessCallbacks};
+
+    if (m_suspendProcessing.load(std::memory_order_acquire) ||
+        m_faulted.load(std::memory_order_relaxed)) {
         ctx.output.copyFrom(ctx.input);
         return;
     }
@@ -632,7 +672,7 @@ void Vst3PluginInstance::process(audio::AudioProcessContext& ctx) {
         m_inChannelPtrs[c] = ctx.input.channel(c);
     }
     Steinberg::Vst::AudioBusBuffers inBus{};
-    inBus.numChannels = static_cast<Steinberg::int32>(inCh);
+    inBus.numChannels = static_cast<Steinberg::int32>(safeInCh);
     inBus.channelBuffers32 = m_inChannelPtrs.data();
 
     const uint32_t outCh = ctx.output.numChannels();
@@ -641,7 +681,7 @@ void Vst3PluginInstance::process(audio::AudioProcessContext& ctx) {
         m_outChannelPtrs[c] = ctx.output.channel(c);
     }
     Steinberg::Vst::AudioBusBuffers outBus{};
-    outBus.numChannels = static_cast<Steinberg::int32>(outCh);
+    outBus.numChannels = static_cast<Steinberg::int32>(safeOutCh);
     outBus.channelBuffers32 = m_outChannelPtrs.data();
 
     data.numInputs = 1;
@@ -674,6 +714,7 @@ void Vst3PluginInstance::process(audio::AudioProcessContext& ctx) {
 }
 
 void Vst3PluginInstance::reset() {
+    suspendAndFenceAudio();
     std::pair<Steinberg::Vst::ParamID, double> dummy;
     while (m_paramQueue.try_dequeue(dummy)) {}
     m_audioThreadParamCount = 0;
@@ -683,6 +724,7 @@ void Vst3PluginInstance::reset() {
         m_processor->setProcessing(false);
         m_processor->setProcessing(true);
     }
+    resumeAudio();
 }
 
 size_t Vst3PluginInstance::numParameters() const noexcept {
@@ -868,9 +910,13 @@ std::vector<uint8_t> Vst3PluginInstance::saveState() const {
 bool Vst3PluginInstance::loadState(const std::vector<uint8_t>& state) {
     if (!m_component || state.empty() || m_faulted.load(std::memory_order_relaxed)) return false;
 
-    // Drain any stale pending parameter changes so they don't overwrite the restored state
+    suspendAndFenceAudio();
+
+    // Drain any stale pending parameter changes while audio thread is fenced
     std::pair<Steinberg::Vst::ParamID, double> dummy;
     while (m_paramQueue.try_dequeue(dummy)) {}
+    m_audioThreadParamCount = 0;
+    m_inputParamChanges.clear();
 
     bool success = false;
     m_suppressHandlerCallbacks.store(true, std::memory_order_relaxed);
@@ -896,6 +942,8 @@ bool Vst3PluginInstance::loadState(const std::vector<uint8_t>& state) {
             m_paramQueue.try_enqueue({desc.id, normVal});
         }
     }
+    resumeAudio();
+
     if (success) {
         updateStateHash(state);
     }

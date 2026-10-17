@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <dwmapi.h>
 #include <shellapi.h>
 #include <filesystem>
 #include <d3d11.h>
@@ -164,20 +165,11 @@ void loadApplicationFonts(ImGuiIO& io, float scale) {
 
 void enableWin32DarkTitleBar(HWND hwnd, bool isDark = true) {
     if (!hwnd) return;
-    HMODULE hDwm = LoadLibraryW(L"dwmapi.dll");
-    if (!hDwm) return;
-    typedef HRESULT (WINAPI *PFN_DwmSetWindowAttribute)(HWND, DWORD, LPCVOID, DWORD);
-    FARPROC proc = GetProcAddress(hDwm, "DwmSetWindowAttribute");
-    if (proc) {
-        PFN_DwmSetWindowAttribute pfnSetAttr = nullptr;
-        std::memcpy(&pfnSetAttr, &proc, sizeof(proc));
-        BOOL useDark = isDark ? TRUE : FALSE;
-        // DWMWA_USE_IMMERSIVE_DARK_MODE = 20 (Win10 20H1+ / Win11), fallback 19
-        if (FAILED(pfnSetAttr(hwnd, 20, &useDark, sizeof(useDark)))) {
-            pfnSetAttr(hwnd, 19, &useDark, sizeof(useDark));
-        }
+    BOOL useDark = isDark ? TRUE : FALSE;
+    // DWMWA_USE_IMMERSIVE_DARK_MODE = 20 (Win10 20H1+ / Win11), fallback 19
+    if (FAILED(DwmSetWindowAttribute(hwnd, 20, &useDark, sizeof(useDark)))) {
+        DwmSetWindowAttribute(hwnd, 19, &useDark, sizeof(useDark));
     }
-    FreeLibrary(hDwm);
 }
 
 float getDpiScaleForWindow(HWND hwnd) {
@@ -490,7 +482,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         ctx.numSamples = static_cast<uint32_t>(numSamples);
         ctx.tempoBpm = (static_cast<double>(metronome.bpm()) > 1.0) ? static_cast<double>(metronome.bpm()) : 120.0;
         ctx.timeSigNumerator = (metronome.beatsPerBar() > 0) ? metronome.beatsPerBar() : 4;
-        ctx.timeSigDenominator = 4;
+        ctx.timeSigDenominator = (metronome.timeSigDenominator() > 0) ? metronome.timeSigDenominator() : 4;
         ctx.projectTimeSamples = s_projectTimeSamples;
 
         graph.process(in, out, ctx);
@@ -749,6 +741,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     praccy::plugins::PluginWindowManager::instance().closeAllWindows();
 
     asio.stop();
+    graph.setAudioRunning(false);
     asio.unloadDriver();
 
     praccy::ui::ThumbnailManager::instance().shutdown();

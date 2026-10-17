@@ -4,6 +4,9 @@
 #include <sstream>
 #include <filesystem>
 #include <cstring>
+#if defined(_M_X64) || defined(__x86_64__)
+#include <immintrin.h>
+#endif
 
 namespace praccy::plugins {
 
@@ -43,6 +46,21 @@ VOID CALLBACK clapTimerCallback(HWND /*hwnd*/, UINT /*uMsg*/, UINT_PTR idEvent, 
 }
 
 } // anonymous namespace
+
+void ClapPluginInstance::suspendAndFenceAudio() noexcept {
+    m_suspendProcessing.store(true, std::memory_order_release);
+    if (GetCurrentThreadId() != m_audioThreadId.load(std::memory_order_relaxed)) {
+        while (m_activeProcessCallbacks.load(std::memory_order_acquire) != 0) {
+#if defined(_M_X64) || defined(__x86_64__)
+            _mm_pause();
+#endif
+        }
+    }
+}
+
+void ClapPluginInstance::resumeAudio() noexcept {
+    m_suspendProcessing.store(false, std::memory_order_release);
+}
 
 const void* ClapPluginInstance::clapHostGetExtension(const clap_host* /*host*/, const char* extensionId) {
     if (!extensionId) return nullptr;
@@ -168,7 +186,10 @@ bool CLAP_ABI ClapPluginInstance::clapHostGuiRequestResize(const clap_host_t* ho
     auto* self = static_cast<ClapPluginInstance*>(host->host_data);
     if (self->m_guiParentHwnd && IsWindow(self->m_guiParentHwnd)) {
         RECT wr = {0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
-        AdjustWindowRectEx(&wr, WS_OVERLAPPEDWINDOW, FALSE, WS_EX_APPWINDOW | WS_EX_TOPMOST);
+        AdjustWindowRectEx(&wr,
+                           static_cast<DWORD>(GetWindowLongW(self->m_guiParentHwnd, GWL_STYLE)),
+                           FALSE,
+                           static_cast<DWORD>(GetWindowLongW(self->m_guiParentHwnd, GWL_EXSTYLE)));
         SetWindowPos(self->m_guiParentHwnd, nullptr, 0, 0, wr.right - wr.left, wr.bottom - wr.top, SWP_NOMOVE | SWP_NOZORDER);
         return true;
     }
@@ -222,6 +243,7 @@ void ClapPluginInstance::fireTimer(clap_id timerId) {
 void ClapPluginInstance::handleMainThreadCallbacks() noexcept {
     if (m_restartRequested.exchange(false, std::memory_order_acq_rel)) {
         if (m_plugin && m_isActivated) {
+            suspendAndFenceAudio();
             safeCallPlugin([&]() {
                 if (m_isProcessing.load(std::memory_order_acquire)) {
                     m_plugin->stop_processing(m_plugin);
@@ -235,6 +257,7 @@ void ClapPluginInstance::handleMainThreadCallbacks() noexcept {
                     }
                 }
             });
+            resumeAudio();
         }
     }
     if (m_callbackRequested.exchange(false, std::memory_order_acq_rel)) {
@@ -303,7 +326,8 @@ void ClapPluginInstance::flushPendingParamsIfStopped() {
     if (m_isActivated) {
         return;
     }
-    if (m_isProcessing.load(std::memory_order_acquire)) {
+    if (m_isProcessing.load(std::memory_order_acquire) ||
+        m_activeProcessCallbacks.load(std::memory_order_acquire) != 0) {
         return;
     }
     const uint64_t pushGenBefore = m_paramPushGen.load(std::memory_order_acquire);
@@ -460,6 +484,7 @@ std::unique_ptr<ClapPluginInstance> ClapPluginInstance::loadFromFile(const std::
 }
 
 ClapPluginInstance::~ClapPluginInstance() {
+    suspendAndFenceAudio();
     closeGui();
     {
         std::lock_guard<std::mutex> lock(s_timerMutex);
@@ -492,6 +517,7 @@ ClapPluginInstance::~ClapPluginInstance() {
 }
 
 void ClapPluginInstance::prepare(double sampleRate, uint32_t maxBlockSize) {
+    suspendAndFenceAudio();
     m_sampleRate = sampleRate;
     m_maxBlockSize = maxBlockSize;
     if (m_plugin) {
@@ -510,10 +536,27 @@ void ClapPluginInstance::prepare(double sampleRate, uint32_t maxBlockSize) {
             m_latencySamples = m_latencyExt->get(m_plugin);
         }
     }
+    resumeAudio();
 }
 
 void ClapPluginInstance::process(audio::AudioProcessContext& ctx) {
-    if (!m_plugin || ctx.numSamples == 0 || m_faulted.load(std::memory_order_relaxed)) {
+    if (!m_plugin || ctx.numSamples == 0 ||
+        m_faulted.load(std::memory_order_relaxed) ||
+        m_suspendProcessing.load(std::memory_order_acquire)) {
+        ctx.output.copyFrom(ctx.input);
+        return;
+    }
+
+    m_activeProcessCallbacks.fetch_add(1, std::memory_order_acq_rel);
+    struct ActiveCallbackGuard {
+        std::atomic<uint32_t>& counter;
+        ~ActiveCallbackGuard() noexcept {
+            counter.fetch_sub(1, std::memory_order_release);
+        }
+    } callbackGuard{m_activeProcessCallbacks};
+
+    if (m_suspendProcessing.load(std::memory_order_acquire) ||
+        m_faulted.load(std::memory_order_relaxed)) {
         ctx.output.copyFrom(ctx.input);
         return;
     }
@@ -531,7 +574,7 @@ void ClapPluginInstance::process(audio::AudioProcessContext& ctx) {
     }
     clap_audio_buffer inBuf{};
     inBuf.data32 = m_inChannelPtrs.data();
-    inBuf.channel_count = inCh;
+    inBuf.channel_count = safeInCh;
     inBuf.latency = 0;
     inBuf.constant_mask = 0;
 
@@ -541,7 +584,7 @@ void ClapPluginInstance::process(audio::AudioProcessContext& ctx) {
     }
     clap_audio_buffer outBuf{};
     outBuf.data32 = m_outChannelPtrs.data();
-    outBuf.channel_count = outCh;
+    outBuf.channel_count = safeOutCh;
     outBuf.latency = 0;
     outBuf.constant_mask = 0;
 
@@ -610,6 +653,7 @@ void ClapPluginInstance::process(audio::AudioProcessContext& ctx) {
 }
 
 void ClapPluginInstance::reset() {
+    suspendAndFenceAudio();
     std::pair<clap_id, double> dummy;
     while (m_paramQueue.try_dequeue(dummy)) {}
     m_audioThreadEventCount = 0;
@@ -619,6 +663,7 @@ void ClapPluginInstance::reset() {
             m_plugin->reset(m_plugin);
         });
     }
+    resumeAudio();
 }
 
 size_t ClapPluginInstance::numParameters() const noexcept {
@@ -804,6 +849,7 @@ void ClapPluginInstance::getPreferredSize(int& width, int& height) const {
 }
 
 void ClapPluginInstance::resetFault() noexcept {
+    suspendAndFenceAudio();
     std::pair<clap_id, double> dummy;
     while (m_paramQueue.try_dequeue(dummy)) {}
     while (m_guiOutParamQueue.try_dequeue(dummy)) {}
@@ -816,6 +862,7 @@ void ClapPluginInstance::resetFault() noexcept {
         });
     }
     IPluginInstance::resetFault();
+    resumeAudio();
 }
 
 std::vector<uint8_t> ClapPluginInstance::saveState() const {
@@ -850,10 +897,14 @@ bool ClapPluginInstance::loadState(const std::vector<uint8_t>& state) {
         return false;
     }
 
-    // Drain any stale queued parameter changes before loading restored state
+    suspendAndFenceAudio();
+
+    // Drain any stale queued parameter changes while audio processing is fenced
     std::pair<clap_id, double> dummy;
     while (m_paramQueue.try_dequeue(dummy)) {}
     while (m_guiOutParamQueue.try_dequeue(dummy)) {}
+    m_audioThreadEventCount = 0;
+    m_eventBuffer.clear();
 
     struct ReadCtx {
         const uint8_t* data;
@@ -891,10 +942,12 @@ bool ClapPluginInstance::loadState(const std::vector<uint8_t>& state) {
             }
         }
     }
+    m_paramDrainGen.store(m_paramPushGen.load(std::memory_order_relaxed), std::memory_order_release);
+    resumeAudio();
+
     if (ok) {
         updateStateHash(state);
     }
-    m_paramDrainGen.store(m_paramPushGen.load(std::memory_order_relaxed), std::memory_order_release);
     clearGuiParamEdit();
     return ok;
 }

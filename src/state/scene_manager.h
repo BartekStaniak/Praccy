@@ -130,7 +130,9 @@ public:
     static std::unique_ptr<audio::PluginSlot> createSlotFromPreset(const PluginSlotPreset& p);
 
     // Graph snapshot serialization & crossfaded application
-    static ScenePreset captureGraphSnapshot(audio::GraphEngine& graph, const std::string& name = "Snapshot");
+    static ScenePreset captureGraphSnapshot(audio::GraphEngine& graph,
+                                            const std::string& name = "Snapshot",
+                                            bool captureBinaryState = true);
     static bool applyGraphSnapshot(const ScenePreset& preset, audio::GraphEngine& graph);
     static bool canApplyInPlace(const ScenePreset& preset, audio::GraphEngine& graph);
     static bool applyGraphSnapshotInPlace(const ScenePreset& preset, audio::GraphEngine& graph);

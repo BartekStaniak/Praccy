@@ -202,14 +202,14 @@ bool AsioManager::start(int32_t bufferSize) {
         return false;
     }
 
-    m_isRunning.store(true);
+    m_isRunning.store(true, std::memory_order_release);
     return true;
 }
 
 void AsioManager::stop() {
-    if (!m_driver || !m_isRunning.load()) return;
+    if (!m_driver || !m_isRunning.load(std::memory_order_acquire)) return;
 
-    m_isRunning.store(false);
+    m_isRunning.store(false, std::memory_order_release);
     m_driver->stop();
     m_driver->disposeBuffers();
 }

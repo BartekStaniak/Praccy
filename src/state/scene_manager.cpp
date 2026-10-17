@@ -14,6 +14,7 @@
 #include <sstream>
 #include <iostream>
 #include <iomanip>
+#include <algorithm>
 
 #include "../utils/parse_utils.h"
 
@@ -31,7 +32,7 @@ static std::vector<uint8_t> hexToBytes(const std::string& hex) {
     return praccy::utils::hexToBytes(hex);
 }
 
-static void captureSlotToPreset(audio::PluginSlot* slot, PluginSlotPreset& sp) {
+static void captureSlotToPreset(audio::PluginSlot* slot, PluginSlotPreset& sp, bool captureBinaryState = true) {
     if (!slot) return;
     sp.name = slot->name();
     sp.bypassed = slot->isBypassed();
@@ -52,7 +53,9 @@ static void captureSlotToPreset(audio::PluginSlot* slot, PluginSlotPreset& sp) {
         } else {
             sp.type = "BuiltIn";
         }
-        sp.state = inner->saveState();
+        if (captureBinaryState) {
+            sp.state = inner->saveState();
+        }
 
         const size_t nParams = inner->numParameters();
         sp.paramValues.reserve(nParams);
@@ -307,7 +310,9 @@ std::unique_ptr<audio::PluginSlot> SceneManager::createSlotFromPreset(const Plug
     return slot;
 }
 
-ScenePreset SceneManager::captureGraphSnapshot(audio::GraphEngine& graph, const std::string& name) {
+ScenePreset SceneManager::captureGraphSnapshot(audio::GraphEngine& graph,
+                                               const std::string& name,
+                                               bool captureBinaryState) {
     ScenePreset scene;
     scene.name = name;
 
@@ -321,7 +326,7 @@ ScenePreset SceneManager::captureGraphSnapshot(audio::GraphEngine& graph, const 
             if (slot) {
                 NodePreset np;
                 np.kind = NodePreset::Kind::Plugin;
-                captureSlotToPreset(slot, np.slot);
+                captureSlotToPreset(slot, np.slot, captureBinaryState);
                 scene.nodes.push_back(std::move(np));
             }
         } else if (node->type() == audio::NodeType::ParallelSplitMerge) {
@@ -347,7 +352,7 @@ ScenePreset SceneManager::captureGraphSnapshot(audio::GraphEngine& graph, const 
                         if (!bSlot) continue;
 
                         PluginSlotPreset sp;
-                        captureSlotToPreset(bSlot, sp);
+                        captureSlotToPreset(bSlot, sp, captureBinaryState);
                         bp.slots.push_back(std::move(sp));
                     }
                     np.branches.push_back(std::move(bp));
@@ -818,6 +823,9 @@ static void serializePreset(std::ostream& os, const ScenePreset& p, const std::s
     if (!p.category.empty()) {
         os << "category=" << praccy::utils::escapeIniField(p.category) << "\n";
     }
+    os << "tempoBpm=" << p.tempoBpm << "\n";
+    os << "timeSigNumerator=" << static_cast<int>(p.timeSigNumerator) << "\n";
+    os << "timeSigDenominator=" << static_cast<int>(p.timeSigDenominator) << "\n";
     os << "numNodes=" << p.nodes.size() << "\n";
     for (size_t n = 0; n < p.nodes.size(); ++n) {
         const auto& node = p.nodes[n];
@@ -985,6 +993,7 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
                           const std::string& pfx,
                           std::vector<PluginSlotPreset::MacroBinding>& outMacros) {
         size_t numMacros = kv.count(pfx + "numMacros") ? praccy::utils::parseInteger<size_t>(kv.at(pfx + "numMacros"), 0) : 0;
+        numMacros = (std::min)(numMacros, static_cast<size_t>(16));
         for (size_t m = 0; m < numMacros; ++m) {
             std::string mpfx = pfx + "m_" + std::to_string(m) + "_";
             PluginSlotPreset::MacroBinding mb;
@@ -1007,8 +1016,18 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
         if (itName != kv.end()) sp.name = praccy::utils::unescapeIniField(itName->second);
         auto itCat = kv.find("category");
         if (itCat != kv.end()) sp.category = praccy::utils::unescapeIniField(itCat->second);
+        if (kv.count("tempoBpm")) {
+            sp.tempoBpm = std::clamp(praccy::utils::parseFloat(kv.at("tempoBpm"), 120.0f), 20.0f, 400.0f);
+        }
+        if (kv.count("timeSigNumerator")) {
+            sp.timeSigNumerator = static_cast<uint8_t>(std::clamp<uint32_t>(praccy::utils::parseInteger<uint32_t>(kv.at("timeSigNumerator"), 4), 1, 32));
+        }
+        if (kv.count("timeSigDenominator")) {
+            sp.timeSigDenominator = static_cast<uint8_t>(std::clamp<uint32_t>(praccy::utils::parseInteger<uint32_t>(kv.at("timeSigDenominator"), 4), 1, 32));
+        }
         auto itNodes = kv.find("numNodes");
         size_t count = (itNodes != kv.end()) ? praccy::utils::parseInteger<size_t>(itNodes->second, 0) : 0;
+        count = (std::min)(count, static_cast<size_t>(128));
 
         for (size_t n = 0; n < count; ++n) {
             std::string pfx = "node_" + std::to_string(n) + "_";
@@ -1035,6 +1054,7 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
                 np.kind = NodePreset::Kind::ParallelBlock;
                 np.branchBlend = kv.count(pfx + "branchBlend") ? praccy::utils::parseFloat(kv.at(pfx + "branchBlend"), 0.0f) : 0.0f;
                 size_t numBr = kv.count(pfx + "numBranches") ? praccy::utils::parseInteger<size_t>(kv.at(pfx + "numBranches"), 0) : 0;
+                numBr = (std::min)(numBr, static_cast<size_t>(8));
                 for (size_t b = 0; b < numBr; ++b) {
                     std::string bpfx = pfx + "b_" + std::to_string(b) + "_";
                     BranchPreset bp;
@@ -1046,6 +1066,7 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
                     bp.phaseInvert = kv.count(bpfx + "phase") && kv.at(bpfx + "phase") == "1";
 
                     size_t numSl = kv.count(bpfx + "numSlots") ? praccy::utils::parseInteger<size_t>(kv.at(bpfx + "numSlots"), 0) : 0;
+                    numSl = (std::min)(numSl, static_cast<size_t>(64));
                     for (size_t s = 0; s < numSl; ++s) {
                         std::string spfx = bpfx + "s_" + std::to_string(s) + "_";
                         PluginSlotPreset sl;

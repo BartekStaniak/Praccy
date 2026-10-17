@@ -14,6 +14,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <dwmapi.h>
 #endif
 
 namespace praccy::ui {
@@ -449,22 +450,13 @@ inline void applyTheme(ThemeId id) {
 #if defined(_WIN32)
     if (const ImGuiViewport* vp = ImGui::GetMainViewport()) {
         if (HWND hwnd = reinterpret_cast<HWND>(vp->PlatformHandleRaw ? vp->PlatformHandleRaw : vp->PlatformHandle)) {
-            if (HMODULE hDwm = LoadLibraryW(L"dwmapi.dll")) {
-                typedef HRESULT (WINAPI *PFN_DwmSetWindowAttribute)(HWND, DWORD, LPCVOID, DWORD);
-                FARPROC proc = GetProcAddress(hDwm, "DwmSetWindowAttribute");
-                if (proc) {
-                    PFN_DwmSetWindowAttribute pfnSetAttr = nullptr;
-                    std::memcpy(&pfnSetAttr, &proc, sizeof(proc));
-                    BOOL useDark = tokens.isDark ? TRUE : FALSE;
-                    if (FAILED(pfnSetAttr(hwnd, 20, &useDark, sizeof(useDark)))) {
-                        pfnSetAttr(hwnd, 19, &useDark, sizeof(useDark));
-                    }
-                    // Force Windows non-client titlebar repaint on theme switch
-                    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
-                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-                }
-                FreeLibrary(hDwm);
+            BOOL useDark = tokens.isDark ? TRUE : FALSE;
+            if (FAILED(DwmSetWindowAttribute(hwnd, 20, &useDark, sizeof(useDark)))) {
+                DwmSetWindowAttribute(hwnd, 19, &useDark, sizeof(useDark));
             }
+            // Force Windows non-client titlebar repaint on theme switch
+            SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         }
     }
 #endif
@@ -545,7 +537,7 @@ inline void applyTheme(ThemeId id) {
     colors[ImGuiCol_TableHeaderBg]         = tokens.surfaces.headerBg;
     colors[ImGuiCol_TableBorderStrong]     = tokens.borders.strong;
     colors[ImGuiCol_TableBorderLight]      = tokens.borders.subtle;
-    colors[ImGuiCol_TableRowBg]            = ImVec4(0, 0, 0, 0);
+    colors[ImGuiCol_TableRowBg]            = ColorToken::transparent();
     colors[ImGuiCol_TableRowBgAlt]         = tokens.surfaces.frameBg;
     colors[ImGuiCol_TextSelectedBg]        = tokens.borders.focus;
     colors[ImGuiCol_DragDropTarget]        = tokens.text.accent;
@@ -563,4 +555,3 @@ namespace ui = praccy::ui;
 } // namespace praccy
 
 namespace ui = praccy::ui;
-

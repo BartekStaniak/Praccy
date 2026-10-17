@@ -3,8 +3,8 @@
 #define PRACCY_VERSION_MAJOR 2
 #define PRACCY_VERSION_MINOR 7
 #define PRACCY_VERSION_PATCH 0
-#define PRACCY_VERSION_BUILD 1
-#define PRACCY_VERSION_RAW   "2.7-beta1"
+#define PRACCY_VERSION_BUILD 2
+#define PRACCY_VERSION_RAW   "2.7-beta2"
 #define PRACCY_VERSION_STR   "v" PRACCY_VERSION_RAW
 
 #ifdef __cplusplus
@@ -13,6 +13,7 @@ namespace praccy {
 // Current application version - Single Source of Truth for all Praccy C++ components
 inline constexpr const char* kVersionString = PRACCY_VERSION_STR;
 inline constexpr const char* kVersionRaw    = PRACCY_VERSION_RAW;
+inline constexpr const char* kDawprojectAppVersion = "2.6.0";
 
 inline constexpr int kVersionMajor = PRACCY_VERSION_MAJOR;
 inline constexpr int kVersionMinor = PRACCY_VERSION_MINOR;

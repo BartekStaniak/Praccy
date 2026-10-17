@@ -73,6 +73,7 @@ inline void DrawStrobeTuner(const tools::TunerResult& result,
 
     ImGuiStorage* storage = ImGui::GetStateStorage();
     const ImGuiID phaseKey = ImGui::GetID("##praccy_strobe_phase");
+    const ImGuiID smoothCentsKey = ImGui::GetID("##praccy_strobe_needle_cents");
     float s_strobePhase = storage ? storage->GetFloat(phaseKey, 0.0f) : 0.0f;
     const bool inTuneExact = isEnabled && result.confidence && (std::abs(result.centDeviation) <= 1.0f);
     const bool inTuneBroad = isEnabled && result.confidence && (std::abs(result.centDeviation) <= 3.0f);
@@ -152,10 +153,17 @@ inline void DrawStrobeTuner(const tools::TunerResult& result,
                     tickCol, tickThick);
     }
 
-    // Calibrated needle deviation pointer
+    // Calibrated needle deviation pointer with EMA ballistic smoothing
     if (isEnabled && result.confidence) {
-        const float clampedDeviation = std::clamp(result.centDeviation, -50.0f, 50.0f);
-        const float needleAngle = (270.0f + (clampedDeviation / 50.0f) * 60.0f) * kDegToRad;
+        const float targetDeviation = std::clamp(result.centDeviation, -50.0f, 50.0f);
+        float smoothedDeviation = targetDeviation;
+        if (storage) {
+            const float prevDeviation = storage->GetFloat(smoothCentsKey, targetDeviation);
+            const float alpha = (dt > 0.0f) ? std::clamp(1.0f - std::exp(-18.0f * dt), 0.15f, 1.0f) : 1.0f;
+            smoothedDeviation = prevDeviation + alpha * (targetDeviation - prevDeviation);
+            storage->SetFloat(smoothCentsKey, smoothedDeviation);
+        }
+        const float needleAngle = (270.0f + (smoothedDeviation / 50.0f) * 60.0f) * kDegToRad;
         const float nCos = std::cos(needleAngle);
         const float nSin = std::sin(needleAngle);
 
@@ -371,6 +379,7 @@ inline void DrawStrobeTunerModule(const tools::TunerResult& result,
         dl->AddRectFilled(ImVec2(markerX - 1.5f, barMin.y), ImVec2(markerX + 1.5f, barMax.y), centsColor, 1.0f);
     }
 
+    ImGui::SetCursorScreenPos(startPos);
     ImGui::Dummy(ImVec2(availW, availH));
 }
 

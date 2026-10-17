@@ -13,12 +13,45 @@ PluginSlot::PluginSlot(std::unique_ptr<AudioNode> innerNode)
     : m_innerNode(std::move(innerNode)) {
     if (m_innerNode) {
         m_pluginPtr = dynamic_cast<plugins::IPluginInstance*>(m_innerNode.get());
+        refreshCachedParameterRanges();
     }
+}
+
+void PluginSlot::refreshCachedParameterRanges() noexcept {
+    if (!m_pluginPtr) {
+        m_numParamRanges.store(0, std::memory_order_release);
+        return;
+    }
+    const size_t total = std::min(m_pluginPtr->numParameters(), MAX_CACHED_PARAM_RANGES);
+    for (size_t i = 0; i < total; ++i) {
+        auto desc = m_pluginPtr->getParameterDesc(i);
+        m_paramRanges[i] = CachedParamRange{desc.id, desc.minValue, desc.maxValue};
+    }
+    m_numParamRanges.store(total, std::memory_order_release);
+}
+
+void PluginSlot::setParameterNormalized(uint32_t paramId, float normalizedValue) noexcept {
+    const float clampedNorm = std::clamp(normalizedValue, 0.0f, 1.0f);
+    float scaledVal = clampedNorm;
+
+    const size_t count = m_numParamRanges.load(std::memory_order_acquire);
+    for (size_t i = 0; i < count; ++i) {
+        if (m_paramRanges[i].id == paramId) {
+            const float minV = m_paramRanges[i].minVal;
+            const float maxV = m_paramRanges[i].maxVal;
+            if (maxV > minV) {
+                scaledVal = minV + clampedNorm * (maxV - minV);
+            }
+            break;
+        }
+    }
+    m_automationRegister.setParameter(paramId, scaledVal);
 }
 
 void PluginSlot::prepare(double sampleRate, uint32_t maxBlockSize) {
     if (m_innerNode) {
         m_innerNode->prepare(sampleRate, maxBlockSize);
+        refreshCachedParameterRanges();
     }
     m_dryBuffer.resize(2, maxBlockSize);
     m_processBuffer.resize(2, maxBlockSize);
@@ -150,41 +183,69 @@ ParallelBranch::ParallelBranch(std::string name)
     : m_name(std::move(name)) {
     m_uiSlots.reserve(MAX_BRANCH_SLOTS);
     m_activeSlots.reserve(MAX_BRANCH_SLOTS);
-    m_deferredReclaim.reserve(MAX_BRANCH_SLOTS);
+    m_deferredReclaim.reserve(DEFERRED_RECLAIM_CAPACITY);
 }
 
 ParallelBranch::~ParallelBranch() {
+    m_isAudioRunning.store(false, std::memory_order_release);
+
     // 1. Drain any remaining items from command queue
     SlotCommand cmd;
     while (m_commandQueue.try_dequeue(cmd)) {
         cmd.slot.reset();
     }
 
-    // 2. Drain any stashed reclamations
-    for (size_t i = 0; i < m_stashedCount; ++i) {
-        m_stashedReclamations[i].reset();
-    }
-    m_stashedCount = 0;
-
-    // 3. Drain reclamation queue
+    // 2. Drain reclamation queue
     collectReclaimedSlots();
 
-    // 4. Clear active slots and deferred reclaim
+    // 3. Clear active slots and deferred reclaim
     m_activeSlots.clear();
-    m_uiSlots.clear();
+    {
+        std::lock_guard<std::mutex> lock(m_slotMutex);
+        m_uiSlots.clear();
+        syncRtSlotsLocked();
+    }
     for (auto& s : m_deferredReclaim) {
         s.reset();
     }
     m_deferredReclaim.clear();
 }
 
+void ParallelBranch::syncRtSlotsLocked() noexcept {
+    const size_t count = std::min(m_uiSlots.size(), MAX_BRANCH_SLOTS);
+    for (size_t i = 0; i < count; ++i) {
+        m_rtSlots[i].store(m_uiSlots[i], std::memory_order_release);
+    }
+    for (size_t i = count; i < MAX_BRANCH_SLOTS; ++i) {
+        m_rtSlots[i].store(nullptr, std::memory_order_release);
+    }
+    m_rtNumSlots.store(count, std::memory_order_release);
+}
+
+size_t ParallelBranch::numSlots() const noexcept {
+    std::lock_guard<std::mutex> lock(m_slotMutex);
+    return m_uiSlots.size();
+}
+
+PluginSlot* ParallelBranch::getSlot(size_t index) noexcept {
+    std::lock_guard<std::mutex> lock(m_slotMutex);
+    return (index < m_uiSlots.size()) ? m_uiSlots[index] : nullptr;
+}
+
+void ParallelBranch::addSlotToUiShadow(PluginSlot* slot) {
+    std::lock_guard<std::mutex> lock(m_slotMutex);
+    m_uiSlots.push_back(slot);
+    syncRtSlotsLocked();
+}
+
 void ParallelBranch::prepare(double sampleRate, uint32_t maxBlockSize) {
+    m_isAudioRunning.store(false, std::memory_order_release);
     m_sampleRate = sampleRate;
     m_maxBlockSize = maxBlockSize;
     m_branchBuffer.resize(2, maxBlockSize);
     m_slotTemp.resize(2, maxBlockSize);
     m_activeSlots.reserve(MAX_BRANCH_SLOTS);
-    m_deferredReclaim.reserve(MAX_BRANCH_SLOTS);
+    m_deferredReclaim.reserve(DEFERRED_RECLAIM_CAPACITY);
 
     // Pre-allocate PDC stereo circular delay buffers strictly in prepare() (16,384 samples)
     m_delayBufferL.assign(PDC_BUFFER_SIZE, 0.0f);
@@ -201,7 +262,7 @@ void ParallelBranch::prepare(double sampleRate, uint32_t maxBlockSize) {
     SlotCommand cmd;
     while (m_commandQueue.try_dequeue(cmd)) {
         if (cmd.type == SlotCommandType::Add && cmd.slot) {
-            m_activeSlots.push_back(std::move(cmd.slot)); // AddSlot
+            m_activeSlots.push_back(std::move(cmd.slot));
         } else if (cmd.type == SlotCommandType::Insert && cmd.slot) {
             size_t idx = std::min(cmd.index, m_activeSlots.size());
             m_activeSlots.insert(m_activeSlots.begin() + idx, std::move(cmd.slot));
@@ -220,6 +281,7 @@ void ParallelBranch::prepare(double sampleRate, uint32_t maxBlockSize) {
 }
 
 void ParallelBranch::reset() {
+    m_isAudioRunning.store(false, std::memory_order_release);
     std::fill(m_delayBufferL.begin(), m_delayBufferL.end(), 0.0f);
     std::fill(m_delayBufferR.begin(), m_delayBufferR.end(), 0.0f);
     m_delayWritePos = 0;
@@ -266,13 +328,15 @@ void ParallelBranch::addSlot(std::unique_ptr<PluginSlot> slot) {
     // Guarantee that slot scratch buffers are allocated on UI thread before entering realtime queue
     slot->prepare(m_sampleRate, m_maxBlockSize);
 
+    std::lock_guard<std::mutex> lock(m_slotMutex);
     PluginSlot* rawPtr = slot.get();
     m_uiSlots.push_back(rawPtr);
+    syncRtSlotsLocked();
 
     SlotCommand cmd = SlotCommand::makeAdd(std::move(slot));
     if (!m_commandQueue.try_enqueue(std::move(cmd))) {
-        // Queue full fallback: roll back shadow registry to prevent dangling pointers
         m_uiSlots.pop_back();
+        syncRtSlotsLocked();
     }
 }
 
@@ -282,22 +346,29 @@ void ParallelBranch::insertSlot(size_t index, std::unique_ptr<PluginSlot> slot) 
 
     slot->prepare(m_sampleRate, m_maxBlockSize);
 
+    std::lock_guard<std::mutex> lock(m_slotMutex);
     PluginSlot* rawPtr = slot.get();
     index = std::min(index, m_uiSlots.size());
     m_uiSlots.insert(m_uiSlots.begin() + index, rawPtr);
+    syncRtSlotsLocked();
 
     SlotCommand cmd = SlotCommand::makeInsert(index, std::move(slot));
     if (!m_commandQueue.try_enqueue(std::move(cmd))) {
         m_uiSlots.erase(m_uiSlots.begin() + index);
+        syncRtSlotsLocked();
     }
 }
 
 void ParallelBranch::removeSlot(size_t index) {
     collectReclaimedSlots();
-    if (index >= m_uiSlots.size()) return;
-
-    PluginSlot* targetPtr = m_uiSlots[index];
-    m_uiSlots.erase(m_uiSlots.begin() + index);
+    PluginSlot* targetPtr = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(m_slotMutex);
+        if (index >= m_uiSlots.size()) return;
+        targetPtr = m_uiSlots[index];
+        m_uiSlots.erase(m_uiSlots.begin() + index);
+        syncRtSlotsLocked();
+    }
 
     SlotCommand cmd = SlotCommand::makeRemove(index, targetPtr);
     m_commandQueue.try_enqueue(std::move(cmd));
@@ -305,11 +376,14 @@ void ParallelBranch::removeSlot(size_t index) {
 
 void ParallelBranch::reorderSlots(size_t fromIndex, size_t toIndex) {
     collectReclaimedSlots();
-    if (fromIndex >= m_uiSlots.size() || toIndex >= m_uiSlots.size() || fromIndex == toIndex) return;
-
-    auto* ptr = m_uiSlots[fromIndex];
-    m_uiSlots.erase(m_uiSlots.begin() + fromIndex);
-    m_uiSlots.insert(m_uiSlots.begin() + toIndex, ptr);
+    {
+        std::lock_guard<std::mutex> lock(m_slotMutex);
+        if (fromIndex >= m_uiSlots.size() || toIndex >= m_uiSlots.size() || fromIndex == toIndex) return;
+        auto* ptr = m_uiSlots[fromIndex];
+        m_uiSlots.erase(m_uiSlots.begin() + fromIndex);
+        m_uiSlots.insert(m_uiSlots.begin() + toIndex, ptr);
+        syncRtSlotsLocked();
+    }
 
     SlotCommand cmd = SlotCommand::makeReorder(fromIndex, toIndex);
     m_commandQueue.try_enqueue(std::move(cmd));
@@ -320,12 +394,13 @@ std::unique_ptr<PluginSlot> ParallelBranch::takeSlot(size_t index) {
         return nullptr;
     }
     collectReclaimedSlots();
+    std::lock_guard<std::mutex> lock(m_slotMutex);
 
     // 1. If command queue has unconsumed commands, drain them into active slots
     SlotCommand cmd;
     while (m_commandQueue.try_dequeue(cmd)) {
         if (cmd.type == SlotCommandType::Add && cmd.slot) {
-            m_activeSlots.push_back(std::move(cmd.slot)); // AddSlot
+            m_activeSlots.push_back(std::move(cmd.slot));
         } else if (cmd.type == SlotCommandType::Insert && cmd.slot) {
             size_t idx = std::min(cmd.index, m_activeSlots.size());
             m_activeSlots.insert(m_activeSlots.begin() + idx, std::move(cmd.slot));
@@ -354,6 +429,7 @@ std::unique_ptr<PluginSlot> ParallelBranch::takeSlot(size_t index) {
     if (index < m_uiSlots.size()) {
         targetPtr = m_uiSlots[index];
         m_uiSlots.erase(m_uiSlots.begin() + index);
+        syncRtSlotsLocked();
     }
 
     // 3. Extract and return from active slots
@@ -397,9 +473,7 @@ void ParallelBranch::flushStashedReclamations() noexcept {
     if (!m_deferredReclaim.empty()) {
         size_t writeIdx = 0;
         for (size_t i = 0; i < m_deferredReclaim.size(); ++i) {
-            if (m_reclaimQueue.try_enqueue(std::move(m_deferredReclaim[i]))) {
-                // enqueued
-            } else {
+            if (!m_reclaimQueue.try_enqueue(std::move(m_deferredReclaim[i]))) {
                 if (writeIdx != i) {
                     m_deferredReclaim[writeIdx] = std::move(m_deferredReclaim[i]);
                 }
@@ -407,13 +481,6 @@ void ParallelBranch::flushStashedReclamations() noexcept {
             }
         }
         m_deferredReclaim.resize(writeIdx);
-    }
-    while (m_stashedCount > 0) {
-        if (m_reclaimQueue.try_enqueue(std::move(m_stashedReclamations[m_stashedCount - 1]))) {
-            --m_stashedCount;
-        } else {
-            break;
-        }
     }
 }
 
@@ -535,7 +602,6 @@ void ParallelBranch::process(AudioProcessContext& ctx) {
             const float gOld = std::cos(angle);
             const float gNew = std::sin(angle);
 
-            // Read sample at old delay tap
             float oldL = inSampL, oldR = inSampR;
             if (m_oldDelay > 0) {
                 const size_t rOld = (m_delayWritePos + PDC_BUFFER_SIZE - m_oldDelay) & PDC_BUFFER_MASK;
@@ -543,7 +609,6 @@ void ParallelBranch::process(AudioProcessContext& ctx) {
                 oldR = m_delayBufferR[rOld];
             }
 
-            // Read sample at new target delay tap
             float newL = inSampL, newR = inSampR;
             if (m_targetDelay > 0) {
                 const size_t rNew = (m_delayWritePos + PDC_BUFFER_SIZE - m_targetDelay) & PDC_BUFFER_MASK;
@@ -583,12 +648,13 @@ void ParallelBranch::process(AudioProcessContext& ctx) {
 
 ParallelSplitMergeBlock::ParallelSplitMergeBlock(std::string name)
     : m_name(std::move(name)) {
-    m_uiBranches.reserve(16);
-    m_activeBranches.reserve(16);
-    m_deferredReclaimBranches.reserve(16);
+    m_uiBranches.reserve(MAX_BRANCHES);
+    m_activeBranches.reserve(MAX_BRANCHES);
+    m_deferredReclaimBranches.reserve(DEFERRED_BRANCH_RECLAIM_CAPACITY);
 }
 
 ParallelSplitMergeBlock::~ParallelSplitMergeBlock() {
+    m_isAudioRunning.store(false, std::memory_order_release);
     BranchCommand cmd;
     while (m_branchCmdQueue.try_dequeue(cmd)) {
         cmd.branch.reset();
@@ -598,6 +664,7 @@ ParallelSplitMergeBlock::~ParallelSplitMergeBlock() {
     {
         std::lock_guard<std::mutex> lock(m_branchMutex);
         m_uiBranches.clear();
+        syncRtBranchesLocked();
     }
     for (auto& b : m_deferredReclaimBranches) {
         b.reset();
@@ -605,10 +672,31 @@ ParallelSplitMergeBlock::~ParallelSplitMergeBlock() {
     m_deferredReclaimBranches.clear();
 }
 
+void ParallelSplitMergeBlock::syncRtBranchesLocked() noexcept {
+    const size_t count = std::min(m_uiBranches.size(), MAX_BRANCHES);
+    for (size_t i = 0; i < count; ++i) {
+        m_rtBranches[i].store(m_uiBranches[i], std::memory_order_release);
+    }
+    for (size_t i = count; i < MAX_BRANCHES; ++i) {
+        m_rtBranches[i].store(nullptr, std::memory_order_release);
+    }
+    m_rtNumBranches.store(count, std::memory_order_release);
+}
+
+void ParallelSplitMergeBlock::setAudioRunning(bool running) noexcept {
+    m_isAudioRunning.store(running, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(m_branchMutex);
+    for (auto* branch : m_uiBranches) {
+        if (branch) branch->setAudioRunning(running);
+    }
+}
+
 void ParallelSplitMergeBlock::prepare(double sampleRate, uint32_t maxBlockSize) {
+    m_isAudioRunning.store(false, std::memory_order_release);
     m_sampleRate = sampleRate;
     m_maxBlockSize = maxBlockSize;
     m_mixBuffer.resize(2, maxBlockSize);
+    m_deferredReclaimBranches.reserve(DEFERRED_BRANCH_RECLAIM_CAPACITY);
     drainCommandQueueIntoActive();
     for (auto& branch : m_activeBranches) {
         if (branch) branch->prepare(sampleRate, maxBlockSize);
@@ -616,6 +704,7 @@ void ParallelSplitMergeBlock::prepare(double sampleRate, uint32_t maxBlockSize) 
 }
 
 void ParallelSplitMergeBlock::reset() {
+    m_isAudioRunning.store(false, std::memory_order_release);
     drainCommandQueueIntoActive();
     for (auto& branch : m_activeBranches) {
         if (branch) branch->reset();
@@ -646,12 +735,14 @@ ParallelBranch* ParallelSplitMergeBlock::addBranch(const std::string& branchName
     {
         std::lock_guard<std::mutex> lock(m_branchMutex);
         m_uiBranches.push_back(rawPtr);
+        syncRtBranchesLocked();
     }
 
     BranchCommand cmd = BranchCommand::makeAdd(std::move(branch));
     if (!m_branchCmdQueue.try_enqueue(std::move(cmd))) {
         std::lock_guard<std::mutex> lock(m_branchMutex);
         m_uiBranches.pop_back();
+        syncRtBranchesLocked();
         return nullptr;
     }
 
@@ -669,6 +760,7 @@ void ParallelSplitMergeBlock::removeBranch(size_t index) {
         if (index >= m_uiBranches.size()) return;
         target = m_uiBranches[index];
         m_uiBranches.erase(m_uiBranches.begin() + index);
+        syncRtBranchesLocked();
     }
 
     BranchCommand cmd = BranchCommand::makeRemove(index, target);
@@ -765,9 +857,7 @@ void ParallelSplitMergeBlock::process(AudioProcessContext& ctx) {
     if (!m_deferredReclaimBranches.empty()) {
         size_t writeIdx = 0;
         for (size_t i = 0; i < m_deferredReclaimBranches.size(); ++i) {
-            if (m_branchReclaimQueue.try_enqueue(std::move(m_deferredReclaimBranches[i]))) {
-                // enqueued
-            } else {
+            if (!m_branchReclaimQueue.try_enqueue(std::move(m_deferredReclaimBranches[i]))) {
                 if (writeIdx != i) {
                     m_deferredReclaimBranches[writeIdx] = std::move(m_deferredReclaimBranches[i]);
                 }
@@ -896,7 +986,7 @@ void NoiseGate::process(AudioBufferView& buffer) noexcept {
         // Downward expander / gate
         float targetGain = (m_envelope >= threshold) ? 1.0f : 0.0f;
         const float smoothAlpha = std::clamp(1.0f - m_attackCoeff, 0.001f, 0.1f);
-        m_currentGain += smoothAlpha * (targetGain - m_currentGain); // Sample-rate-invariant gain smoothing
+        m_currentGain += smoothAlpha * (targetGain - m_currentGain);
 
         ch0[s] *= m_currentGain;
         if (ch1) ch1[s] *= m_currentGain;
@@ -911,13 +1001,15 @@ GraphEngine::GraphEngine() {
     m_uiNodes.reserve(MAX_GRAPH_NODES);
     m_activeNodes.reserve(MAX_GRAPH_NODES);
     m_fadingOutNodes.reserve(MAX_GRAPH_NODES);
-    m_deferredReclaim.reserve(MAX_GRAPH_NODES);
+    m_deferredReclaim.reserve(DEFERRED_RECLAIM_CAPACITY);
 }
 
 GraphEngine::~GraphEngine() {
+    m_isAudioRunning.store(false, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(m_uiMutex);
         m_uiNodes.clear();
+        syncRtNodesLocked();
     }
 
     // 1. Drain pending commands
@@ -927,11 +1019,7 @@ GraphEngine::~GraphEngine() {
         cmd.chainPayload.reset();
     }
 
-    // 2. Drain stashed reclamations
-    for (size_t i = 0; i < m_stashedCount; ++i) {
-        m_stashedReclamations[i].reset();
-    }
-    m_stashedCount = 0;
+    // 2. Drain stashed chains
     for (size_t i = 0; i < m_stashedChainCount; ++i) {
         m_stashedChains[i].reset();
     }
@@ -956,6 +1044,27 @@ GraphEngine::~GraphEngine() {
     m_deferredReclaim.clear();
 }
 
+void GraphEngine::syncRtNodesLocked() noexcept {
+    const size_t count = std::min(m_uiNodes.size(), MAX_GRAPH_NODES);
+    for (size_t i = 0; i < count; ++i) {
+        m_rtNodes[i].store(m_uiNodes[i], std::memory_order_release);
+    }
+    for (size_t i = count; i < MAX_GRAPH_NODES; ++i) {
+        m_rtNodes[i].store(nullptr, std::memory_order_release);
+    }
+    m_rtNumNodes.store(count, std::memory_order_release);
+}
+
+void GraphEngine::setAudioRunning(bool running) noexcept {
+    m_isAudioRunning.store(running, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(m_uiMutex);
+    for (auto* node : m_uiNodes) {
+        if (auto* split = dynamic_cast<ParallelSplitMergeBlock*>(node)) {
+            split->setAudioRunning(running);
+        }
+    }
+}
+
 void GraphEngine::stashForReclamation(std::unique_ptr<AudioNode> node) noexcept {
     if (!node) return;
     if (m_reclaimQueue.try_enqueue(std::move(node))) {
@@ -967,8 +1076,19 @@ void GraphEngine::stashForReclamation(std::unique_ptr<AudioNode> node) noexcept 
 }
 
 void GraphEngine::stashChainForReclamation(std::unique_ptr<NodeChain> chain) noexcept {
+    if (!chain) return;
+    if (m_chainReclaimQueue.try_enqueue(std::move(chain))) {
+        return;
+    }
     if (m_stashedChainCount < m_stashedChains.size()) {
         m_stashedChains[m_stashedChainCount++] = std::move(chain);
+        return;
+    }
+    // Fail-safe: transfer any remaining nodes in chain into m_deferredReclaim so ~AudioNode never runs on audio thread
+    for (auto& n : chain->nodes) {
+        if (n) {
+            stashForReclamation(std::move(n));
+        }
     }
 }
 
@@ -976,9 +1096,7 @@ void GraphEngine::flushStashedReclamations() noexcept {
     if (!m_deferredReclaim.empty()) {
         size_t writeIdx = 0;
         for (size_t i = 0; i < m_deferredReclaim.size(); ++i) {
-            if (m_reclaimQueue.try_enqueue(std::move(m_deferredReclaim[i]))) {
-                // enqueued
-            } else {
+            if (!m_reclaimQueue.try_enqueue(std::move(m_deferredReclaim[i]))) {
                 if (writeIdx != i) {
                     m_deferredReclaim[writeIdx] = std::move(m_deferredReclaim[i]);
                 }
@@ -986,13 +1104,6 @@ void GraphEngine::flushStashedReclamations() noexcept {
             }
         }
         m_deferredReclaim.resize(writeIdx);
-    }
-    while (m_stashedCount > 0) {
-        if (m_reclaimQueue.try_enqueue(std::move(m_stashedReclamations[m_stashedCount - 1]))) {
-            --m_stashedCount;
-        } else {
-            break;
-        }
     }
     while (m_stashedChainCount > 0) {
         if (m_chainReclaimQueue.try_enqueue(std::move(m_stashedChains[m_stashedChainCount - 1]))) {
@@ -1138,6 +1249,8 @@ void GraphEngine::drainCommandQueueIntoActive() {
 }
 
 void GraphEngine::prepare(double sampleRate, uint32_t maxBlockSize) {
+    m_isAudioRunning.store(false, std::memory_order_release);
+    m_cancelSceneCrossfade.store(false, std::memory_order_relaxed);
     m_sampleRate = sampleRate;
     m_maxBlockSize = maxBlockSize;
 
@@ -1148,7 +1261,7 @@ void GraphEngine::prepare(double sampleRate, uint32_t maxBlockSize) {
     m_activeBuffer.resize(2, maxBlockSize);
     m_activeNodes.reserve(MAX_GRAPH_NODES);
     m_fadingOutNodes.reserve(MAX_GRAPH_NODES);
-    m_deferredReclaim.reserve(MAX_GRAPH_NODES);
+    m_deferredReclaim.reserve(DEFERRED_RECLAIM_CAPACITY);
     const uint32_t rampSamples = static_cast<uint32_t>(sampleRate * 0.010);
     m_sceneCrossfadeRamp.reset(std::max(1u, rampSamples));
     m_microCrossfadeRamp.reset(64);
@@ -1167,6 +1280,8 @@ void GraphEngine::prepare(double sampleRate, uint32_t maxBlockSize) {
 }
 
 void GraphEngine::reset() {
+    m_isAudioRunning.store(false, std::memory_order_release);
+    m_cancelSceneCrossfade.store(false, std::memory_order_relaxed);
     m_hasProcessedAudio = false;
     m_lastBlockSampleL = 0.0f;
     m_lastBlockSampleR = 0.0f;
@@ -1178,7 +1293,7 @@ void GraphEngine::reset() {
     m_activeNodes.reserve(MAX_GRAPH_NODES);
     m_fadingOutNodes.clear();
     m_fadingOutNodes.reserve(MAX_GRAPH_NODES);
-    m_deferredReclaim.reserve(MAX_GRAPH_NODES);
+    m_deferredReclaim.reserve(DEFERRED_RECLAIM_CAPACITY);
 
     drainCommandQueueIntoActive();
     for (auto& node : m_activeNodes) {
@@ -1195,10 +1310,12 @@ void GraphEngine::addSerialNode(std::unique_ptr<AudioNode> node) {
     std::lock_guard<std::mutex> lock(m_uiMutex);
     AudioNode* rawPtr = node.get();
     m_uiNodes.push_back(rawPtr);
+    syncRtNodesLocked();
 
     GraphCommand cmd = GraphCommand::makeAdd(std::move(node));
     if (!m_commandQueue.try_enqueue(std::move(cmd))) {
         m_uiNodes.pop_back();
+        syncRtNodesLocked();
     }
 }
 
@@ -1212,15 +1329,19 @@ void GraphEngine::insertSerialNode(size_t index, std::unique_ptr<AudioNode> node
     AudioNode* rawPtr = node.get();
     if (index >= m_uiNodes.size()) {
         m_uiNodes.push_back(rawPtr);
+        syncRtNodesLocked();
         GraphCommand cmd = GraphCommand::makeAdd(std::move(node));
         if (!m_commandQueue.try_enqueue(std::move(cmd))) {
             m_uiNodes.pop_back();
+            syncRtNodesLocked();
         }
     } else {
         m_uiNodes.insert(m_uiNodes.begin() + index, rawPtr);
+        syncRtNodesLocked();
         GraphCommand cmd = GraphCommand::makeInsert(index, std::move(node));
         if (!m_commandQueue.try_enqueue(std::move(cmd))) {
             m_uiNodes.erase(m_uiNodes.begin() + index);
+            syncRtNodesLocked();
         }
     }
 }
@@ -1232,6 +1353,7 @@ void GraphEngine::removeSerialNode(size_t index) {
 
     AudioNode* target = m_uiNodes[index];
     m_uiNodes.erase(m_uiNodes.begin() + index);
+    syncRtNodesLocked();
 
     GraphCommand cmd = GraphCommand::makeRemove(index, target);
     m_commandQueue.try_enqueue(std::move(cmd));
@@ -1244,13 +1366,13 @@ std::unique_ptr<AudioNode> GraphEngine::takeSerialNode(size_t index) {
     processReclamation();
     std::lock_guard<std::mutex> lock(m_uiMutex);
 
-    // Drain pending commands into active nodes
     drainCommandQueueIntoActive();
 
     AudioNode* targetPtr = nullptr;
     if (index < m_uiNodes.size()) {
         targetPtr = m_uiNodes[index];
         m_uiNodes.erase(m_uiNodes.begin() + index);
+        syncRtNodesLocked();
     }
 
     if (targetPtr) {
@@ -1277,6 +1399,7 @@ void GraphEngine::swapNodes(size_t indexA, size_t indexB) {
     std::lock_guard<std::mutex> lock(m_uiMutex);
     if (indexA < m_uiNodes.size() && indexB < m_uiNodes.size()) {
         std::swap(m_uiNodes[indexA], m_uiNodes[indexB]);
+        syncRtNodesLocked();
         GraphCommand cmd = GraphCommand::makeSwap(indexA, indexB);
         m_commandQueue.try_enqueue(std::move(cmd));
     }
@@ -1289,6 +1412,7 @@ void GraphEngine::reorderNodes(size_t fromIndex, size_t toIndex) {
         auto* ptr = m_uiNodes[fromIndex];
         m_uiNodes.erase(m_uiNodes.begin() + fromIndex);
         m_uiNodes.insert(m_uiNodes.begin() + toIndex, ptr);
+        syncRtNodesLocked();
         GraphCommand cmd = GraphCommand::makeReorder(fromIndex, toIndex);
         m_commandQueue.try_enqueue(std::move(cmd));
     }
@@ -1320,6 +1444,7 @@ void GraphEngine::splitSerialNodeIntoParallel(size_t index) {
         branchA->addSlotToUiShadow(origSlot);
     }
     m_uiNodes[index] = parallelBlock.get();
+    syncRtNodesLocked();
     GraphCommand cmd = GraphCommand::makeSplitToParallel(index, std::move(parallelBlock));
     m_commandQueue.try_enqueue(std::move(cmd));
 
@@ -1350,6 +1475,7 @@ void GraphEngine::dissolveParallelBlock(size_t blockIndex, int branchToKeep) {
     }
     m_uiNodes.erase(m_uiNodes.begin() + blockIndex);
     m_uiNodes.insert(m_uiNodes.begin() + blockIndex, preservedUiSlots.begin(), preservedUiSlots.end());
+    syncRtNodesLocked();
     GraphCommand cmd = GraphCommand::makeDissolveParallel(blockIndex, branchToKeep);
     m_commandQueue.try_enqueue(std::move(cmd));
 
@@ -1362,7 +1488,12 @@ void GraphEngine::clearNodes() {
     processReclamation();
     std::lock_guard<std::mutex> lock(m_uiMutex);
     m_uiNodes.clear();
-    m_sceneCrossfadeRamp.reset(1);
+    syncRtNodesLocked();
+    m_cancelSceneCrossfade.store(true, std::memory_order_release);
+    if (!m_isAudioRunning.load(std::memory_order_acquire)) {
+        m_sceneCrossfadeRamp.reset(1);
+        m_isSceneCrossfading.store(false, std::memory_order_release);
+    }
 
     GraphCommand cmd = GraphCommand::makeClear();
     m_commandQueue.try_enqueue(std::move(cmd));
@@ -1390,6 +1521,7 @@ void GraphEngine::crossfadeToNodes(std::vector<std::unique_ptr<AudioNode>> newNo
 
     std::lock_guard<std::mutex> lock(m_uiMutex);
     m_uiNodes = std::move(rawPointers);
+    syncRtNodesLocked();
 
     GraphCommand cmd = GraphCommand::makeCrossfadeTo(std::move(chain));
     m_commandQueue.try_enqueue(std::move(cmd));
@@ -1431,38 +1563,40 @@ AudioNode* GraphEngine::getNode(size_t index) noexcept {
 }
 
 bool GraphEngine::dispatchParameterThreadSafe(int slotIdx, int branchIdx, int branchSlotIdx,
-                                             uint32_t paramId, float normalizedValue) noexcept {
-    std::lock_guard<std::mutex> lock(m_uiMutex);
-    if (slotIdx < 0 || static_cast<size_t>(slotIdx) >= m_uiNodes.size()) {
+                                              uint32_t paramId, float normalizedValue) noexcept {
+    const size_t nodeCount = m_rtNumNodes.load(std::memory_order_acquire);
+    if (slotIdx < 0 || static_cast<size_t>(slotIdx) >= nodeCount || static_cast<size_t>(slotIdx) >= MAX_GRAPH_NODES) {
         return false;
     }
 
-    AudioNode* node = m_uiNodes[static_cast<size_t>(slotIdx)];
+    AudioNode* node = m_rtNodes[static_cast<size_t>(slotIdx)].load(std::memory_order_acquire);
     if (!node) {
         return false;
     }
 
     PluginSlot* slot = nullptr;
-
     if (branchIdx >= 0) {
-        auto* block = dynamic_cast<ParallelSplitMergeBlock*>(node);
-        if (!block) {
+        if (node->type() != NodeType::ParallelSplitMerge) {
             return false;
         }
-        ParallelBranch* branch = block->getBranch(static_cast<size_t>(branchIdx));
+        auto* block = static_cast<ParallelSplitMergeBlock*>(node);
+        ParallelBranch* branch = block->getBranchLockFree(static_cast<size_t>(branchIdx));
         if (!branch || branchSlotIdx < 0) {
             return false;
         }
-        slot = branch->getSlot(static_cast<size_t>(branchSlotIdx));
+        slot = branch->getSlotLockFree(static_cast<size_t>(branchSlotIdx));
     } else {
-        slot = dynamic_cast<PluginSlot*>(node);
+        if (node->type() != NodeType::Plugin) {
+            return false;
+        }
+        slot = static_cast<PluginSlot*>(node);
     }
 
     if (!slot) {
         return false;
     }
 
-    slot->setParameter(paramId, normalizedValue);
+    slot->setParameterNormalized(paramId, normalizedValue);
     return true;
 }
 
@@ -1477,6 +1611,19 @@ void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& ha
     m_isAudioRunning.store(true, std::memory_order_release);
     const uint32_t numSamples = hardwareIn.numSamples();
     if (numSamples == 0) return;
+
+    if (m_cancelSceneCrossfade.exchange(false, std::memory_order_acq_rel)) {
+        m_sceneCrossfadeRamp.reset(1);
+        m_isSceneCrossfading.store(false, std::memory_order_release);
+        for (auto& node : m_fadingOutNodes) {
+            if (node) {
+                if (!m_reclaimQueue.try_enqueue(std::move(node))) {
+                    stashForReclamation(std::move(node));
+                }
+            }
+        }
+        m_fadingOutNodes.clear();
+    }
 
     // Check for triggered in-place 10ms crossfade (Wait-Free, Lock-Free)
     uint32_t pendingCrossfade = m_pendingCrossfadeSamples.exchange(0, std::memory_order_acq_rel);

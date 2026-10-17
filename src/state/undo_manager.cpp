@@ -12,6 +12,24 @@ void applyScenePresetToGraph(const ScenePreset& preset, audio::GraphEngine& grap
 
 } // anonymous namespace
 
+bool UndoManager::shouldCoalesce(UndoActionType actionType,
+                                 const std::string& targetKey,
+                                 bool force) const noexcept {
+    if (force || !m_inContinuousGroup || m_undoStack.empty()) {
+        return false;
+    }
+    const bool isContinuous = (actionType == UndoActionType::ParameterTweak ||
+                               actionType == UndoActionType::MidiCcAutomation);
+    if (!isContinuous) {
+        return false;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    const auto& top = m_undoStack.back();
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - top.timestamp).count();
+    const bool sameTarget = (targetKey.empty() || top.targetIdentifier == targetKey);
+    return (elapsedMs < kCoalesceIdleThresholdMs) && sameTarget;
+}
+
 void UndoManager::pushSnapshot(ScenePreset snapshot,
                                std::string description,
                                UndoActionType actionType,

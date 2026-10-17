@@ -70,7 +70,7 @@ private:
     void retireBuffer(AudioTrackBuffer* oldBuf);
     bool executeLoad(const std::string& filePath, std::stop_token stopToken);
 
-    double m_sampleRate{48000.0};
+    std::atomic<double> m_sampleRate{48000.0};
     std::atomic<size_t> m_playhead{0};
 
     std::atomic<bool> m_isPlaying{false};

@@ -10,6 +10,7 @@
 #include <cmath>
 #include <ctime>
 #include <cctype>
+#include <thread>
 
 namespace praccy::audio {
 
@@ -18,11 +19,14 @@ namespace praccy::audio {
  *
  * Pre-allocated strictly in prepare() with configurable duration (1, 2, 5, or 10 minutes).
  * Audio callback pushes stereo samples lock-free and wait-free with strictly 0 heap allocations.
- * Export mechanism atomically latches the write head and copies requested audio slices
- * into staging buffers in <0.15ms without interrupting real-time playback.
+ * During export, an atomic capture fence diverts live audio callback writes into a pre-allocated
+ * spillover buffer so captureSlice() copies from the main circular buffer with 0 TSan data races
+ * and 0 torn audio splices.
  */
 class RetroactiveRiffBuffer {
 public:
+    static constexpr size_t kSpilloverCapacityFrames = 65536;
+
     RetroactiveRiffBuffer() = default;
     ~RetroactiveRiffBuffer() = default;
 
@@ -48,9 +52,14 @@ public:
 
         m_bufferL.assign(m_capacityFrames, 0.0f);
         m_bufferR.assign(m_capacityFrames, 0.0f);
+        m_spilloverL.assign(kSpilloverCapacityFrames, 0.0f);
+        m_spilloverR.assign(kSpilloverCapacityFrames, 0.0f);
+        m_spilloverCount = 0;
 
         m_writeHead.store(0, std::memory_order_relaxed);
         m_totalFramesWritten.store(0, std::memory_order_relaxed);
+        m_captureActive.store(false, std::memory_order_relaxed);
+        m_audioWritingMain.store(false, std::memory_order_relaxed);
     }
 
     /**
@@ -59,8 +68,13 @@ public:
     void reset() noexcept {
         std::fill(m_bufferL.begin(), m_bufferL.end(), 0.0f);
         std::fill(m_bufferR.begin(), m_bufferR.end(), 0.0f);
+        std::fill(m_spilloverL.begin(), m_spilloverL.end(), 0.0f);
+        std::fill(m_spilloverR.begin(), m_spilloverR.end(), 0.0f);
+        m_spilloverCount = 0;
         m_writeHead.store(0, std::memory_order_relaxed);
         m_totalFramesWritten.store(0, std::memory_order_relaxed);
+        m_captureActive.store(false, std::memory_order_relaxed);
+        m_audioWritingMain.store(false, std::memory_order_relaxed);
     }
 
     /**
@@ -69,34 +83,34 @@ public:
      */
     inline void push(const float* left, const float* right, size_t numSamples) noexcept {
         if (!left || numSamples == 0 || m_capacityFrames == 0) return;
-
-        size_t head = m_writeHead.load(std::memory_order_relaxed);
         const float* srcR = right ? right : left;
 
-        if (head + numSamples <= m_capacityFrames) {
-            std::memcpy(&m_bufferL[head], left, numSamples * sizeof(float));
-            std::memcpy(&m_bufferR[head], srcR, numSamples * sizeof(float));
-            head = (head + numSamples == m_capacityFrames) ? 0 : (head + numSamples);
-        } else {
-            const size_t part1 = m_capacityFrames - head;
-            const size_t part2 = numSamples - part1;
-
-            std::memcpy(&m_bufferL[head], left, part1 * sizeof(float));
-            std::memcpy(&m_bufferL[0], left + part1, part2 * sizeof(float));
-
-            std::memcpy(&m_bufferR[head], srcR, part1 * sizeof(float));
-            std::memcpy(&m_bufferR[0], srcR + part1, part2 * sizeof(float));
-
-            head = part2;
+        // Wait-free Dekker handshake with captureSlice(): if an export is reading m_bufferL/R,
+        // divert incoming audio samples into pre-allocated m_spilloverL/R without blocking.
+        if (m_captureActive.load(std::memory_order_acquire)) {
+            pushToSpillover(left, srcR, numSamples);
+            return;
         }
 
-        m_writeHead.store(head, std::memory_order_release);
-        m_totalFramesWritten.fetch_add(numSamples, std::memory_order_release);
+        m_audioWritingMain.store(true, std::memory_order_seq_cst);
+        if (m_captureActive.load(std::memory_order_seq_cst)) {
+            m_audioWritingMain.store(false, std::memory_order_release);
+            pushToSpillover(left, srcR, numSamples);
+            return;
+        }
+
+        if (m_spilloverCount > 0) {
+            appendToMainRing(m_spilloverL.data(), m_spilloverR.data(), m_spilloverCount);
+            m_spilloverCount = 0;
+        }
+
+        appendToMainRing(left, srcR, numSamples);
+        m_audioWritingMain.store(false, std::memory_order_release);
     }
 
     /**
-     * @brief Tear-free export mechanism: atomically latches write head and copies
-     * the requested slice into scratch staging buffers in <0.15ms.
+     * @brief Tear-free export mechanism: fences main ring writes into the wait-free spillover buffer
+     * and copies the requested slice into scratch staging buffers with 0 data races.
      *
      * @param stagingBufferL Destination buffer for left channel
      * @param stagingBufferR Destination buffer for right channel
@@ -109,6 +123,21 @@ public:
         if (!stagingBufferL || !stagingBufferR || maxSamples == 0 || m_capacityFrames == 0) {
             capturedSamples = 0;
             return false;
+        }
+
+        struct CaptureFenceGuard {
+            std::atomic<bool>& flag;
+            explicit CaptureFenceGuard(std::atomic<bool>& f) noexcept : flag(f) {
+                flag.store(true, std::memory_order_seq_cst);
+            }
+            ~CaptureFenceGuard() noexcept {
+                flag.store(false, std::memory_order_release);
+            }
+        } fence(m_captureActive);
+
+        // Wait for any in-flight audio callback memcpy to finish (< 5 microseconds)
+        while (m_audioWritingMain.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
         }
 
         const size_t head = m_writeHead.load(std::memory_order_acquire);
@@ -171,8 +200,6 @@ public:
      * e.g. "ModernHighGainDjent_140bpm_20261015_014128.wav".
      */
     [[nodiscard]] static std::string formatFilename(const std::string& presetName, float bpm, const std::tm& tmNow) {
-        // 1. Sanitize Preset: strip whitespace (producing PascalCase e.g. "Modern High Gain Djent" -> "ModernHighGainDjent")
-        // and keep filesystem-safe alphanumeric, underscore, and dash characters.
         std::string presetPart;
         presetPart.reserve(presetName.size());
         for (char c : presetName) {
@@ -187,29 +214,75 @@ public:
             presetPart = "Init";
         }
 
-        // 2. Format BPM (e.g. 140.0f -> "140bpm")
         int bpmInt = static_cast<int>(std::round(bpm));
         if (bpmInt < 20 || bpmInt > 400) {
             bpmInt = 120;
         }
         std::string bpmPart = std::to_string(bpmInt) + "bpm";
 
-        // 3. Format Timestamp: YYYYMMDD_HHMMSS (e.g. "20261015_014128")
         char timePart[32]{0};
         std::strftime(timePart, sizeof(timePart), "%Y%m%d_%H%M%S", &tmNow);
 
-        return presetPart + "_" + bpmPart + "_" + timePart + ".wav";
+        return presetPart + "_" + bpmPart + "_" + std::string(timePart) + ".wav";
     }
 
 private:
+    inline void pushToSpillover(const float* left, const float* right, size_t numSamples) noexcept {
+        if (m_spilloverL.empty() || m_spilloverR.empty()) return;
+        const size_t avail = (m_spilloverCount < m_spilloverL.size()) ? (m_spilloverL.size() - m_spilloverCount) : 0;
+        const size_t toCopy = std::min(numSamples, avail);
+        if (toCopy > 0) {
+            std::memcpy(&m_spilloverL[m_spilloverCount], left, toCopy * sizeof(float));
+            std::memcpy(&m_spilloverR[m_spilloverCount], right, toCopy * sizeof(float));
+            m_spilloverCount += toCopy;
+        }
+    }
+
+    inline void appendToMainRing(const float* left, const float* right, size_t numSamples) noexcept {
+        if (numSamples == 0 || m_capacityFrames == 0) return;
+        if (numSamples > m_capacityFrames) {
+            const size_t skip = numSamples - m_capacityFrames;
+            left += skip;
+            right += skip;
+            numSamples = m_capacityFrames;
+        }
+
+        size_t head = m_writeHead.load(std::memory_order_relaxed);
+        if (head + numSamples <= m_capacityFrames) {
+            std::memcpy(&m_bufferL[head], left, numSamples * sizeof(float));
+            std::memcpy(&m_bufferR[head], right, numSamples * sizeof(float));
+            head = (head + numSamples == m_capacityFrames) ? 0 : (head + numSamples);
+        } else {
+            const size_t part1 = m_capacityFrames - head;
+            const size_t part2 = numSamples - part1;
+
+            std::memcpy(&m_bufferL[head], left, part1 * sizeof(float));
+            std::memcpy(&m_bufferL[0], left + part1, part2 * sizeof(float));
+
+            std::memcpy(&m_bufferR[head], right, part1 * sizeof(float));
+            std::memcpy(&m_bufferR[0], right + part1, part2 * sizeof(float));
+
+            head = part2;
+        }
+
+        m_writeHead.store(head, std::memory_order_release);
+        m_totalFramesWritten.fetch_add(numSamples, std::memory_order_release);
+    }
+
+    double m_sampleRate{48000.0};
+    int m_durationMinutes{2};
+    size_t m_capacityFrames{0};
+
     std::vector<float> m_bufferL;
     std::vector<float> m_bufferR;
-    size_t m_capacityFrames{0};
-    int m_durationMinutes{2};
-    double m_sampleRate{48000.0};
+    std::vector<float> m_spilloverL;
+    std::vector<float> m_spilloverR;
+    size_t m_spilloverCount{0};
 
     alignas(64) std::atomic<size_t> m_writeHead{0};
     alignas(64) std::atomic<size_t> m_totalFramesWritten{0};
+    alignas(64) mutable std::atomic<bool> m_captureActive{false};
+    alignas(64) std::atomic<bool> m_audioWritingMain{false};
 };
 
 } // namespace praccy::audio

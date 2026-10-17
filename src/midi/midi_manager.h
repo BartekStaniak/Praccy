@@ -26,6 +26,8 @@ struct MidiDeviceInfo {
 
 class MidiManager {
 public:
+    static constexpr size_t MAX_NON_CC_BINDINGS = 64;
+
     MidiManager();
     ~MidiManager();
 
@@ -61,7 +63,7 @@ public:
     /// O(1) MIDI CC dispatch with strictly zero mutex locks and zero heap allocations
     void handleControlChange(uint8_t channel, uint8_t cc, uint8_t val);
 
-    /// General MIDI message processor
+    /// General MIDI message processor (wait-free, lock-free, zero heap allocations)
     void handleMidiMessage(uint8_t status, uint8_t d1, uint8_t d2);
 
     /// Flat O(1) lookup table: [0..16][0..127] where index 0 = Omni, 1..16 = Ch 1..16
@@ -88,11 +90,35 @@ public:
         }
     };
 
+    struct AtomicPodSlot {
+        static constexpr size_t NUM_WORDS = (sizeof(PodCcBinding) + sizeof(uint64_t) - 1) / sizeof(uint64_t);
+        std::array<std::atomic<uint64_t>, NUM_WORDS> words{};
+
+        void store(const PodCcBinding& src) noexcept {
+            alignas(8) uint64_t raw[NUM_WORDS]{};
+            std::memcpy(raw, &src, sizeof(PodCcBinding));
+            for (size_t i = 0; i < NUM_WORDS; ++i) {
+                words[i].store(raw[i], std::memory_order_relaxed);
+            }
+        }
+
+        void load(PodCcBinding& dst) const noexcept {
+            alignas(8) uint64_t raw[NUM_WORDS]{};
+            for (size_t i = 0; i < NUM_WORDS; ++i) {
+                raw[i] = words[i].load(std::memory_order_relaxed);
+            }
+            std::memcpy(&dst, raw, sizeof(PodCcBinding));
+        }
+    };
+
 private:
     static void CALLBACK midiInProc(HMIDIIN hMidiIn, UINT wMsg, DWORD_PTR dwInstance, DWORD_PTR dwParam1, DWORD_PTR dwParam2);
     void rebuildCcTable();
+    void drainLearnedPodFromMidiThread();
 
     AtomicCcSlot m_atomicCcTable[NUM_MIDI_CHANNELS][NUM_CC_NUMBERS]{};
+    std::array<AtomicPodSlot, MAX_NON_CC_BINDINGS> m_atomicNonCcBindings{};
+    std::atomic<uint32_t> m_atomicNonCcCount{0};
 
     HMIDIIN m_handle{nullptr};
     uint32_t m_currentDeviceId{0};
@@ -106,6 +132,9 @@ private:
     std::atomic<uint32_t> m_ccTableSeq{0};
     mutable std::mutex m_learnMutex;
     MidiBinding m_pendingLearnBinding;
+    AtomicPodSlot m_pendingLearnPod{};
+    AtomicPodSlot m_learnedPodForUiSync{};
+    std::atomic<bool> m_hasPendingLearnedPod{false};
 
     std::atomic<uint32_t> m_lastRawMessage{0};
     std::atomic<uint64_t> m_lastMessageTimestamp{0};
