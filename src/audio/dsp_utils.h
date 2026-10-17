@@ -20,6 +20,29 @@ public:
     static constexpr float EPSILON = 1e-6f;
 
     /**
+     * @brief Branchless C^2-continuous Padé [3/2] rational tanh saturator.
+     * Evaluates x * (27.0f + x2) / (27.0f + 9.0f * x2) clamped to [-1.0f, +1.0f] for |x| >= 3.0f.
+     */
+    [[nodiscard]] static inline float fastTanh(float x) noexcept {
+        const float xc = std::clamp(x, -3.0f, 3.0f);
+        const float x2 = xc * xc;
+        return xc * (27.0f + x2) / (27.0f + 9.0f * x2);
+    }
+
+    /**
+     * @brief Fast 9th-degree polynomial approximation for sin(t * pi/2), t in [0.0f, 1.0f].
+     * Guarantees exact endpoints (0.0f at t=0, 1.0f at t=1) and strict monotonicity.
+     */
+    [[nodiscard]] static inline float fastSinQuarterPi(float t) noexcept {
+        if (t <= 0.0f) return 0.0f;
+        if (t >= 1.0f) return 1.0f;
+        const float x = t * HALF_PI;
+        const float x2 = x * x;
+        const float val = x * (1.0f + x2 * (-0.16666666666666666f + x2 * (0.008333333333333333f + x2 * (-0.0001984126984126984f + x2 * 0.00000275573192239859f))));
+        return std::min(1.0f, std::max(0.0f, val));
+    }
+
+    /**
      * @brief Converts decibels to linear amplitude.
      */
     [[nodiscard]] static inline float dbToGain(float db) noexcept {
@@ -117,16 +140,17 @@ public:
         }
 
         const float progress = static_cast<float>(m_currentSample) / static_cast<float>(m_totalSamples);
-        const float angle = progress * DspUtils::HALF_PI;
+        const float s = DspUtils::fastSinQuarterPi(progress);
+        const float c = DspUtils::fastSinQuarterPi(1.0f - progress);
 
         if (m_targetState) {
             // Fading in new, fading out old
-            gainOld = std::cos(angle);
-            gainNew = std::sin(angle);
+            gainOld = c;
+            gainNew = s;
         } else {
             // Fading out new, fading in old (bypassing)
-            gainOld = std::sin(angle);
-            gainNew = std::cos(angle);
+            gainOld = s;
+            gainNew = c;
         }
 
         m_currentSample++;
@@ -213,4 +237,12 @@ private:
     std::atomic<bool> m_clipped{false};
 };
 
+/**
+ * @brief Fast branchless Padé rational tanh saturator.
+ */
+[[nodiscard]] inline float fastTanh(float x) noexcept {
+    return DspUtils::fastTanh(x);
+}
+
 } // namespace praccy::audio
+

@@ -67,7 +67,7 @@ void OverdriveEffect::process(audio::AudioProcessContext& ctx) {
         for (uint32_t s = 0; s < numSamples; ++s) {
             float x = in[s] * drive;
             // Asymmetric soft saturation curve (tube-like)
-            float clipped = (x > 0.0f) ? std::tanh(x) : (x / (1.0f - x * 0.5f));
+            float clipped = (x > 0.0f) ? audio::DspUtils::fastTanh(x) : (x / (1.0f - x * 0.5f));
             // 1-pole tone filter
             state += alpha * (clipped - state);
             out[s] = state * level;
@@ -170,8 +170,8 @@ void TubeAmpEffect::process(audio::AudioProcessContext& ctx) {
         for (uint32_t s = 0; s < numSamples; ++s) {
             float x = in[s] * gain;
             // Multi-stage non-linear tube curve
-            float stage1 = std::tanh(x * 1.5f);
-            float stage2 = std::tanh(stage1 * 1.2f - (stage1 * stage1 * 0.15f));
+            float stage1 = audio::DspUtils::fastTanh(x * 1.5f);
+            float stage2 = audio::DspUtils::fastTanh(stage1 * 1.2f - (stage1 * stage1 * 0.15f));
             // Low-shelf Bass control + Treble-modulated cabinet low-pass filter
             bassLp += bassAlpha * (stage2 - bassLp);
             float toned = stage2 + (bassLp * bassShelf);
@@ -261,9 +261,9 @@ void StereoDelayEffect::process(audio::AudioProcessContext& ctx) {
     const uint32_t numSamples = ctx.numSamples;
     const uint32_t bufSize = static_cast<uint32_t>(m_delayBufferL.size());
     const float timeMs = m_timeMs.load(std::memory_order_relaxed);
-    const uint32_t delaySamplesL = static_cast<uint32_t>((timeMs / 1000.0f) * m_sampleRate);
+    const uint32_t delaySamplesL = static_cast<uint32_t>((timeMs / 1000.0f) * static_cast<float>(m_sampleRate));
     // Ping-pong delay: right channel slightly offset (3/4 time)
-    const uint32_t delaySamplesR = static_cast<uint32_t>(delaySamplesL * 0.75f);
+    const uint32_t delaySamplesR = (delaySamplesL * 3u) / 4u;
 
     const float fb = m_feedback.load(std::memory_order_relaxed);
     const float mix = m_mix.load(std::memory_order_relaxed);

@@ -393,7 +393,7 @@ std::unique_ptr<ClapPluginInstance> ClapPluginInstance::loadFromFile(const std::
         return nullptr;
     }
 
-    auto instance = std::unique_ptr<ClapPluginInstance>(new ClapPluginInstance());
+    auto instance = std::make_unique<ClapPluginInstance>();
     instance->m_libraryModule = hLib;
     instance->m_entry = entry;
     instance->m_path = path;
@@ -525,33 +525,61 @@ void ClapPluginInstance::process(audio::AudioProcessContext& ctx) {
     const uint32_t inCh = ctx.input.numChannels();
     const uint32_t outCh = ctx.output.numChannels();
 
+    const uint32_t safeInCh = (std::min)(inCh, static_cast<uint32_t>(m_inChannelPtrs.size()));
+    for (uint32_t c = 0; c < safeInCh; ++c) {
+        m_inChannelPtrs[c] = ctx.input.channel(c);
+    }
     clap_audio_buffer inBuf{};
-    inBuf.data32 = const_cast<float**>(ctx.input.rawChannels());
+    inBuf.data32 = m_inChannelPtrs.data();
     inBuf.channel_count = inCh;
     inBuf.latency = 0;
     inBuf.constant_mask = 0;
 
+    const uint32_t safeOutCh = (std::min)(outCh, static_cast<uint32_t>(m_outChannelPtrs.size()));
+    for (uint32_t c = 0; c < safeOutCh; ++c) {
+        m_outChannelPtrs[c] = ctx.output.channel(c);
+    }
     clap_audio_buffer outBuf{};
-    outBuf.data32 = const_cast<float**>(ctx.output.rawChannels());
+    outBuf.data32 = m_outChannelPtrs.data();
     outBuf.channel_count = outCh;
     outBuf.latency = 0;
     outBuf.constant_mask = 0;
 
     m_eventBuffer.clear();
+    // 1. Drain UI thread queue (SPSC: UI producer, Audio consumer)
     std::pair<clap_id, double> ev;
     while (m_paramQueue.try_dequeue(ev)) {
         m_eventBuffer.pushParam(ev.first, ev.second);
     }
+    // 2. Drain audio-thread automation events
+    for (size_t i = 0; i < m_audioThreadEventCount; ++i) {
+        m_eventBuffer.pushParam(m_audioThreadEvents[i].id, m_audioThreadEvents[i].value);
+    }
+    m_audioThreadEventCount = 0;
 
     clap_input_events_t inEvs = m_eventBuffer.makeInputEvents();
     clap_output_events_t outEvs{};
     outEvs.ctx = this;
     outEvs.try_push = &clapOutputEventsTryPush;
 
+    // Live transport broadcast (F-12)
+    m_transportEvent = {};
+    m_transportEvent.header.size = sizeof(clap_event_transport_t);
+    m_transportEvent.header.time = 0;
+    m_transportEvent.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+    m_transportEvent.header.type = CLAP_EVENT_TRANSPORT;
+    m_transportEvent.header.flags = 0;
+    m_transportEvent.flags = CLAP_TRANSPORT_IS_PLAYING | CLAP_TRANSPORT_HAS_TEMPO | CLAP_TRANSPORT_HAS_TIME_SIGNATURE | CLAP_TRANSPORT_HAS_SECONDS_TIMELINE;
+    m_transportEvent.tempo = (ctx.tempoBpm > 1.0) ? ctx.tempoBpm : 120.0;
+    m_transportEvent.tsig_num = static_cast<uint16_t>((ctx.timeSigNumerator > 0) ? ctx.timeSigNumerator : 4);
+    m_transportEvent.tsig_denom = static_cast<uint16_t>((ctx.timeSigDenominator > 0) ? ctx.timeSigDenominator : 4);
+    const double effectiveSr = (ctx.sampleRate > 0.0) ? ctx.sampleRate : m_sampleRate;
+    m_transportEvent.song_pos_seconds = (effectiveSr > 0.0) ? static_cast<clap_sectime>(static_cast<double>(ctx.projectTimeSamples) / effectiveSr * static_cast<double>(CLAP_SECTIME_FACTOR)) : 0;
+
     clap_process processData{};
     processData.steady_time = -1;
     processData.frames_count = numSamples;
-    processData.transport = nullptr;
+    processData.transport = &m_transportEvent;
     processData.audio_inputs = (m_numAudioInputs > 0 && inCh > 0) ? &inBuf : nullptr;
     processData.audio_outputs = (m_numAudioOutputs > 0 && outCh > 0) ? &outBuf : nullptr;
     processData.audio_inputs_count = (m_numAudioInputs > 0 && inCh > 0) ? 1 : 0;
@@ -574,7 +602,9 @@ void ClapPluginInstance::process(audio::AudioProcessContext& ctx) {
 
     if (!ok) {
         m_faulted.store(true, std::memory_order_release);
-        setFaultReason(getExceptionDescription(exCode));
+        m_faultCode.store(exCode, std::memory_order_release);
+        formatFaultReason(m_faultReasonBuf, "CLAP crash: ", exCode);
+        m_faultReason.store(m_faultReasonBuf, std::memory_order_release);
         ctx.output.copyFrom(ctx.input);
     }
 }
@@ -582,6 +612,7 @@ void ClapPluginInstance::process(audio::AudioProcessContext& ctx) {
 void ClapPluginInstance::reset() {
     std::pair<clap_id, double> dummy;
     while (m_paramQueue.try_dequeue(dummy)) {}
+    m_audioThreadEventCount = 0;
     m_eventBuffer.clear();
     if (m_plugin && !m_faulted.load(std::memory_order_relaxed)) {
         safeCallPlugin([&]() {
@@ -636,7 +667,21 @@ void ClapPluginInstance::setParameterValue(uint32_t paramId, float value) {
 
 void ClapPluginInstance::setParameterFromAudioThread(uint32_t paramId, float value) noexcept {
     if (m_faulted.load(std::memory_order_relaxed)) return;
-    m_paramQueue.try_enqueue({static_cast<clap_id>(paramId), static_cast<double>(value)});
+    const auto cid = static_cast<clap_id>(paramId);
+    const double dval = static_cast<double>(value);
+    // SPSC: m_guiOutParamQueue written ONLY by audio thread, read ONLY by UI thread
+    m_guiOutParamQueue.try_enqueue({cid, dval});
+
+    // Audio-thread local queue drained at top of process() - never touch m_paramQueue
+    for (size_t i = 0; i < m_audioThreadEventCount; ++i) {
+        if (m_audioThreadEvents[i].id == cid) {
+            m_audioThreadEvents[i].value = dval;
+            return;
+        }
+    }
+    if (m_audioThreadEventCount < m_audioThreadEvents.size()) {
+        m_audioThreadEvents[m_audioThreadEventCount++] = {cid, dval};
+    }
 }
 
 float ClapPluginInstance::getParameterValue(uint32_t paramId) const {
@@ -711,7 +756,9 @@ bool ClapPluginInstance::openGui(HWND parentHwnd) {
 
     if (!ok) {
         m_faulted.store(true, std::memory_order_release);
-        setFaultReason(getExceptionDescription(exCode));
+        m_faultCode.store(exCode, std::memory_order_release);
+        formatFaultReason(m_faultReasonBuf, "CLAP GUI error: ", exCode);
+        m_faultReason.store(m_faultReasonBuf, std::memory_order_release);
         return false;
     }
 
@@ -740,17 +787,8 @@ void ClapPluginInstance::closeGui() {
 }
 
 void ClapPluginInstance::getPreferredSize(int& width, int& height) const {
-    if (m_guiExt && m_plugin && !m_faulted.load(std::memory_order_relaxed)) {
+    if (m_guiExt && m_plugin && m_guiCreated && !m_faulted.load(std::memory_order_relaxed)) {
         safeCallPlugin([&]() {
-            if (!m_guiCreated) {
-                if (m_guiExt->is_api_supported && !m_guiExt->is_api_supported(m_plugin, CLAP_WINDOW_API_WIN32, false)) {
-                    return;
-                }
-                if (m_guiExt->create && !m_guiExt->create(m_plugin, CLAP_WINDOW_API_WIN32, false)) {
-                    return;
-                }
-                const_cast<ClapPluginInstance*>(this)->m_guiCreated = true;
-            }
             uint32_t w = 850, h = 600;
             if (m_guiExt->get_size && m_guiExt->get_size(m_plugin, &w, &h)) {
                 if (w > 100 && h > 100) {
@@ -759,13 +797,17 @@ void ClapPluginInstance::getPreferredSize(int& width, int& height) const {
                 }
             }
         });
+        return;
     }
+    width = 850;
+    height = 600;
 }
 
 void ClapPluginInstance::resetFault() noexcept {
     std::pair<clap_id, double> dummy;
     while (m_paramQueue.try_dequeue(dummy)) {}
     while (m_guiOutParamQueue.try_dequeue(dummy)) {}
+    m_audioThreadEventCount = 0;
     m_eventBuffer.clear();
     m_isProcessing.store(false, std::memory_order_release);
     if (m_plugin) {

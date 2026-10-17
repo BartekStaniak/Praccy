@@ -242,6 +242,10 @@ using namespace praccy::tools;
 // HEADLESS MOCK ASIO DRIVER IMPLEMENTATION (IASIO COM INTERFACE)
 // ============================================================================
 
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wnon-virtual-dtor"
+#endif
 class MockAsioDriver : public IASIO {
 public:
     MockAsioDriver() = default;
@@ -417,6 +421,9 @@ private:
     ASIOCallbacks* m_callbacks{nullptr};
     std::vector<float> m_rawDoubleBuffers;
 };
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 // ============================================================================
 // HEADLESS MOCK ASIO ENGINE

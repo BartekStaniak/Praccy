@@ -84,6 +84,8 @@ private:
 
     std::atomic<AudioTrackBuffer*> m_activeBuffer{nullptr};
     std::atomic<const AudioTrackBuffer*> m_audioReadingBuffer{nullptr};
+    std::atomic<size_t> m_activeNumFrames{0};
+    std::atomic<double> m_activeSampleRate{48000.0};
     mutable std::mutex m_metadataMutex;
     std::string m_cachedFilePath;
     std::string m_cachedFileName;

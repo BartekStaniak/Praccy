@@ -2,10 +2,16 @@
 
 #include <pluginterfaces/vst/ivstparameterchanges.h>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstddef>
 
 namespace praccy::plugins {
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wnon-virtual-dtor"
+#endif
 
 class FastParamValueQueue : public Steinberg::Vst::IParamValueQueue {
 public:
@@ -42,12 +48,18 @@ public:
         *obj = nullptr;
         return Steinberg::kNoInterface;
     }
-    Steinberg::uint32 PLUGIN_API addRef() override { return 1000; }
-    Steinberg::uint32 PLUGIN_API release() override { return 1000; }
+    Steinberg::uint32 PLUGIN_API addRef() override {
+        return m_refCount.fetch_add(1, std::memory_order_relaxed) + 1;
+    }
+    Steinberg::uint32 PLUGIN_API release() override {
+        const uint32_t prev = m_refCount.fetch_sub(1, std::memory_order_acq_rel);
+        return (prev > 0) ? (prev - 1) : 0;
+    }
 
 private:
     Steinberg::Vst::ParamID m_id{0};
     double m_value{0.0};
+    std::atomic<uint32_t> m_refCount{1};
 };
 
 class FastParameterChanges : public Steinberg::Vst::IParameterChanges {
@@ -100,12 +112,22 @@ public:
         *obj = nullptr;
         return Steinberg::kNoInterface;
     }
-    Steinberg::uint32 PLUGIN_API addRef() override { return 1000; }
-    Steinberg::uint32 PLUGIN_API release() override { return 1000; }
+    Steinberg::uint32 PLUGIN_API addRef() override {
+        return m_refCount.fetch_add(1, std::memory_order_relaxed) + 1;
+    }
+    Steinberg::uint32 PLUGIN_API release() override {
+        const uint32_t prev = m_refCount.fetch_sub(1, std::memory_order_acq_rel);
+        return (prev > 0) ? (prev - 1) : 0;
+    }
 
 private:
     std::array<FastParamValueQueue, kMaxQueuedParams> m_queues;
     size_t m_count{0};
+    std::atomic<uint32_t> m_refCount{1};
 };
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 } // namespace praccy::plugins

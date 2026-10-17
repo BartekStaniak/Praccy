@@ -1,6 +1,14 @@
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpragma-once-outside-header"
+#endif
 #pragma once
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 #include <charconv>
+#include <string>
 #include <string_view>
 #include <vector>
 #include <cstdint>
@@ -122,6 +130,47 @@ inline std::vector<uint8_t> hexToBytes(std::string_view hex) {
         bytes.push_back(b);
     }
     return bytes;
+}
+
+/// Escapes delimiter characters ('\', '|', '=', ',', '\n', '\r') in INI field values
+inline std::string escapeIniField(std::string_view input) {
+    std::string out;
+    out.reserve(input.size());
+    for (char c : input) {
+        switch (c) {
+            case '\\': out += "\\\\"; break;
+            case '|':  out += "\\p";  break;
+            case '=':  out += "\\e";  break;
+            case ',':  out += "\\c";  break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            default:   out += c;      break;
+        }
+    }
+    return out;
+}
+
+/// Decodes escaped delimiter sequences in INI field values, preserving unescaped characters untouched
+inline std::string unescapeIniField(std::string_view input) {
+    std::string out;
+    out.reserve(input.size());
+    for (size_t i = 0; i < input.size(); ++i) {
+        if (input[i] == '\\' && i + 1 < input.size()) {
+            char next = input[i + 1];
+            switch (next) {
+                case '\\': out += '\\'; ++i; break;
+                case 'p':  out += '|';  ++i; break;
+                case 'e':  out += '=';  ++i; break;
+                case 'c':  out += ',';  ++i; break;
+                case 'n':  out += '\n'; ++i; break;
+                case 'r':  out += '\r'; ++i; break;
+                default:   out += '\\';      break;
+            }
+        } else {
+            out += input[i];
+        }
+    }
+    return out;
 }
 
 } // namespace praccy::utils

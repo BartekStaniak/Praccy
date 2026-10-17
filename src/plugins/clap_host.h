@@ -101,14 +101,14 @@ public:
     [[nodiscard]] std::vector<uint8_t> saveState() const override;
     bool loadState(const std::vector<uint8_t>& state) override;
 
+    ClapPluginInstance() = default;
+
     void onPluginOutputEvent(const clap_event_header_t* event) noexcept;
     void resetFault() noexcept override;
     void handleMainThreadCallbacks() noexcept override;
     void fireTimer(clap_id timerId);
 
 private:
-    ClapPluginInstance() = default;
-
     static const void* clapHostGetExtension(const clap_host* host, const char* extensionId);
     static void clapHostRequestRestart(const clap_host* host);
     static void clapHostRequestProcess(const clap_host* host);
@@ -180,6 +180,18 @@ private:
 
     moodycamel::ReaderWriterQueue<std::pair<clap_id, double>> m_paramQueue{128};
     mutable moodycamel::ReaderWriterQueue<std::pair<clap_id, double>> m_guiOutParamQueue{128};
+
+    struct ClapAudioParamEvent {
+        clap_id id{0};
+        double value{0.0};
+    };
+    std::array<ClapAudioParamEvent, 256> m_audioThreadEvents{};
+    size_t m_audioThreadEventCount{0};
+
+    std::array<float*, 16> m_inChannelPtrs{};
+    std::array<float*, 16> m_outChannelPtrs{};
+    clap_event_transport_t m_transportEvent{};
+
     ClapEventBuffer m_eventBuffer;
     bool m_isActivated{false};
     std::atomic<bool> m_isProcessing{false};

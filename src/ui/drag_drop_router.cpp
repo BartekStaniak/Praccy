@@ -21,9 +21,8 @@ DroppedFileType DragDropRouter::classifyFile(const std::filesystem::path& path) 
         return static_cast<char>(::tolower(c));
     });
 
-    // Audio tracks
-    if (ext == ".wav" || ext == ".wave" || ext == ".flac" || ext == ".mp3" ||
-        ext == ".ogg" || ext == ".aiff" || ext == ".aif") {
+    // Audio tracks (strictly .wav - WavReader only supports RIFF WAVE PCM/Float)
+    if (ext == ".wav") {
         return DroppedFileType::AudioTrack;
     }
 
@@ -118,11 +117,14 @@ bool DragDropRouter::handleDrop(const std::string& path, DropContext& ctx) const
     const auto type = classifyPath(path);
     switch (type) {
         case DroppedFileType::AudioTrack:
-            if (ctx.player) {
-                ctx.player->loadWavFile(path);
-            }
-            if (ctx.looper) {
-                ctx.looper->loadWavFile(path);
+            if (ctx.preferLooper) {
+                if (ctx.looper) {
+                    ctx.looper->loadWavFile(path);
+                }
+            } else {
+                if (ctx.player) {
+                    ctx.player->loadWavFile(path);
+                }
             }
             return true;
         case DroppedFileType::Preset:

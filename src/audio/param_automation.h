@@ -5,6 +5,7 @@
 #include <atomic>
 #include <array>
 #include <utility>
+#include <bit>
 
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -17,17 +18,24 @@ namespace praccy::audio {
  *
  * Implements a flat table of 1024 atomic floats indexed by parameter ID, backed by
  * an atomic 64-bit dirty mask array (16 x uint64_t words). UI and MIDI threads write
- * parameter updates wait-free. The real-time audio thread drains dirty parameters at
- * block boundaries wait-free with zero dynamic memory allocations, automatically
- * coalescing rapid parameter sweeps.
+ * parameter updates wait-free. Arbitrary 32-bit parameter IDs (>= 1024) are handled
+ * wait-free via a 64-slot lock-free CAS overflow hash table. The real-time audio thread
+ * drains dirty parameters at block boundaries wait-free with zero dynamic memory allocations,
+ * automatically coalescing rapid parameter sweeps.
  */
 class ParamAutomationRegister {
 public:
+    struct OverflowEntry {
+        std::atomic<uint64_t> packed{0};
+    };
+
     static constexpr size_t MAX_PARAMS = 1024;
     static constexpr size_t BITMASK_WORDS = MAX_PARAMS / 64; // 16 words
+    static constexpr size_t OVERFLOW_CAPACITY = 64;
+    static constexpr size_t OVERFLOW_MASK = OVERFLOW_CAPACITY - 1;
 
     ParamAutomationRegister() noexcept {
-        reset();
+        resetBeforePrepareOnly();
     }
 
     ~ParamAutomationRegister() = default;
@@ -38,29 +46,110 @@ public:
     ParamAutomationRegister& operator=(ParamAutomationRegister&&) = delete;
 
     /**
-     * @brief Resets all parameter values to 0.0f and clears the dirty bitmask.
+     * @brief Resets all parameter values to 0.0f and clears dirty bitmasks.
+     * MUST only be called when the audio engine is stopped or before prepare().
+     * Never invoke concurrently with process() or setParameter().
      */
-    void reset() noexcept {
+    void resetBeforePrepareOnly() noexcept {
         for (size_t w = 0; w < BITMASK_WORDS; ++w) {
             m_dirtyMask[w].store(0ULL, std::memory_order_relaxed);
         }
         for (size_t i = 0; i < MAX_PARAMS; ++i) {
             m_values[i].store(0.0f, std::memory_order_relaxed);
         }
+        m_overflowDirtyMask.store(0ULL, std::memory_order_relaxed);
+        for (size_t s = 0; s < OVERFLOW_CAPACITY; ++s) {
+            m_overflowTable[s].packed.store(0ULL, std::memory_order_relaxed);
+        }
+    }
+
+    /**
+     * @brief Alias for resetBeforePrepareOnly for backward compatibility.
+     */
+    void reset() noexcept {
+        resetBeforePrepareOnly();
     }
 
     /**
      * @brief Writes a parameter value and marks it dirty.
-     * Called from UI or MIDI thread. Wait-free, lock-free.
+     * Handles both direct table (< 1024) and arbitrary 32-bit IDs (>= 1024) wait-free with zero allocations.
+     * Called from UI or MIDI thread. Lock-free, wait-free.
      */
     inline void setParameter(uint32_t paramId, float value) noexcept {
-        if (paramId >= MAX_PARAMS) return;
+        if (paramId < MAX_PARAMS) {
+            m_values[paramId].store(value, std::memory_order_release);
+            const size_t wordIdx = paramId / 64;
+            const uint64_t bitMask = 1ULL << (paramId % 64);
+            m_dirtyMask[wordIdx].fetch_or(bitMask, std::memory_order_release);
+            return;
+        }
 
-        m_values[paramId].store(value, std::memory_order_release);
+        // Lock-free CAS overflow table for arbitrary 32-bit parameter IDs
+        const uint64_t newPacked = packEntry(paramId, value);
+        const size_t startSlot = hashParamId(paramId);
 
-        const size_t wordIdx = paramId / 64;
-        const uint64_t bitMask = 1ULL << (paramId % 64);
-        m_dirtyMask[wordIdx].fetch_or(bitMask, std::memory_order_release);
+        size_t emptySlot = OVERFLOW_CAPACITY;
+        size_t cleanSlot = OVERFLOW_CAPACITY;
+
+        for (size_t probe = 0; probe < OVERFLOW_CAPACITY; ++probe) {
+            const size_t slot = (startSlot + probe) & OVERFLOW_MASK;
+            uint64_t cur = m_overflowTable[slot].packed.load(std::memory_order_relaxed);
+
+            // 1. If slot already belongs to this paramId, update value with CAS loop (coalescing)
+            if (unpackParamId(cur) == paramId) {
+                while (unpackParamId(cur) == paramId) {
+                    if (m_overflowTable[slot].packed.compare_exchange_weak(
+                            cur, newPacked, std::memory_order_release, std::memory_order_relaxed)) {
+                        m_overflowDirtyMask.fetch_or(1ULL << slot, std::memory_order_release);
+                        return;
+                    }
+                }
+            }
+
+            // 2. Track first empty slot
+            if (cur == 0ULL && emptySlot == OVERFLOW_CAPACITY) {
+                emptySlot = slot;
+            }
+
+            // 3. Track first clean (already drained) slot for recycling if table is full
+            if (cleanSlot == OVERFLOW_CAPACITY && cur != 0ULL) {
+                const uint64_t mask = m_overflowDirtyMask.load(std::memory_order_relaxed);
+                if ((mask & (1ULL << slot)) == 0ULL) {
+                    cleanSlot = slot;
+                }
+            }
+        }
+
+        // Try claiming empty slot
+        if (emptySlot != OVERFLOW_CAPACITY) {
+            uint64_t expected = 0ULL;
+            if (m_overflowTable[emptySlot].packed.compare_exchange_strong(
+                    expected, newPacked, std::memory_order_release, std::memory_order_relaxed)) {
+                m_overflowDirtyMask.fetch_or(1ULL << emptySlot, std::memory_order_release);
+                return;
+            }
+            if (unpackParamId(expected) == paramId) {
+                m_overflowTable[emptySlot].packed.store(newPacked, std::memory_order_release);
+                m_overflowDirtyMask.fetch_or(1ULL << emptySlot, std::memory_order_release);
+                return;
+            }
+        }
+
+        // If no empty slot, recycle clean slot
+        if (cleanSlot != OVERFLOW_CAPACITY) {
+            uint64_t expected = m_overflowTable[cleanSlot].packed.load(std::memory_order_relaxed);
+            if ((m_overflowDirtyMask.load(std::memory_order_relaxed) & (1ULL << cleanSlot)) == 0ULL) {
+                if (m_overflowTable[cleanSlot].packed.compare_exchange_strong(
+                        expected, newPacked, std::memory_order_release, std::memory_order_relaxed)) {
+                    m_overflowDirtyMask.fetch_or(1ULL << cleanSlot, std::memory_order_release);
+                    return;
+                }
+            }
+        }
+
+        // Fallback: overwrite startSlot wait-free
+        m_overflowTable[startSlot].packed.store(newPacked, std::memory_order_release);
+        m_overflowDirtyMask.fetch_or(1ULL << startSlot, std::memory_order_release);
     }
 
     /**
@@ -68,8 +157,19 @@ public:
      * Wait-free, lock-free.
      */
     [[nodiscard]] inline float getParameter(uint32_t paramId) const noexcept {
-        if (paramId >= MAX_PARAMS) return 0.0f;
-        return m_values[paramId].load(std::memory_order_relaxed);
+        if (paramId < MAX_PARAMS) {
+            return m_values[paramId].load(std::memory_order_relaxed);
+        }
+
+        const size_t startSlot = hashParamId(paramId);
+        for (size_t probe = 0; probe < OVERFLOW_CAPACITY; ++probe) {
+            const size_t slot = (startSlot + probe) & OVERFLOW_MASK;
+            const uint64_t entry = m_overflowTable[slot].packed.load(std::memory_order_relaxed);
+            if (entry != 0ULL && unpackParamId(entry) == paramId) {
+                return unpackValue(entry);
+            }
+        }
+        return 0.0f;
     }
 
     /**
@@ -81,17 +181,31 @@ public:
                 return true;
             }
         }
-        return false;
+        return m_overflowDirtyMask.load(std::memory_order_relaxed) != 0ULL;
     }
 
     /**
      * @brief Checks if a specific parameter is marked dirty.
      */
     [[nodiscard]] inline bool isParamDirty(uint32_t paramId) const noexcept {
-        if (paramId >= MAX_PARAMS) return false;
-        const size_t wordIdx = paramId / 64;
-        const uint64_t bitMask = 1ULL << (paramId % 64);
-        return (m_dirtyMask[wordIdx].load(std::memory_order_relaxed) & bitMask) != 0ULL;
+        if (paramId < MAX_PARAMS) {
+            const size_t wordIdx = paramId / 64;
+            const uint64_t bitMask = 1ULL << (paramId % 64);
+            return (m_dirtyMask[wordIdx].load(std::memory_order_relaxed) & bitMask) != 0ULL;
+        }
+
+        const uint64_t dirtyMask = m_overflowDirtyMask.load(std::memory_order_relaxed);
+        if (dirtyMask == 0ULL) return false;
+
+        const size_t startSlot = hashParamId(paramId);
+        for (size_t probe = 0; probe < OVERFLOW_CAPACITY; ++probe) {
+            const size_t slot = (startSlot + probe) & OVERFLOW_MASK;
+            const uint64_t entry = m_overflowTable[slot].packed.load(std::memory_order_relaxed);
+            if (entry != 0ULL && unpackParamId(entry) == paramId) {
+                return (dirtyMask & (1ULL << slot)) != 0ULL;
+            }
+        }
+        return false;
     }
 
     /**
@@ -115,9 +229,39 @@ public:
                 dirty &= dirty - 1ULL; // Clear lowest set bit
             }
         }
+
+        uint64_t overflowDirty = m_overflowDirtyMask.exchange(0ULL, std::memory_order_acq_rel);
+        while (overflowDirty != 0ULL) {
+            const unsigned long slot = countTrailingZeros64(overflowDirty);
+            const uint64_t entry = m_overflowTable[slot].packed.load(std::memory_order_acquire);
+            if (entry != 0ULL) {
+                const uint32_t paramId = unpackParamId(entry);
+                const float val = unpackValue(entry);
+                callback(paramId, val);
+            }
+            overflowDirty &= overflowDirty - 1ULL;
+        }
     }
 
 private:
+    static inline uint64_t packEntry(uint32_t paramId, float value) noexcept {
+        const uint32_t floatBits = std::bit_cast<uint32_t>(value);
+        return (static_cast<uint64_t>(paramId) << 32) | static_cast<uint64_t>(floatBits);
+    }
+
+    static inline uint32_t unpackParamId(uint64_t packed) noexcept {
+        return static_cast<uint32_t>(packed >> 32);
+    }
+
+    static inline float unpackValue(uint64_t packed) noexcept {
+        const uint32_t floatBits = static_cast<uint32_t>(packed & 0xFFFFFFFFULL);
+        return std::bit_cast<float>(floatBits);
+    }
+
+    static inline size_t hashParamId(uint32_t paramId) noexcept {
+        return static_cast<size_t>((static_cast<uint64_t>(paramId) * 2654435761ULL) & OVERFLOW_MASK);
+    }
+
     static inline unsigned long countTrailingZeros64(uint64_t val) noexcept {
 #if defined(_MSC_VER)
         unsigned long index = 0;
@@ -138,6 +282,9 @@ private:
     // Cache-line aligned members to eliminate false sharing between cores
     alignas(64) std::array<std::atomic<uint64_t>, BITMASK_WORDS> m_dirtyMask;
     alignas(64) std::array<std::atomic<float>, MAX_PARAMS> m_values;
+    alignas(64) std::atomic<uint64_t> m_overflowDirtyMask{0};
+    alignas(64) std::array<OverflowEntry, OVERFLOW_CAPACITY> m_overflowTable;
 };
 
 } // namespace praccy::audio
+

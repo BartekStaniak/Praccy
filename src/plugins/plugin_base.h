@@ -1,12 +1,19 @@
 #pragma once
 
 #include "../audio/audio_node.h"
+#include "crash_isolation.h"
 #include <string>
 #include <vector>
 #include <atomic>
 #include <windows.h>
 
 namespace praccy::plugins {
+
+struct FaultState {
+    std::atomic<bool> faulted{false};
+    std::atomic<uint32_t> exceptionCode{0};
+    char reason[128]{};
+};
 
 struct PluginParameterDesc {
     uint32_t id{0};
@@ -112,22 +119,42 @@ public:
     virtual void setFaulted(bool faulted) noexcept {
         m_faulted.store(faulted, std::memory_order_release);
     }
+    [[nodiscard]] virtual uint32_t faultCode() const noexcept {
+        return m_faultCode.load(std::memory_order_acquire);
+    }
+    virtual void setFaultCode(uint32_t code) noexcept {
+        m_faultCode.store(code, std::memory_order_release);
+    }
     [[nodiscard]] virtual const char* faultReason() const noexcept {
         const char* r = m_faultReason.load(std::memory_order_relaxed);
-        return r ? r : "Unknown fault";
+        if (r && r[0] != '\0') return r;
+        if (m_faultReasonBuf[0] != '\0') return m_faultReasonBuf;
+        return "Unknown fault";
     }
     virtual void setFaultReason(const char* reason) noexcept {
         m_faultReason.store(reason, std::memory_order_release);
     }
+    virtual void setFaultReasonFormatted(const char* prefix, uint32_t code) noexcept {
+        m_faultCode.store(code, std::memory_order_release);
+        formatFaultReason(m_faultReasonBuf, prefix, code);
+        m_faultReason.store(m_faultReasonBuf, std::memory_order_release);
+    }
     virtual void resetFault() noexcept {
         m_faulted.store(false, std::memory_order_release);
+        m_faultCode.store(0, std::memory_order_release);
         m_faultReason.store(nullptr, std::memory_order_release);
+        m_faultReasonBuf[0] = '\0';
     }
     virtual void handleMainThreadCallbacks() noexcept {}
 
+    char* faultReasonBuffer() noexcept { return m_faultReasonBuf; }
+    const char* faultReasonBuffer() const noexcept { return m_faultReasonBuf; }
+
 protected:
     std::atomic<bool> m_faulted{false};
+    std::atomic<uint32_t> m_faultCode{0};
     std::atomic<const char*> m_faultReason{nullptr};
+    char m_faultReasonBuf[128]{};
     std::atomic<bool> m_guiParamDirty{false};
     std::atomic<bool> m_guiGestureEnded{false};
     std::atomic<bool> m_guiEditingActive{false};

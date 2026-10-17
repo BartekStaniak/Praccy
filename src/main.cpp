@@ -27,7 +27,11 @@
 #include "ui/rack_view.h"
 #include "ui/thumbnail_manager.h"
 #include "ui/drag_drop_router.h"
+#if __has_include("resource.h")
 #include "resource.h"
+#elif __has_include("../resources/resource.h")
+#include "../resources/resource.h"
+#endif
 #include <fstream>
 
 // Global typography handles
@@ -37,6 +41,7 @@ ImFont* g_fontMono = nullptr;
 namespace {
 
 static praccy::ui::DragDropRouter g_dragDropRouter;
+static std::atomic<float> g_pendingDpiScale{0.0f};
 
 struct EmbeddedResource {
     const void* data = nullptr;
@@ -56,6 +61,105 @@ EmbeddedResource loadWin32Resource(HMODULE hModule, int resourceId, LPCWSTR reso
 
     res.data = LockResource(hGlobal);
     return res;
+}
+
+void loadApplicationFonts(ImGuiIO& io, float scale) {
+    ImFontConfig fontConfig;
+    fontConfig.OversampleH = 3;
+    fontConfig.OversampleV = 1;
+    fontConfig.PixelSnapH  = true;
+    fontConfig.FontDataOwnedByAtlas = false;
+
+    static const ImWchar glyphRanges[] = {
+        0x0020, 0x00FF, // Basic Latin + Latin Supplement
+        0x2190, 0x21FF, // Arrows (←, ↑, →, ↓, etc.)
+        0,
+    };
+
+    const float scaledFontSizeUI   = std::round(15.0f * scale);
+    const float scaledFontSizeMono = std::round(13.0f * scale);
+
+    HMODULE hModule = GetModuleHandleW(nullptr);
+
+    // Load Inter (UI Primary Font) via Win32 resource (RT_RCDATA / type 10)
+    EmbeddedResource resInter = loadWin32Resource(hModule, IDR_FONT_INTER, MAKEINTRESOURCEW(10));
+    if (resInter.data && resInter.size > 0) {
+        g_fontUI = io.Fonts->AddFontFromMemoryTTF(
+            const_cast<void*>(resInter.data),
+            static_cast<int>(resInter.size),
+            scaledFontSizeUI,
+            &fontConfig,
+            glyphRanges
+        );
+    } else {
+        // Portable / developer disk fallback
+        const char* fontPaths[] = {
+            "resources/fonts/Inter-Regular.ttf",
+            "fonts/Inter-Regular.ttf",
+            "../resources/fonts/Inter-Regular.ttf"
+        };
+        for (const char* path : fontPaths) {
+            if (std::filesystem::exists(path)) {
+                ImFontConfig diskCfg = fontConfig;
+                diskCfg.FontDataOwnedByAtlas = true;
+                g_fontUI = io.Fonts->AddFontFromFileTTF(path, scaledFontSizeUI, &diskCfg, glyphRanges);
+                if (g_fontUI) break;
+            }
+        }
+    }
+
+    // Fallback if Inter resource unavailable
+    if (!g_fontUI) {
+        g_fontUI = io.Fonts->AddFontDefault();
+    }
+    io.FontDefault = g_fontUI;
+
+    // Optional: Merge Segoe UI Symbol for dingbats/stars if available on Windows host
+    if (GetFileAttributesA("C:\\Windows\\Fonts\\seguisym.ttf") != INVALID_FILE_ATTRIBUTES) {
+        ImFontConfig symConfig = fontConfig;
+        symConfig.MergeMode = true;
+        symConfig.FontDataOwnedByAtlas = true;
+        static const ImWchar symRanges[] = {
+            0x2190, 0x21FF, // Arrows (←, ↑, →, ↓, etc.)
+            0x2600, 0x26FF, // Miscellaneous Symbols (★, ☆, etc.)
+            0x2700, 0x27BF, // Dingbats
+            0,
+        };
+        io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisym.ttf", scaledFontSizeUI, &symConfig, symRanges);
+    }
+
+    // Load JetBrains Mono (Numeric Parameters & DSP Readouts)
+    EmbeddedResource resMono = loadWin32Resource(hModule, IDR_FONT_JETBRAINS_MONO, MAKEINTRESOURCEW(10));
+    if (resMono.data && resMono.size > 0) {
+        ImFontConfig monoConfig = fontConfig;
+        monoConfig.FontDataOwnedByAtlas = false;
+        g_fontMono = io.Fonts->AddFontFromMemoryTTF(
+            const_cast<void*>(resMono.data),
+            static_cast<int>(resMono.size),
+            scaledFontSizeMono,
+            &monoConfig,
+            glyphRanges
+        );
+    } else {
+        const char* monoPaths[] = {
+            "resources/fonts/JetBrainsMono-Regular.ttf",
+            "fonts/JetBrainsMono-Regular.ttf",
+            "../resources/fonts/JetBrainsMono-Regular.ttf"
+        };
+        for (const char* path : monoPaths) {
+            if (std::filesystem::exists(path)) {
+                ImFontConfig diskMonoCfg = fontConfig;
+                diskMonoCfg.FontDataOwnedByAtlas = true;
+                g_fontMono = io.Fonts->AddFontFromFileTTF(path, scaledFontSizeMono, &diskMonoCfg, glyphRanges);
+                if (g_fontMono) break;
+            }
+        }
+    }
+
+    // Fallback if JetBrains Mono unavailable (never leave g_fontMono null)
+    if (!g_fontMono) {
+        g_fontMono = g_fontUI;
+    }
 }
 
 void enableWin32DarkTitleBar(HWND hwnd, bool isDark = true) {
@@ -179,6 +283,10 @@ static int runDirectUpdater(DWORD oldPid, const std::wstring& destExe) {
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    (void)hPrevInstance;
+    (void)lpCmdLine;
+    (void)nCmdShow;
+
     // Check for direct updater execution flag before initializing GUI or audio
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -262,103 +370,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 
 
-    ImFontConfig fontConfig;
-    fontConfig.OversampleH = 3; // 3x horizontal oversampling for subpixel crispness
-    fontConfig.OversampleV = 1;
-    fontConfig.FontDataOwnedByAtlas = false; // CRITICAL: Prevent free() on read-only PE .rsrc memory
-
-    static const ImWchar glyphRanges[] = {
-        0x0020, 0x00FF, // Basic Latin + Latin Supplement
-        0x2190, 0x21FF, // Arrows (←, ↑, →, ↓, etc.)
-        0,
-    };
-
-    const float baseFontSizeUI     = 17.0f;
-    const float baseFontSizeMono   = 14.5f;
-    const float scaledFontSizeUI   = std::round(baseFontSizeUI * dpiScale);
-    const float scaledFontSizeMono = std::round(baseFontSizeMono * dpiScale);
-
-    HMODULE hModule = GetModuleHandleW(nullptr);
-
-    // Load Inter (UI Primary Font) via Win32 resource (RT_RCDATA / type 10)
-    EmbeddedResource resInter = loadWin32Resource(hModule, IDR_FONT_INTER, MAKEINTRESOURCEW(10));
-    if (resInter.data && resInter.size > 0) {
-        g_fontUI = io.Fonts->AddFontFromMemoryTTF(
-            const_cast<void*>(resInter.data),
-            static_cast<int>(resInter.size),
-            scaledFontSizeUI,
-            &fontConfig,
-            glyphRanges
-        );
-    } else {
-        // Portable / developer disk fallback
-        const char* fontPaths[] = {
-            "resources/fonts/Inter-Regular.ttf",
-            "fonts/Inter-Regular.ttf",
-            "../resources/fonts/Inter-Regular.ttf"
-        };
-        for (const char* path : fontPaths) {
-            if (std::filesystem::exists(path)) {
-                ImFontConfig diskCfg = fontConfig;
-                diskCfg.FontDataOwnedByAtlas = true;
-                g_fontUI = io.Fonts->AddFontFromFileTTF(path, scaledFontSizeUI, &diskCfg, glyphRanges);
-                if (g_fontUI) break;
-            }
-        }
-    }
-
-    // Fallback if Inter resource unavailable
-    if (!g_fontUI) {
-        g_fontUI = io.Fonts->AddFontDefault();
-    }
-    io.FontDefault = g_fontUI;
-
-    // Optional: Merge Segoe UI Symbol for dingbats/stars if available on Windows host
-    if (GetFileAttributesA("C:\\Windows\\Fonts\\seguisym.ttf") != INVALID_FILE_ATTRIBUTES) {
-        ImFontConfig symConfig = fontConfig;
-        symConfig.MergeMode = true;
-        symConfig.FontDataOwnedByAtlas = true; // AddFontFromFileTTF allocates heap memory via ImFileLoadToMemory; atlas must own it to free on ClearInputData()
-        static const ImWchar symRanges[] = {
-            0x2190, 0x21FF, // Arrows (←, ↑, →, ↓, etc.)
-            0x2600, 0x26FF, // Miscellaneous Symbols (★, ☆, etc.)
-            0x2700, 0x27BF, // Dingbats
-            0,
-        };
-        io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisym.ttf", scaledFontSizeUI, &symConfig, symRanges);
-    }
-
-    // Load JetBrains Mono (Numeric Parameters & DSP Readouts)
-    EmbeddedResource resMono = loadWin32Resource(hModule, IDR_FONT_JETBRAINS_MONO, MAKEINTRESOURCEW(10));
-    if (resMono.data && resMono.size > 0) {
-        ImFontConfig monoConfig = fontConfig;
-        monoConfig.FontDataOwnedByAtlas = false;
-        g_fontMono = io.Fonts->AddFontFromMemoryTTF(
-            const_cast<void*>(resMono.data),
-            static_cast<int>(resMono.size),
-            scaledFontSizeMono,
-            &monoConfig,
-            glyphRanges
-        );
-    } else {
-        const char* monoPaths[] = {
-            "resources/fonts/JetBrainsMono-Regular.ttf",
-            "fonts/JetBrainsMono-Regular.ttf",
-            "../resources/fonts/JetBrainsMono-Regular.ttf"
-        };
-        for (const char* path : monoPaths) {
-            if (std::filesystem::exists(path)) {
-                ImFontConfig diskMonoCfg = fontConfig;
-                diskMonoCfg.FontDataOwnedByAtlas = true;
-                g_fontMono = io.Fonts->AddFontFromFileTTF(path, scaledFontSizeMono, &diskMonoCfg, glyphRanges);
-                if (g_fontMono) break;
-            }
-        }
-    }
-
-    // Fallback if JetBrains Mono unavailable (never leave g_fontMono null)
-    if (!g_fontMono) {
-        g_fontMono = g_fontUI;
-    }
+    loadApplicationFonts(io, dpiScale);
 
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
@@ -480,6 +492,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             rackView.getRiffBuffer().push(outL, outR, numSamples);
         }
 
+        // Live Audio Transport Context Wiring (F-12)
+        static int64_t s_projectTimeSamples = 0;
+        s_projectTimeSamples += static_cast<int64_t>(numSamples);
+
+        [[maybe_unused]] praccy::audio::AudioProcessContext ctx{};
+        ctx.tempoBpm = (static_cast<double>(metronome.bpm()) > 1.0) ? static_cast<double>(metronome.bpm()) : 120.0;
+        ctx.timeSigNumerator = (metronome.beatsPerBar() > 0) ? metronome.beatsPerBar() : 4;
+        ctx.timeSigDenominator = 4;
+        ctx.projectTimeSamples = s_projectTimeSamples;
+
         // 5. Measure real-time DSP cycle duration vs available buffer time slice
         auto t1 = std::chrono::high_resolution_clock::now();
         double elapsedUs = std::chrono::duration<double, std::micro>(t1 - t0).count();
@@ -549,41 +571,51 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     // Connect MIDI bindings callback (defer SceneSelect off WinMM interrupt thread to UI thread)
     std::atomic<int> pendingMidiSceneIndex{-1};
     midi.setBindingCallback([&](const praccy::midi::MidiBinding& binding, float normVal) {
-        if (binding.targetType == praccy::midi::BindingTargetType::SlotBypass) {
-            auto* node = graph.getNode(binding.targetSlotIndex);
-            if (node) node->setBypassed(!node->isBypassed());
-        } else if (binding.targetType == praccy::midi::BindingTargetType::SlotDryWet) {
-            auto* slot = dynamic_cast<praccy::audio::PluginSlot*>(graph.getNode(binding.targetSlotIndex));
-            if (slot) slot->setDryWet(normVal);
-        } else if (binding.targetType == praccy::midi::BindingTargetType::SlotOutputGain) {
-            auto* slot = dynamic_cast<praccy::audio::PluginSlot*>(graph.getNode(binding.targetSlotIndex));
-            if (slot) slot->setOutputGainDb(-24.0f + (normVal * 36.0f));
-        } else if (binding.targetType == praccy::midi::BindingTargetType::SlotInputGain) {
-            auto* slot = dynamic_cast<praccy::audio::PluginSlot*>(graph.getNode(binding.targetSlotIndex));
-            if (slot) slot->setInputGainDb(-24.0f + (normVal * 48.0f));
-        } else if (binding.targetType == praccy::midi::BindingTargetType::BranchMute ||
-                   binding.targetType == praccy::midi::BindingTargetType::BranchSolo ||
-                   binding.targetType == praccy::midi::BindingTargetType::BranchGain ||
-                   binding.targetType == praccy::midi::BindingTargetType::BranchPan) {
-            auto* block = dynamic_cast<praccy::audio::ParallelSplitMergeBlock*>(graph.getNode(binding.targetSlotIndex));
-            if (block && binding.targetBranchIndex >= 0 &&
-                static_cast<size_t>(binding.targetBranchIndex) < block->numBranches()) {
-                if (auto* br = block->getBranch(static_cast<size_t>(binding.targetBranchIndex))) {
-                    if (binding.targetType == praccy::midi::BindingTargetType::BranchMute) {
-                        br->setMuted(!br->isMuted());
-                    } else if (binding.targetType == praccy::midi::BindingTargetType::BranchSolo) {
-                        br->setSolo(!br->isSolo());
-                    } else if (binding.targetType == praccy::midi::BindingTargetType::BranchGain) {
-                        br->setGainDb(-24.0f + (normVal * 36.0f));
-                    } else if (binding.targetType == praccy::midi::BindingTargetType::BranchPan) {
-                        br->setPan((normVal * 2.0f) - 1.0f);
-                    }
-                }
-            }
-        } else if (binding.targetType == praccy::midi::BindingTargetType::SceneSelect) {
+        if (binding.targetType == praccy::midi::BindingTargetType::SceneSelect) {
             pendingMidiSceneIndex.store(binding.targetSceneIndex, std::memory_order_release);
         } else if (binding.targetType == praccy::midi::BindingTargetType::MasterVolume) {
             graph.setMasterVolumeDb(-36.0f + (normVal * 42.0f));
+        } else {
+            graph.dispatchParameterThreadSafe(
+                binding.targetSlotIndex,
+                binding.targetBranchIndex,
+                binding.targetBranchSlotIndex,
+                binding.paramId,
+                normVal);
+        }
+    });
+
+    midi.setFlatBindingCallback([&](const praccy::midi::FlatCcBinding& flatBinding, float mappedVal) {
+        if (flatBinding.count > 0) {
+            for (uint8_t i = 0; i < flatBinding.count; ++i) {
+                const auto& b = flatBinding.bindings[i];
+                if (b.targetType == praccy::midi::BindingTargetType::SceneSelect) {
+                    pendingMidiSceneIndex.store(b.targetSceneIndex, std::memory_order_release);
+                } else if (b.targetType == praccy::midi::BindingTargetType::MasterVolume) {
+                    graph.setMasterVolumeDb(-36.0f + (mappedVal * 42.0f));
+                } else {
+                    graph.dispatchParameterThreadSafe(
+                        b.targetSlotIndex,
+                        b.targetBranchIndex,
+                        b.targetBranchSlotIndex,
+                        b.paramId,
+                        mappedVal);
+                }
+            }
+        } else {
+            const auto& b = flatBinding.binding;
+            if (b.targetType == praccy::midi::BindingTargetType::SceneSelect) {
+                pendingMidiSceneIndex.store(b.targetSceneIndex, std::memory_order_release);
+            } else if (b.targetType == praccy::midi::BindingTargetType::MasterVolume) {
+                graph.setMasterVolumeDb(-36.0f + (mappedVal * 42.0f));
+            } else {
+                graph.dispatchParameterThreadSafe(
+                    b.targetSlotIndex,
+                    b.targetBranchIndex,
+                    b.targetBranchSlotIndex,
+                    b.paramId,
+                    mappedVal);
+            }
         }
     });
 
@@ -640,6 +672,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         if (IsIconic(hwnd)) {
             Sleep(16);
             continue;
+        }
+
+        // Deferred Pre-Frame WM_DPICHANGED Font Atlas Rebuild (F-22)
+        if (float newDpi = g_pendingDpiScale.exchange(0.0f, std::memory_order_acq_rel); newDpi > 0.0f) {
+            praccy::ui::setDpiScale(newDpi);
+            praccy::ui::applyTheme(praccy::ui::themeTokens().id);
+            io.Fonts->Clear();
+            loadApplicationFonts(io, newDpi);
+            ImGui_ImplDX11_InvalidateDeviceObjects();
+            ImGui_ImplDX11_CreateDeviceObjects();
         }
 
         // Start Dear ImGui frame
@@ -796,8 +838,8 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_DPICHANGED: {
             const UINT newDpi = HIWORD(wParam);
             if (newDpi > 0) {
-                praccy::ui::setDpiScale(static_cast<float>(newDpi) / 96.0f);
-                praccy::ui::applyTheme(praccy::ui::themeTokens().id);
+                const float newScale = static_cast<float>(newDpi) / 96.0f;
+                g_pendingDpiScale.store(newScale, std::memory_order_release);
             }
             const RECT* prc = reinterpret_cast<const RECT*>(lParam);
             SetWindowPos(hWnd, nullptr,

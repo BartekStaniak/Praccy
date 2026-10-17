@@ -64,6 +64,7 @@ void MidiManager::addBinding(const MidiBinding& binding) {
         const uint8_t ch = (binding.midiChannel <= 16) ? binding.midiChannel : 0;
         const uint8_t cc = binding.triggerNumber;
         if (cc < NUM_CC_NUMBERS) {
+            m_ccTableSeq.fetch_add(1, std::memory_order_acquire);
             auto& slot = m_ccTable[ch][cc];
             slot.active = true;
             slot.paramId = static_cast<uint32_t>(binding.targetSlotIndex >= 0 ? binding.targetSlotIndex : 0);
@@ -73,6 +74,7 @@ void MidiManager::addBinding(const MidiBinding& binding) {
             if (slot.count < MAX_BINDINGS_PER_CC) {
                 slot.bindings[slot.count++].fromMidiBinding(binding);
             }
+            m_ccTableSeq.fetch_add(1, std::memory_order_release);
         }
     }
 }
@@ -81,6 +83,7 @@ void MidiManager::addCcBinding(uint8_t channel, uint8_t cc, uint32_t paramId, fl
     if (channel >= NUM_MIDI_CHANNELS || cc >= NUM_CC_NUMBERS) return;
     std::lock_guard<std::mutex> lock(m_bindingsMutex);
 
+    m_ccTableSeq.fetch_add(1, std::memory_order_acquire);
     auto& slot = m_ccTable[channel][cc];
     slot.active = true;
     slot.paramId = paramId;
@@ -89,6 +92,11 @@ void MidiManager::addCcBinding(uint8_t channel, uint8_t cc, uint32_t paramId, fl
     MidiBinding tempB;
     tempB.id = "cc_" + std::to_string(channel) + "_" + std::to_string(cc);
     tempB.targetType = BindingTargetType::SlotOutputGain;
+    tempB.targetSlotIndex = -1;
+    tempB.targetBranchIndex = -1;
+    tempB.targetSceneIndex = -1;
+    tempB.targetBranchSlotIndex = -1;
+    tempB.paramId = paramId;
     tempB.midiChannel = channel;
     tempB.triggerType = MidiMessageType::ControlChange;
     tempB.triggerNumber = cc;
@@ -97,10 +105,11 @@ void MidiManager::addCcBinding(uint8_t channel, uint8_t cc, uint32_t paramId, fl
         slot.bindings[0] = slot.binding;
         slot.count = 1;
     }
+    m_ccTableSeq.fetch_add(1, std::memory_order_release);
 }
 
 void MidiManager::rebuildCcTable() {
-    m_ccTableSeq.fetch_add(1, std::memory_order_release); // Odd = write in progress
+    m_ccTableSeq.fetch_add(1, std::memory_order_acquire); // Odd = write in progress
     for (auto& row : m_ccTable) {
         for (auto& slot : row) {
             slot = FlatCcBinding{};
@@ -135,13 +144,73 @@ void MidiManager::removeBinding(const std::string& id) {
 void MidiManager::clearBindings() {
     std::lock_guard<std::mutex> lock(m_bindingsMutex);
     m_bindings.clear();
-    m_ccTableSeq.fetch_add(1, std::memory_order_release);
+    m_ccTableSeq.fetch_add(1, std::memory_order_acquire);
     for (auto& row : m_ccTable) {
         for (auto& slot : row) {
             slot = FlatCcBinding{};
         }
     }
     m_ccTableSeq.fetch_add(1, std::memory_order_release);
+}
+
+void MidiManager::stopLearnAndBind(uint8_t channel, uint8_t cc, uint32_t paramId, float minVal, float maxVal) {
+    if (channel >= NUM_MIDI_CHANNELS || cc >= NUM_CC_NUMBERS) return;
+    std::lock_guard<std::mutex> lock(m_bindingsMutex);
+
+    int slot = 0;
+    int branch = -1;
+    int scene = -1;
+    BindingTargetType target = BindingTargetType::SlotOutputGain;
+
+    {
+        std::lock_guard<std::mutex> learnLock(m_learnMutex);
+        if (m_learning.load(std::memory_order_relaxed)) {
+            slot = m_pendingLearnBinding.targetSlotIndex;
+            branch = m_pendingLearnBinding.targetBranchIndex;
+            scene = m_pendingLearnBinding.targetSceneIndex;
+            target = m_pendingLearnBinding.targetType;
+        }
+    }
+
+    std::string idStr = "cc_" + std::to_string(channel) + "_" + std::to_string(cc)
+                      + "_s" + std::to_string(slot)
+                      + "_b" + std::to_string(branch)
+                      + "_sl" + std::to_string(scene)
+                      + "_p" + std::to_string(paramId);
+
+    MidiBinding b;
+    b.id = idStr;
+    b.targetType = target;
+    b.targetSlotIndex = slot;
+    b.targetBranchIndex = branch;
+    b.targetSceneIndex = scene;
+    b.targetBranchSlotIndex = -1;
+    b.paramId = paramId;
+    b.midiChannel = channel;
+    b.triggerType = MidiMessageType::ControlChange;
+    b.triggerNumber = cc;
+
+    m_bindings.push_back(b);
+
+    m_ccTableSeq.fetch_add(1, std::memory_order_acquire);
+    auto& entry = m_ccTable[channel][cc];
+    entry.active = true;
+    entry.paramId = paramId;
+    entry.minVal = minVal;
+    entry.maxVal = maxVal;
+    entry.binding.fromMidiBinding(b);
+    if (entry.count < MAX_BINDINGS_PER_CC) {
+        entry.bindings[entry.count++].fromMidiBinding(b);
+    } else {
+        entry.bindings[0].fromMidiBinding(b);
+    }
+    m_ccTableSeq.fetch_add(1, std::memory_order_release);
+
+    m_learning.store(false, std::memory_order_release);
+}
+
+void MidiManager::stopLearnAndBind(uint32_t paramId) {
+    stopLearnAndBind(1, 11, paramId, 0.0f, 1.0f);
 }
 
 const FlatCcBinding& MidiManager::getCcBinding(uint8_t channel, uint8_t cc) const noexcept {
@@ -159,6 +228,8 @@ void MidiManager::startLearning(BindingTargetType target, int slot, int branch, 
             .targetSlotIndex = slot,
             .targetBranchIndex = branch,
             .targetSceneIndex = scene,
+            .targetBranchSlotIndex = -1,
+            .paramId = 0,
             .midiChannel = 0,
             .triggerType = MidiMessageType::ControlChange,
             .triggerNumber = 0
@@ -171,7 +242,7 @@ void MidiManager::cancelLearning() {
     m_learning.store(false);
 }
 
-void CALLBACK MidiManager::midiInProc(HMIDIIN hMidiIn, UINT wMsg, DWORD_PTR dwInstance, DWORD_PTR dwParam1, DWORD_PTR dwParam2) {
+void CALLBACK MidiManager::midiInProc(HMIDIIN /*hMidiIn*/, UINT wMsg, DWORD_PTR dwInstance, DWORD_PTR dwParam1, DWORD_PTR /*dwParam2*/) {
     if (wMsg != MIM_DATA) return;
 
     auto* manager = reinterpret_cast<MidiManager*>(dwInstance);
@@ -186,33 +257,71 @@ void CALLBACK MidiManager::midiInProc(HMIDIIN hMidiIn, UINT wMsg, DWORD_PTR dwIn
 
 void MidiManager::handleControlChange(uint8_t channel, uint8_t cc, uint8_t val) {
     if (cc >= NUM_CC_NUMBERS) return;
-    // Skip dispatch if UI thread is mid-rebuild of m_ccTable (odd sequence counter)
-    if ((m_ccTableSeq.load(std::memory_order_acquire) & 1u) != 0u) return;
-    const float norm = static_cast<float>(val) / 127.0f;
 
-    // 1. Channel-specific lookup O(1)
-    if (channel >= 1 && channel <= 16) {
-        const auto& slot = m_ccTable[channel][cc];
-        if (slot.active && m_bindingCallback) {
-            if (slot.count > 0) {
-                for (uint8_t i = 0; i < slot.count; ++i) {
-                    m_bindingCallback(slot.bindings[i].toMidiBinding(), norm);
-                }
-            } else {
-                m_bindingCallback(slot.binding.toMidiBinding(), norm);
-            }
+    FlatCcBinding exactSlot{};
+    FlatCcBinding omniSlot{};
+    bool valid = false;
+
+    // Complete lock-free seqlock read loop bounded to 2 retries (up to 3 attempts total)
+    for (int retry = 0; retry < 3; ++retry) {
+        const uint32_t seq1 = m_ccTableSeq.load(std::memory_order_acquire);
+        if ((seq1 & 1u) != 0u) {
+            continue;
+        }
+
+        if (channel >= 1 && channel <= 16) {
+            exactSlot = m_ccTable[channel][cc];
+        } else {
+            exactSlot = FlatCcBinding{};
+        }
+
+        omniSlot = m_ccTable[0][cc];
+
+        std::atomic_thread_fence(std::memory_order_acquire);
+
+        if (m_ccTableSeq.load(std::memory_order_relaxed) == seq1) {
+            valid = true;
+            break;
         }
     }
 
-    // 2. Omni channel lookup O(1) (Channel 0)
-    const auto& omniSlot = m_ccTable[0][cc];
-    if (omniSlot.active && m_bindingCallback) {
-        if (omniSlot.count > 0) {
-            for (uint8_t i = 0; i < omniSlot.count; ++i) {
-                m_bindingCallback(omniSlot.bindings[i].toMidiBinding(), norm);
+    if (!valid) {
+        return;
+    }
+
+    const float norm = static_cast<float>(val) / 127.0f;
+
+    // If flat binding callback is set, invoke directly with zero heap allocations
+    if (m_flatBindingCallback) {
+        if (exactSlot.active) {
+            const float mapped = exactSlot.minVal + norm * (exactSlot.maxVal - exactSlot.minVal);
+            m_flatBindingCallback(exactSlot, mapped);
+        }
+        if (omniSlot.active) {
+            const float mapped = omniSlot.minVal + norm * (omniSlot.maxVal - omniSlot.minVal);
+            m_flatBindingCallback(omniSlot, mapped);
+        }
+    } else if (m_bindingCallback) {
+        // Channel-specific lookup
+        if (exactSlot.active) {
+            if (exactSlot.count > 0) {
+                for (uint8_t i = 0; i < exactSlot.count; ++i) {
+                    m_bindingCallback(exactSlot.bindings[i].toMidiBinding(), norm);
+                }
+            } else {
+                m_bindingCallback(exactSlot.binding.toMidiBinding(), norm);
             }
-        } else {
-            m_bindingCallback(omniSlot.binding.toMidiBinding(), norm);
+        }
+
+        // Omni channel lookup
+        if (omniSlot.active) {
+            if (omniSlot.count > 0) {
+                for (uint8_t i = 0; i < omniSlot.count; ++i) {
+                    m_bindingCallback(omniSlot.bindings[i].toMidiBinding(), norm);
+                }
+            } else {
+                m_bindingCallback(omniSlot.binding.toMidiBinding(), norm);
+            }
         }
     }
 }
@@ -278,7 +387,7 @@ std::string MidiManager::lastActivityDescription() const {
     const uint8_t d2 = static_cast<uint8_t>(raw & 0xFF);
 
     const auto type = static_cast<MidiMessageType>(status & 0xF0);
-    const uint8_t ch = (status & 0x0F) + 1;
+    const uint8_t ch = static_cast<uint8_t>((status & 0x0F) + 1);
 
     std::ostringstream ss;
     if (type == MidiMessageType::ControlChange) {

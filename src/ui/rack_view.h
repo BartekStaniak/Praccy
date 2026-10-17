@@ -27,6 +27,8 @@
 
 namespace praccy::ui {
 
+class ThumbnailManager;
+
 struct CardDragPayload {
     int sourceIndex{-1};
     int sourceBlockIndex{-1};
@@ -86,6 +88,7 @@ private:
     void renderSceneBar();
     void renderBottomBar();
     void renderMeter(const char* label, float level, float width, float height);
+    void renderMeter(const char* id, float level, float holdLevel, bool isClipped, float width, float height, bool* outClicked = nullptr);
     void renderDspTweakModal();
     void renderUpdateModal();
     void renderFloatingHudToast();
@@ -93,6 +96,9 @@ private:
     void renderHotkeyLegendOverlay();
 
     void cycleAdjacentScenePreset(int delta);
+    void dispatchKeyBindings();
+    void processKeyMapCapture();
+    int getBoundKeyForTarget(int slotIndex, int blockIndex, int branchIndex, int branchSlotIndex, uint32_t targetType, uint32_t paramId) const;
     void initMacrosForSlot(audio::PluginSlot* slot);
     void syncMacrosFromGraph();
     void refreshGuiParamBaseline(audio::PluginSlot* slot);
@@ -123,7 +129,9 @@ private:
     bool m_tempoEditing{false};
     int m_tempoEditValue{120};
 
-    std::unordered_map<std::string, bool> m_branchMinimized;
+    std::unordered_map<uint64_t, bool> m_branchMinimized;
+    std::vector<std::string> m_cachedUserPresetNames;
+    bool m_userPresetsValid{false};
 
     bool m_showSavePresetModal{false};
     char m_presetNameBuffer[64]{0};
@@ -146,6 +154,8 @@ private:
 
     bool m_showUpdateModal{false};
     state::AppConfig m_cachedConfig;
+    state::AppConfig& m_config{m_cachedConfig};
+    ThumbnailManager* m_thumbnailMgr{nullptr};
 
     state::UndoManager m_undoManager;
     audio::RetroactiveRiffBuffer m_riffBuffer;
@@ -156,11 +166,25 @@ private:
     std::string m_pendingGuiEditDesc;
     bool m_guiEditWasMouseDown{false};
 
+    struct AwaitingKeyTarget {
+        bool active{false};
+        int slotIndex{-1};
+        int blockIndex{-1};
+        int branchIndex{-1};
+        int branchSlotIndex{-1};
+        uint32_t targetType{0};
+        uint32_t paramId{0};
+        std::string targetLabel;
+    };
+    AwaitingKeyTarget m_awaitingKeyTarget;
+
     bool m_midiMapMode{false};
     bool m_keyMapMode{false};
     bool m_showHotkeyLegend{false};
     audio::PluginSlot* m_focusedSlot{nullptr};
     int m_focusedSlotIndex{-1};
+    int m_focusedBlockIndex{-1};
+    int m_focusedBranchIndex{-1};
     state::AppConfig::RackViewMode m_rackViewMode{state::AppConfig::RackViewMode::Modular};
 };
 

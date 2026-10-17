@@ -101,6 +101,7 @@ private:
     EqualPowerRamp m_bypassRamp;
     OwnedAudioBuffer m_dryBuffer;
     OwnedAudioBuffer m_processBuffer;
+    OwnedAudioBuffer m_inputScaledBuffer;
     LevelMeter m_meter;
     std::array<Macro, 4> m_macros{};
     bool m_macrosInitialized{false};
@@ -250,12 +251,13 @@ private:
     // 3. SPSC Command Queue: UI Thread -> Audio Thread
     moodycamel::ReaderWriterQueue<SlotCommand> m_commandQueue{QUEUE_CAPACITY};
 
-    // 4. SPSC Reclamation Queue: Audio Thread -> UI Thread
-    moodycamel::ReaderWriterQueue<std::unique_ptr<PluginSlot>> m_reclaimQueue{QUEUE_CAPACITY};
+    // 4. SPSC Reclamation Queue: Audio Thread -> UI Thread (1024 capacity for bounded reclamation)
+    moodycamel::ReaderWriterQueue<std::unique_ptr<PluginSlot>> m_reclaimQueue{1024};
 
     // 5. Fail-Safe Audio Thread Stash (Prevents destruction on audio thread if queue is saturated)
     std::array<std::unique_ptr<PluginSlot>, 16> m_stashedReclamations;
     size_t m_stashedCount{0};
+    std::vector<std::unique_ptr<PluginSlot>> m_deferredReclaim;
     std::atomic<bool> m_isAudioRunning{false};
 
     // 6. Parallel Delay Compensation (PDC) stereo circular delay lines (16,384 samples)
@@ -283,13 +285,54 @@ private:
     uint32_t m_maxBlockSize{256};
 };
 
+enum class BranchCommandType : uint8_t {
+    Add,
+    Remove,
+    Clear
+};
+
+/**
+ * @brief Lock-free command payload dispatched from UI thread to ParallelSplitMergeBlock audio thread.
+ */
+struct BranchCommand {
+    BranchCommandType type{BranchCommandType::Add};
+    std::unique_ptr<ParallelBranch> branch{nullptr};
+    size_t index{0};
+    ParallelBranch* targetBranch{nullptr};
+
+    static BranchCommand makeAdd(std::unique_ptr<ParallelBranch> b) noexcept {
+        BranchCommand cmd;
+        cmd.type = BranchCommandType::Add;
+        cmd.branch = std::move(b);
+        return cmd;
+    }
+
+    static BranchCommand makeRemove(size_t idx, ParallelBranch* target = nullptr) noexcept {
+        BranchCommand cmd;
+        cmd.type = BranchCommandType::Remove;
+        cmd.index = idx;
+        cmd.targetBranch = target;
+        return cmd;
+    }
+
+    static BranchCommand makeClear() noexcept {
+        BranchCommand cmd;
+        cmd.type = BranchCommandType::Clear;
+        return cmd;
+    }
+};
+
 /**
  * @brief Split & Merge Block: splits audio into parallel branches and mixes them,
  * coordinating dynamic phase-coherent Parallel Delay Compensation.
+ * Concurrency-safe: UI mutations use lock-free SPSC branch command and reclamation queues.
  */
 class ParallelSplitMergeBlock : public AudioNode {
 public:
+    static constexpr size_t BRANCH_QUEUE_CAPACITY = 64;
+
     explicit ParallelSplitMergeBlock(std::string name = "Parallel Split/Merge");
+    ~ParallelSplitMergeBlock() override;
 
     void prepare(double sampleRate, uint32_t maxBlockSize) override;
     void process(AudioProcessContext& ctx) override;
@@ -302,19 +345,41 @@ public:
 
     ParallelBranch* addBranch(const std::string& branchName);
     void removeBranch(size_t index);
-    [[nodiscard]] size_t numBranches() const noexcept { return m_branches.size(); }
+    [[nodiscard]] size_t numBranches() const noexcept;
     [[nodiscard]] ParallelBranch* getBranch(size_t index) noexcept;
 
     void setBlend(float blend) noexcept { m_blend.store(std::clamp(blend, -1.0f, 1.0f), std::memory_order_relaxed); }
     [[nodiscard]] float blend() const noexcept { return m_blend.load(std::memory_order_relaxed); }
 
     void collectReclaimedSlots() noexcept;
+    void collectReclaimedBranches() noexcept;
 
 private:
+    void drainCommandQueueIntoActive();
+    void stashBranchForReclamation(std::unique_ptr<ParallelBranch> branch) noexcept;
+
     std::string m_name;
-    std::vector<std::unique_ptr<ParallelBranch>> m_branches;
+    mutable std::mutex m_branchMutex;
+
+    // 1. UI-Thread Branch Shadow Registry (guarded by m_branchMutex)
+    std::vector<ParallelBranch*> m_uiBranches;
+
+    // 2. Audio-Thread Active Branches (owned exclusively by Audio thread in process())
+    std::vector<std::unique_ptr<ParallelBranch>> m_activeBranches;
+
+    // 3. SPSC Command Queue: UI Thread -> Audio Thread
+    moodycamel::ReaderWriterQueue<BranchCommand> m_branchCmdQueue{BRANCH_QUEUE_CAPACITY};
+
+    // 4. SPSC Reclamation Queue: Audio Thread -> UI Thread
+    moodycamel::ReaderWriterQueue<std::unique_ptr<ParallelBranch>> m_branchReclaimQueue{BRANCH_QUEUE_CAPACITY};
+
+    // 5. Overflow stash for branches
+    std::vector<std::unique_ptr<ParallelBranch>> m_deferredReclaimBranches;
+
     OwnedAudioBuffer m_mixBuffer;
     std::atomic<float> m_blend{0.0f};
+    std::atomic<bool> m_isAudioRunning{false};
+    std::atomic<uint32_t> m_blockLatency{0};
     double m_sampleRate{48000.0};
     uint32_t m_maxBlockSize{256};
 };
@@ -486,6 +551,10 @@ public:
     [[nodiscard]] size_t numNodes() const noexcept;
     [[nodiscard]] AudioNode* getNode(size_t index) noexcept;
 
+    // Thread-safe parameter dispatch (Never returns raw pointers, locks m_uiMutex internally)
+    bool dispatchParameterThreadSafe(int slotIdx, int branchIdx, int branchSlotIdx,
+                                     uint32_t paramId, float normalizedValue) noexcept;
+
     void setInputGainDb(float db) noexcept { m_inputGainDb.store(db, std::memory_order_relaxed); }
     [[nodiscard]] float inputGainDb() const noexcept { return m_inputGainDb.load(std::memory_order_relaxed); }
 
@@ -545,13 +614,14 @@ private:
     // 3. SPSC Command Queue: UI Thread -> Audio Thread
     moodycamel::ReaderWriterQueue<GraphCommand> m_commandQueue{GRAPH_QUEUE_CAPACITY};
 
-    // 4. SPSC Reclamation Queue: Audio Thread -> UI Thread
-    moodycamel::ReaderWriterQueue<std::unique_ptr<AudioNode>> m_reclaimQueue{GRAPH_QUEUE_CAPACITY};
-    moodycamel::ReaderWriterQueue<std::unique_ptr<NodeChain>> m_chainReclaimQueue{GRAPH_QUEUE_CAPACITY};
+    // 4. SPSC Reclamation Queue: Audio Thread -> UI Thread (1024 capacity for bounded reclamation)
+    moodycamel::ReaderWriterQueue<std::unique_ptr<AudioNode>> m_reclaimQueue{1024};
+    moodycamel::ReaderWriterQueue<std::unique_ptr<NodeChain>> m_chainReclaimQueue{1024};
 
     // 5. Fail-Safe Audio Thread Stash (Prevents destruction on audio thread if queue is saturated)
     std::array<std::unique_ptr<AudioNode>, 16> m_stashedReclamations;
     size_t m_stashedCount{0};
+    std::vector<std::unique_ptr<AudioNode>> m_deferredReclaim;
     std::array<std::unique_ptr<NodeChain>, 16> m_stashedChains;
     size_t m_stashedChainCount{0};
 
@@ -562,9 +632,10 @@ private:
     OwnedAudioBuffer m_mainProcessingBuffer;
     OwnedAudioBuffer m_scratchBuffer;
     EqualPowerRamp m_sceneCrossfadeRamp;
-    std::vector<std::unique_ptr<AudioNode>> m_retiringNodes;
+    std::vector<std::unique_ptr<AudioNode>> m_fadingOutNodes;
     OwnedAudioBuffer m_retiringBuffer;
     OwnedAudioBuffer m_activeBuffer;
+    uint32_t m_crossfadeRemainingSamples{0};
 
     // 64-sample equal-power micro-crossfade for structural updates
     EqualPowerRamp m_microCrossfadeRamp;

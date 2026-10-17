@@ -1,11 +1,13 @@
 #include "quick_looper.h"
 #include "../utils/wav_reader.h"
-#include <cstring>
 #include <fstream>
 #include <cstdint>
 #include <cmath>
 #include <filesystem>
-
+#include <chrono>
+#if defined(_M_X64) || defined(__x86_64__)
+#include <immintrin.h>
+#endif
 
 namespace praccy::tools {
 
@@ -26,7 +28,7 @@ void QuickLooper::prepare(double sampleRate, uint32_t maxSeconds, uint32_t maxBl
     (void)maxBlockSize;
 
     m_sampleRate = sampleRate;
-    m_maxFrames = static_cast<size_t>(sampleRate * maxSeconds);
+    m_maxFrames = static_cast<size_t>(sampleRate * static_cast<double>(maxSeconds));
     try {
         m_loopBufferL.assign(m_maxFrames, 0.0f);
         m_loopBufferR.assign(m_maxFrames, 0.0f);
@@ -43,7 +45,87 @@ void QuickLooper::prepare(double sampleRate, uint32_t maxSeconds, uint32_t maxBl
         m_redoBufferL.clear();
         m_redoBufferR.clear();
     }
+    m_cmdWriteHead.store(0, std::memory_order_relaxed);
+    m_cmdReadHead.store(0, std::memory_order_relaxed);
+    for (auto& slot : m_cmdQueue) {
+        slot.store(LooperCommand::None, std::memory_order_relaxed);
+    }
+    m_pendingCommand.store(LooperCommand::None, std::memory_order_relaxed);
+    m_lastProcessEpoch.store(0, std::memory_order_relaxed);
+    m_lastProcessTimeNs.store(0, std::memory_order_relaxed);
+    m_audioThreadId.store(std::thread::id{}, std::memory_order_relaxed);
     clear();
+}
+
+void QuickLooper::enqueueCommand(LooperCommand cmd) noexcept {
+    size_t idx = m_cmdWriteHead.fetch_add(1, std::memory_order_relaxed);
+    m_cmdQueue[idx % kCmdQueueCapacity].store(cmd, std::memory_order_release);
+}
+
+bool QuickLooper::popCommand(LooperCommand& outCmd) noexcept {
+    size_t read = m_cmdReadHead.load(std::memory_order_relaxed);
+    size_t write = m_cmdWriteHead.load(std::memory_order_acquire);
+    if (read >= write) {
+        return false;
+    }
+    for (int spin = 0; spin < 50; ++spin) {
+        LooperCommand c = m_cmdQueue[read % kCmdQueueCapacity].exchange(LooperCommand::None, std::memory_order_acq_rel);
+        if (c != LooperCommand::None) {
+            outCmd = c;
+            m_cmdReadHead.store(read + 1, std::memory_order_release);
+            return true;
+        }
+#if defined(_M_X64) || defined(__x86_64__)
+        _mm_pause();
+#endif
+    }
+    m_cmdReadHead.store(read + 1, std::memory_order_release);
+    return false;
+}
+
+void QuickLooper::drainCommands() {
+    LooperCommand cmd;
+    while (popCommand(cmd)) {
+        executeCommand(cmd);
+    }
+}
+
+void QuickLooper::drainCommandsSafe() {
+    struct StateLockSpinGuard {
+        std::atomic_flag& lock;
+        bool acquired{false};
+        explicit StateLockSpinGuard(std::atomic_flag& l) : lock(l) {
+            for (int spin = 0; spin < 1000; ++spin) {
+                if (!lock.test_and_set(std::memory_order_acquire)) {
+                    acquired = true;
+                    break;
+                }
+#if defined(_M_X64) || defined(__x86_64__)
+                _mm_pause();
+#endif
+            }
+        }
+        ~StateLockSpinGuard() {
+            if (acquired) {
+                lock.clear(std::memory_order_release);
+            }
+        }
+    } guard(m_stateLock);
+
+    if (guard.acquired) {
+        drainCommands();
+    }
+}
+
+bool QuickLooper::isAudioThreadActive() const noexcept {
+    auto audioId = m_audioThreadId.load(std::memory_order_relaxed);
+    if (audioId == std::thread::id{}) return false;
+    if (audioId == std::this_thread::get_id()) return false;
+    auto lastNs = m_lastProcessTimeNs.load(std::memory_order_relaxed);
+    if (lastNs == 0) return false;
+    auto nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    return (nowNs - lastNs) < 100'000'000LL;
 }
 
 void QuickLooper::executeCommand(LooperCommand cmd) {
@@ -54,8 +136,6 @@ void QuickLooper::executeCommand(LooperCommand cmd) {
             m_loopLength.store(0, std::memory_order_relaxed);
             m_canUndo.store(false, std::memory_order_relaxed);
             m_canRedo.store(false, std::memory_order_relaxed);
-            std::fill(m_loopBufferL.begin(), m_loopBufferL.end(), 0.0f);
-            std::fill(m_loopBufferR.begin(), m_loopBufferR.end(), 0.0f);
             break;
         }
         case LooperCommand::TriggerAction: {
@@ -63,11 +143,9 @@ void QuickLooper::executeCommand(LooperCommand cmd) {
             switch (s) {
                 case LooperState::Empty:
                 case LooperState::Stopped:
-                    // Start recording fresh loop
+                    // Start recording fresh loop without zeroing buffer
                     m_head.store(0, std::memory_order_relaxed);
                     m_loopLength.store(0, std::memory_order_relaxed);
-                    std::fill(m_loopBufferL.begin(), m_loopBufferL.end(), 0.0f);
-                    std::fill(m_loopBufferR.begin(), m_loopBufferR.end(), 0.0f);
                     m_canUndo.store(false, std::memory_order_relaxed);
                     m_canRedo.store(false, std::memory_order_relaxed);
                     m_state.store(LooperState::Recording, std::memory_order_relaxed);
@@ -85,14 +163,9 @@ void QuickLooper::executeCommand(LooperCommand cmd) {
                     break;
 
                 case LooperState::Playing: {
-                    // Switch to Overdubbing: snapshot current layer so it can be undone
-                    size_t len = m_loopLength.load(std::memory_order_relaxed);
-                    if (len > 0 && len <= m_maxFrames && len <= m_undoBufferL.size()) {
-                        std::memcpy(m_undoBufferL.data(), m_loopBufferL.data(), len * sizeof(float));
-                        std::memcpy(m_undoBufferR.data(), m_loopBufferR.data(), len * sizeof(float));
-                        m_canUndo.store(true, std::memory_order_relaxed);
-                        m_canRedo.store(false, std::memory_order_relaxed);
-                    }
+                    // Switch to Overdubbing: mark undo ready (samples backed up sample-by-sample in process)
+                    m_canUndo.store(true, std::memory_order_relaxed);
+                    m_canRedo.store(false, std::memory_order_relaxed);
                     m_state.store(LooperState::Overdubbing, std::memory_order_relaxed);
                     break;
                 }
@@ -106,36 +179,27 @@ void QuickLooper::executeCommand(LooperCommand cmd) {
         }
         case LooperCommand::Undo: {
             if (!m_canUndo.load(std::memory_order_relaxed)) break;
-            size_t len = m_loopLength.load(std::memory_order_relaxed);
-            if (len == 0 || len > m_maxFrames || len > m_undoBufferL.size() || len > m_redoBufferL.size()) break;
-
-            // Save current loop state into redo buffer
-            std::memcpy(m_redoBufferL.data(), m_loopBufferL.data(), len * sizeof(float));
-            std::memcpy(m_redoBufferR.data(), m_loopBufferR.data(), len * sizeof(float));
-
-            // Restore undo buffer into loop buffer
-            std::memcpy(m_loopBufferL.data(), m_undoBufferL.data(), len * sizeof(float));
-            std::memcpy(m_loopBufferR.data(), m_undoBufferR.data(), len * sizeof(float));
-
+            // O(1) buffer swaps
+            m_loopBufferL.swap(m_undoBufferL);
+            m_loopBufferR.swap(m_undoBufferR);
             m_canUndo.store(false, std::memory_order_relaxed);
             m_canRedo.store(true, std::memory_order_relaxed);
             break;
         }
         case LooperCommand::Redo: {
             if (!m_canRedo.load(std::memory_order_relaxed)) break;
-            size_t len = m_loopLength.load(std::memory_order_relaxed);
-            if (len == 0 || len > m_maxFrames || len > m_undoBufferL.size() || len > m_redoBufferL.size()) break;
-
-            // Save current into undo buffer
-            std::memcpy(m_undoBufferL.data(), m_loopBufferL.data(), len * sizeof(float));
-            std::memcpy(m_undoBufferR.data(), m_loopBufferR.data(), len * sizeof(float));
-
-            // Restore redo buffer into loop buffer
-            std::memcpy(m_loopBufferL.data(), m_redoBufferL.data(), len * sizeof(float));
-            std::memcpy(m_loopBufferR.data(), m_redoBufferR.data(), len * sizeof(float));
-
+            // O(1) buffer swaps back
+            m_loopBufferL.swap(m_undoBufferL);
+            m_loopBufferR.swap(m_undoBufferR);
             m_canUndo.store(true, std::memory_order_relaxed);
             m_canRedo.store(false, std::memory_order_relaxed);
+            break;
+        }
+        case LooperCommand::Stop: {
+            LooperState s = m_state.load(std::memory_order_relaxed);
+            if (s != LooperState::Empty) {
+                m_state.store(LooperState::Stopped, std::memory_order_relaxed);
+            }
             break;
         }
         default:
@@ -144,48 +208,42 @@ void QuickLooper::executeCommand(LooperCommand cmd) {
 }
 
 void QuickLooper::triggerAction() {
-    if (m_isProcessingAudio.load(std::memory_order_acquire)) {
-        m_pendingCommand.store(LooperCommand::TriggerAction, std::memory_order_release);
-    } else {
-        executeCommand(LooperCommand::TriggerAction);
+    enqueueCommand(LooperCommand::TriggerAction);
+    if (!isAudioThreadActive()) {
+        drainCommandsSafe();
     }
 }
 
 void QuickLooper::stop() {
-    LooperState s = m_state.load(std::memory_order_relaxed);
-    if (s != LooperState::Empty) {
-        m_state.store(LooperState::Stopped, std::memory_order_relaxed);
+    enqueueCommand(LooperCommand::Stop);
+    if (!isAudioThreadActive()) {
+        drainCommandsSafe();
     }
 }
 
 void QuickLooper::clear() {
-    if (m_isProcessingAudio.load(std::memory_order_acquire)) {
-        m_pendingCommand.store(LooperCommand::Clear, std::memory_order_release);
-    } else {
-        executeCommand(LooperCommand::Clear);
+    enqueueCommand(LooperCommand::Clear);
+    if (!isAudioThreadActive()) {
+        drainCommandsSafe();
     }
 }
 
 bool QuickLooper::undo() {
     if (!m_canUndo.load(std::memory_order_relaxed)) return false;
-    if (m_isProcessingAudio.load(std::memory_order_acquire)) {
-        m_pendingCommand.store(LooperCommand::Undo, std::memory_order_release);
-        return true;
-    } else {
-        executeCommand(LooperCommand::Undo);
-        return true;
+    enqueueCommand(LooperCommand::Undo);
+    if (!isAudioThreadActive()) {
+        drainCommandsSafe();
     }
+    return true;
 }
 
 bool QuickLooper::redo() {
     if (!m_canRedo.load(std::memory_order_relaxed)) return false;
-    if (m_isProcessingAudio.load(std::memory_order_acquire)) {
-        m_pendingCommand.store(LooperCommand::Redo, std::memory_order_release);
-        return true;
-    } else {
-        executeCommand(LooperCommand::Redo);
-        return true;
+    enqueueCommand(LooperCommand::Redo);
+    if (!isAudioThreadActive()) {
+        drainCommandsSafe();
     }
+    return true;
 }
 
 int QuickLooper::totalBeats() const noexcept {
@@ -208,7 +266,7 @@ int QuickLooper::currentBeat() const noexcept {
     int tb = totalBeats();
     if (tb == 0) return 1;
     float norm = playheadNormalized();
-    int beatIdx = static_cast<int>(norm * static_cast<float>(tb));
+    int beatIdx = static_cast<int>(static_cast<double>(norm) * static_cast<double>(tb));
     int bpb = m_beatsPerBar.load(std::memory_order_relaxed);
     if (bpb <= 0) bpb = 4;
     return (beatIdx % bpb) + 1;
@@ -218,7 +276,7 @@ int QuickLooper::currentBar() const noexcept {
     int tb = totalBeats();
     if (tb == 0) return 1;
     float norm = playheadNormalized();
-    int beatIdx = static_cast<int>(norm * static_cast<float>(tb));
+    int beatIdx = static_cast<int>(static_cast<double>(norm) * static_cast<double>(tb));
     int bpb = m_beatsPerBar.load(std::memory_order_relaxed);
     if (bpb <= 0) bpb = 4;
     return (beatIdx / bpb) + 1;
@@ -226,16 +284,22 @@ int QuickLooper::currentBar() const noexcept {
 
 double QuickLooper::loopLengthSeconds() const noexcept {
     if (!std::isfinite(m_sampleRate) || m_sampleRate <= 0.0) return 0.0;
-    return m_loopLength.load(std::memory_order_relaxed) / m_sampleRate;
+    return static_cast<double>(m_loopLength.load(std::memory_order_relaxed)) / m_sampleRate;
 }
 
 float QuickLooper::playheadNormalized() const noexcept {
     size_t len = m_loopLength.load(std::memory_order_relaxed);
     if (len == 0) return 0.0f;
-    return static_cast<float>(m_head.load(std::memory_order_relaxed)) / static_cast<float>(len);
+    return static_cast<float>(static_cast<double>(m_head.load(std::memory_order_relaxed)) / static_cast<double>(len));
 }
 
 void QuickLooper::process(const audio::AudioBufferView& in, audio::AudioBufferView& out) {
+    m_audioThreadId.store(std::this_thread::get_id(), std::memory_order_relaxed);
+    m_lastProcessEpoch.fetch_add(1, std::memory_order_relaxed);
+    auto nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    m_lastProcessTimeNs.store(nowNs, std::memory_order_relaxed);
+
     struct ProcessingGuard {
         std::atomic<bool>& flag;
         explicit ProcessingGuard(std::atomic<bool>& f) noexcept : flag(f) {
@@ -246,9 +310,29 @@ void QuickLooper::process(const audio::AudioBufferView& in, audio::AudioBufferVi
         }
     } guard(m_isProcessingAudio);
 
-    LooperCommand cmd = m_pendingCommand.exchange(LooperCommand::None, std::memory_order_acq_rel);
-    if (cmd != LooperCommand::None) {
-        executeCommand(cmd);
+    struct StateLockGuard {
+        std::atomic_flag& lock;
+        bool acquired{false};
+        explicit StateLockGuard(std::atomic_flag& l) : lock(l) {
+            for (int spin = 0; spin < 100; ++spin) {
+                if (!lock.test_and_set(std::memory_order_acquire)) {
+                    acquired = true;
+                    break;
+                }
+#if defined(_M_X64) || defined(__x86_64__)
+                _mm_pause();
+#endif
+            }
+        }
+        ~StateLockGuard() {
+            if (acquired) {
+                lock.clear(std::memory_order_release);
+            }
+        }
+    } stateGuard(m_stateLock);
+
+    if (stateGuard.acquired) {
+        drainCommands();
     }
 
     LooperState s = m_state.load(std::memory_order_relaxed);
@@ -291,8 +375,12 @@ void QuickLooper::process(const audio::AudioBufferView& in, audio::AudioBufferVi
             outL[i] += m_loopBufferL[curHead] * vol;
             outR[i] += m_loopBufferR[curHead] * vol;
 
-            // If overdubbing, accumulate incoming guitar into loop buffer
+            // If overdubbing, copy pre-overdub sample sample-by-sample and accumulate incoming guitar
             if (s == LooperState::Overdubbing) {
+                if (curHead < m_undoBufferL.size() && curHead < m_undoBufferR.size()) {
+                    m_undoBufferL[curHead] = m_loopBufferL[curHead];
+                    m_undoBufferR[curHead] = m_loopBufferR[curHead];
+                }
                 float addL = inL ? inL[i] : 0.0f;
                 float addR = inR ? inR[i] : addL;
                 // Soft saturation clamp to prevent overdub runaway
@@ -323,15 +411,15 @@ bool QuickLooper::loadWavFile(const std::string& filePath) {
         std::vector<float> finalR;
         if (wavData.sampleRate != static_cast<uint32_t>(m_sampleRate) && wavData.sampleRate > 0) {
             double ratio = m_sampleRate / static_cast<double>(wavData.sampleRate);
-            size_t targetFrames = static_cast<size_t>(wavData.numFrames * ratio);
+            size_t targetFrames = static_cast<size_t>(static_cast<double>(wavData.numFrames) * ratio);
             finalL.resize(targetFrames);
             finalR.resize(targetFrames);
 
             for (size_t i = 0; i < targetFrames; ++i) {
-                double srcIdx = i / ratio;
+                double srcIdx = static_cast<double>(i) / ratio;
                 size_t idx0 = static_cast<size_t>(srcIdx);
                 size_t idx1 = std::min(idx0 + 1, wavData.numFrames - 1);
-                float frac = static_cast<float>(srcIdx - idx0);
+                float frac = static_cast<float>(srcIdx - static_cast<double>(idx0));
 
                 finalL[i] = wavData.samplesL[idx0] * (1.0f - frac) + wavData.samplesL[idx1] * frac;
                 finalR[i] = wavData.samplesR[idx0] * (1.0f - frac) + wavData.samplesR[idx1] * frac;
@@ -344,20 +432,36 @@ bool QuickLooper::loadWavFile(const std::string& filePath) {
         size_t copyFrames = std::min(finalL.size(), m_maxFrames);
         if (copyFrames == 0) return false;
 
-        if (m_loopBufferL.size() < m_maxFrames) m_loopBufferL.resize(m_maxFrames, 0.0f);
-        if (m_loopBufferR.size() < m_maxFrames) m_loopBufferR.resize(m_maxFrames, 0.0f);
+        // Ensure finalL and finalR are sized to m_maxFrames on caller thread
+        finalL.resize(m_maxFrames, 0.0f);
+        finalR.resize(m_maxFrames, 0.0f);
 
-        std::memcpy(m_loopBufferL.data(), finalL.data(), copyFrames * sizeof(float));
-        std::memcpy(m_loopBufferR.data(), finalR.data(), copyFrames * sizeof(float));
+        // Hand over to the looper under m_stateLock
+        {
+            struct StateLockSpinGuard {
+                std::atomic_flag& lock;
+                explicit StateLockSpinGuard(std::atomic_flag& l) : lock(l) {
+                    while (lock.test_and_set(std::memory_order_acquire)) {
+#if defined(_M_X64) || defined(__x86_64__)
+                        _mm_pause();
+#endif
+                    }
+                }
+                ~StateLockSpinGuard() {
+                    lock.clear(std::memory_order_release);
+                }
+            } swapGuard(m_stateLock);
 
-        if (copyFrames < m_maxFrames) {
-            std::memset(m_loopBufferL.data() + copyFrames, 0, (m_maxFrames - copyFrames) * sizeof(float));
-            std::memset(m_loopBufferR.data() + copyFrames, 0, (m_maxFrames - copyFrames) * sizeof(float));
+            m_loopBufferL.swap(finalL);
+            m_loopBufferR.swap(finalR);
+            m_loopLength.store(copyFrames, std::memory_order_relaxed);
+            m_head.store(0, std::memory_order_relaxed);
+            m_state.store(LooperState::Stopped, std::memory_order_relaxed);
+            m_canUndo.store(false, std::memory_order_relaxed);
+            m_canRedo.store(false, std::memory_order_relaxed);
         }
 
-        m_loopLength.store(copyFrames, std::memory_order_relaxed);
-        m_head.store(0, std::memory_order_relaxed);
-        m_state.store(LooperState::Stopped, std::memory_order_relaxed);
+        // finalL and finalR (holding old buffers) are deallocated here outside audio callback
         return true;
     } catch (const std::bad_alloc&) {
         return false;

@@ -50,7 +50,7 @@ private:
     int m_lastHighlightedStringIndex{-1};
     float m_lastDetectedFreq{0.0f};
     float m_lastDetectedCents{0.0f};
-    std::string m_lastDetectedNote;
+    tools::NoteNameBuffer m_lastDetectedNote;
 
     // Cached note list for dropdowns
     struct NoteOption {
@@ -59,6 +59,11 @@ private:
     };
     std::vector<NoteOption> m_noteOptions;
     void initNoteOptions();
+
+    void updateCachedTuning();
+    std::vector<tools::StringNoteInfo> m_cachedStringNotes;
+    std::string m_cachedFullTuningTitle;
+    float m_cachedA4Reference{-1.0f};
 };
 
 } // namespace praccy::ui

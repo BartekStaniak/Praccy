@@ -16,6 +16,7 @@ AudioPlayer::~AudioPlayer() {
 
 void AudioPlayer::prepare(double sampleRate) {
     m_sampleRate = sampleRate;
+    m_activeSampleRate.store(sampleRate, std::memory_order_relaxed);
 }
 
 void AudioPlayer::retireBuffer(AudioTrackBuffer* oldBuf) {
@@ -90,20 +91,20 @@ bool AudioPlayer::executeLoad(const std::string& filePath, std::stop_token stopT
     // Resample to m_sampleRate if needed
     if (wavData.sampleRate != static_cast<uint32_t>(m_sampleRate) && wavData.sampleRate > 0) {
         double ratio = m_sampleRate / static_cast<double>(wavData.sampleRate);
-        size_t targetFrames = static_cast<size_t>(wavData.numFrames * ratio);
+        size_t targetFrames = static_cast<size_t>(static_cast<double>(wavData.numFrames) * ratio);
         newTrack->samplesL.resize(targetFrames);
         newTrack->samplesR.resize(targetFrames);
 
         for (size_t i = 0; i < targetFrames; ++i) {
             if ((i & 0x3FFF) == 0) {
                 if (stopToken.stop_requested()) return false;
-                float p = 0.40f + 0.35f * (static_cast<float>(i) / static_cast<float>(targetFrames));
+                float p = 0.40f + 0.35f * static_cast<float>(static_cast<double>(i) / static_cast<double>(targetFrames));
                 m_loadProgress.store(p, std::memory_order_relaxed);
             }
-            double srcIdx = i / ratio;
+            double srcIdx = static_cast<double>(i) / ratio;
             size_t idx0 = static_cast<size_t>(srcIdx);
             size_t idx1 = std::min(idx0 + 1, wavData.numFrames - 1);
-            float frac = static_cast<float>(srcIdx - idx0);
+            float frac = static_cast<float>(srcIdx - static_cast<double>(idx0));
 
             newTrack->samplesL[i] = wavData.samplesL[idx0] * (1.0f - frac) + wavData.samplesL[idx1] * frac;
             newTrack->samplesR[i] = wavData.samplesR[idx0] * (1.0f - frac) + wavData.samplesR[idx1] * frac;
@@ -153,6 +154,10 @@ bool AudioPlayer::executeLoad(const std::string& filePath, std::stop_token stopT
         m_cachedPeaks800 = newTrack->waveformPeaks800;
     }
 
+    // Update atomic metadata cache before exchanging m_activeBuffer
+    m_activeNumFrames.store(newTrack->numFrames, std::memory_order_release);
+    m_activeSampleRate.store(m_sampleRate, std::memory_order_release);
+
     // Atomic pointer swap
     AudioTrackBuffer* oldBuf = m_activeBuffer.exchange(newTrack.release(), std::memory_order_acq_rel);
     m_playhead.store(0, std::memory_order_relaxed);
@@ -170,6 +175,7 @@ void AudioPlayer::unload() {
         m_workerThread.request_stop();
         m_workerThread.join();
     }
+    m_activeNumFrames.store(0, std::memory_order_release);
     AudioTrackBuffer* oldBuf = m_activeBuffer.exchange(nullptr, std::memory_order_acq_rel);
     {
         std::lock_guard<std::mutex> lock(m_metadataMutex);
@@ -200,29 +206,31 @@ void AudioPlayer::stop() {
 }
 
 void AudioPlayer::seek(float normalizedPos) {
-    const AudioTrackBuffer* buf = m_activeBuffer.load(std::memory_order_acquire);
-    if (!buf || buf->numFrames == 0) return;
+    size_t numFrames = m_activeNumFrames.load(std::memory_order_relaxed);
+    if (numFrames == 0) return;
     normalizedPos = std::clamp(normalizedPos, 0.0f, 1.0f);
-    size_t newHead = static_cast<size_t>(normalizedPos * (buf->numFrames - 1));
+    size_t newHead = static_cast<size_t>(static_cast<double>(normalizedPos) * static_cast<double>(numFrames - 1));
     m_playhead.store(newHead, std::memory_order_relaxed);
 }
 
 double AudioPlayer::durationSeconds() const noexcept {
-    const AudioTrackBuffer* buf = m_activeBuffer.load(std::memory_order_acquire);
-    if (!buf || m_sampleRate <= 0.0 || buf->numFrames == 0) return 0.0;
-    return static_cast<double>(buf->numFrames) / m_sampleRate;
+    size_t numFrames = m_activeNumFrames.load(std::memory_order_relaxed);
+    double sr = m_activeSampleRate.load(std::memory_order_relaxed);
+    if (numFrames == 0 || sr <= 0.0) return 0.0;
+    return static_cast<double>(numFrames) / sr;
 }
 
 double AudioPlayer::positionSeconds() const noexcept {
-    const AudioTrackBuffer* buf = m_activeBuffer.load(std::memory_order_acquire);
-    if (!buf || m_sampleRate <= 0.0 || buf->numFrames == 0) return 0.0;
-    return static_cast<double>(m_playhead.load(std::memory_order_relaxed)) / m_sampleRate;
+    size_t numFrames = m_activeNumFrames.load(std::memory_order_relaxed);
+    double sr = m_activeSampleRate.load(std::memory_order_relaxed);
+    if (numFrames == 0 || sr <= 0.0) return 0.0;
+    return static_cast<double>(m_playhead.load(std::memory_order_relaxed)) / sr;
 }
 
 float AudioPlayer::positionNormalized() const noexcept {
-    const AudioTrackBuffer* buf = m_activeBuffer.load(std::memory_order_acquire);
-    if (!buf || buf->numFrames == 0) return 0.0f;
-    return static_cast<float>(m_playhead.load(std::memory_order_relaxed)) / static_cast<float>(buf->numFrames);
+    size_t numFrames = m_activeNumFrames.load(std::memory_order_relaxed);
+    if (numFrames == 0) return 0.0f;
+    return static_cast<float>(static_cast<double>(m_playhead.load(std::memory_order_relaxed)) / static_cast<double>(numFrames));
 }
 
 std::string AudioPlayer::filePath() const {
@@ -257,6 +265,10 @@ void AudioPlayer::process(audio::AudioBufferView& output) {
         return;
     }
 
+    if (m_activeNumFrames.load(std::memory_order_relaxed) == 0) {
+        m_activeNumFrames.store(buf->numFrames, std::memory_order_relaxed);
+    }
+
     const size_t totalFrames = buf->numFrames;
     const uint32_t numSamples = output.numSamples();
     float* outL = output.channel(0);
@@ -268,9 +280,9 @@ void AudioPlayer::process(audio::AudioBufferView& output) {
 
     const float loopStartNorm = std::clamp(m_loopStartNorm.load(std::memory_order_relaxed), 0.0f, 1.0f);
     const float loopEndNorm = std::clamp(m_loopEndNorm.load(std::memory_order_relaxed), 0.0f, 1.0f);
-    const size_t loopStartFrame = static_cast<size_t>(loopStartNorm * totalFrames);
+    const size_t loopStartFrame = static_cast<size_t>(static_cast<double>(loopStartNorm) * static_cast<double>(totalFrames));
     const size_t loopEndFrame = (loopEndNorm > loopStartNorm)
-        ? std::min<size_t>(totalFrames, static_cast<size_t>(loopEndNorm * totalFrames))
+        ? std::min<size_t>(totalFrames, static_cast<size_t>(static_cast<double>(loopEndNorm) * static_cast<double>(totalFrames)))
         : totalFrames;
 
     if (loop && (curHead < loopStartFrame || curHead >= loopEndFrame)) {

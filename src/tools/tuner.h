@@ -9,19 +9,203 @@
 #include <condition_variable>
 #include <cstring>
 #include <algorithm>
+#include <array>
+#include <string_view>
+#include <ostream>
 #include "tuner_settings.h"
 
 namespace praccy::tools {
 
+/**
+ * @brief Zero-heap-allocation fixed buffer for note name representation (e.g. "E2", "A#4", "--").
+ * Fully compatible with std::string_view, const char*, and std::string callers.
+ */
+struct NoteNameBuffer {
+    std::array<char, 8> noteNameBuf{'-', '-', '\0', '\0', '\0', '\0', '\0', '\0'};
+
+    constexpr NoteNameBuffer() noexcept {
+        noteNameBuf[0] = '-';
+        noteNameBuf[1] = '-';
+        noteNameBuf[2] = '\0';
+    }
+
+    NoteNameBuffer(const char* str) noexcept {
+        assign(str);
+    }
+
+    NoteNameBuffer(std::string_view sv) noexcept {
+        assign(sv);
+    }
+
+    NoteNameBuffer(const std::string& str) noexcept {
+        assign(std::string_view(str));
+    }
+
+    NoteNameBuffer& operator=(const char* str) noexcept {
+        assign(str);
+        return *this;
+    }
+
+    NoteNameBuffer& operator=(std::string_view sv) noexcept {
+        assign(sv);
+        return *this;
+    }
+
+    NoteNameBuffer& operator=(const std::string& str) noexcept {
+        assign(std::string_view(str));
+        return *this;
+    }
+
+    void assign(const char* str) noexcept {
+        if (!str) {
+            noteNameBuf[0] = '\0';
+            return;
+        }
+        size_t i = 0;
+        while (i < 7 && str[i] != '\0') {
+            noteNameBuf[i] = str[i];
+            ++i;
+        }
+        noteNameBuf[i] = '\0';
+    }
+
+    void assign(std::string_view sv) noexcept {
+        const size_t len = std::min(sv.size(), size_t{7});
+        if (len > 0) {
+            std::memcpy(noteNameBuf.data(), sv.data(), len);
+        }
+        noteNameBuf[len] = '\0';
+    }
+
+    void setNote(const char* note, int octave) noexcept {
+        size_t i = 0;
+        if (note) {
+            while (i < 4 && note[i] != '\0') {
+                noteNameBuf[i] = note[i];
+                ++i;
+            }
+        }
+        if (octave < 0) {
+            if (i < 7) noteNameBuf[i++] = '-';
+            octave = -octave;
+        }
+        if (octave >= 10 && i < 6) {
+            noteNameBuf[i++] = static_cast<char>('0' + (octave / 10));
+            octave %= 10;
+        }
+        if (i < 7) {
+            noteNameBuf[i++] = static_cast<char>('0' + octave);
+        }
+        noteNameBuf[i] = '\0';
+    }
+
+    void clear() noexcept {
+        noteNameBuf[0] = '\0';
+    }
+
+    [[nodiscard]] const char* c_str() const noexcept { return noteNameBuf.data(); }
+    [[nodiscard]] const char* data() const noexcept { return noteNameBuf.data(); }
+    [[nodiscard]] bool empty() const noexcept { return noteNameBuf[0] == '\0'; }
+    [[nodiscard]] size_t size() const noexcept { return std::strlen(noteNameBuf.data()); }
+    [[nodiscard]] size_t length() const noexcept { return size(); }
+
+    [[nodiscard]] char operator[](size_t idx) const noexcept { return noteNameBuf[idx]; }
+    [[nodiscard]] char& operator[](size_t idx) noexcept { return noteNameBuf[idx]; }
+
+    [[nodiscard]] const char* begin() const noexcept { return noteNameBuf.data(); }
+    [[nodiscard]] const char* end() const noexcept { return noteNameBuf.data() + size(); }
+
+    operator std::string_view() const noexcept { return std::string_view(noteNameBuf.data(), size()); }
+    operator std::string() const { return std::string(noteNameBuf.data(), size()); }
+
+    bool operator==(const char* other) const noexcept {
+        if (!other) return empty();
+        return std::strcmp(noteNameBuf.data(), other) == 0;
+    }
+    bool operator!=(const char* other) const noexcept {
+        return !(*this == other);
+    }
+
+    bool operator==(std::string_view other) const noexcept {
+        return std::string_view(noteNameBuf.data(), size()) == other;
+    }
+    bool operator!=(std::string_view other) const noexcept {
+        return !(*this == other);
+    }
+
+    bool operator==(const std::string& other) const noexcept {
+        return std::string_view(noteNameBuf.data(), size()) == other;
+    }
+    bool operator!=(const std::string& other) const noexcept {
+        return !(*this == other);
+    }
+
+    bool operator==(const NoteNameBuffer& other) const noexcept {
+        return std::strcmp(noteNameBuf.data(), other.noteNameBuf.data()) == 0;
+    }
+    bool operator!=(const NoteNameBuffer& other) const noexcept {
+        return !(*this == other);
+    }
+
+    friend bool operator==(const char* lhs, const NoteNameBuffer& rhs) noexcept {
+        return rhs == lhs;
+    }
+    friend bool operator!=(const char* lhs, const NoteNameBuffer& rhs) noexcept {
+        return rhs != lhs;
+    }
+    friend bool operator==(std::string_view lhs, const NoteNameBuffer& rhs) noexcept {
+        return rhs == lhs;
+    }
+    friend bool operator!=(std::string_view lhs, const NoteNameBuffer& rhs) noexcept {
+        return rhs != lhs;
+    }
+    friend bool operator==(const std::string& lhs, const NoteNameBuffer& rhs) noexcept {
+        return rhs == lhs;
+    }
+    friend bool operator!=(const std::string& lhs, const NoteNameBuffer& rhs) noexcept {
+        return rhs != lhs;
+    }
+
+    friend std::ostream& operator<<(std::ostream& os, const NoteNameBuffer& n) {
+        return os << n.c_str();
+    }
+};
+
 struct TunerResult {
     float frequencyHz{0.0f};
     int noteNumber{0};         // MIDI note number (69 = A4 = 440Hz)
-    std::string noteName;      // e.g. "E2", "A2", "D3", "G3", "B3", "E4"
+    NoteNameBuffer noteName;   // e.g. "E2", "A2", "D3", "G3", "B3", "E4"
     float centDeviation{0.0f}; // [-50.0, +50.0] cents
     bool confidence{false};
     int matchedStringIndex{-1}; // 0-indexed string (0 = String 1), -1 if none
     float targetFrequencyHz{0.0f};
     float stringCentDeviation{0.0f};
+};
+
+/**
+ * @brief Direct Form II Transposed biquad filter with NaN/Inf poisoning recovery.
+ */
+class BiquadFilter {
+public:
+    void reset() noexcept {
+        m_z1 = 0.0f;
+        m_z2 = 0.0f;
+    }
+
+    void setCoefficients(float b0, float b1, float b2, float a1, float a2) noexcept {
+        m_b0 = b0;
+        m_b1 = b1;
+        m_b2 = b2;
+        m_a1 = a1;
+        m_a2 = a2;
+    }
+
+    float process(float in) noexcept;
+
+private:
+    float m_b0{1.0f}, m_b1{0.0f}, m_b2{0.0f};
+    float m_a1{0.0f}, m_a2{0.0f};
+    float m_z1{0.0f}, m_z2{0.0f};
 };
 
 /**
@@ -143,6 +327,7 @@ private:
     std::vector<float> m_drainBuffer;
     std::vector<float> m_differenceBuffer;
     std::vector<float> m_cumulativeDiffBuffer;
+    std::vector<float> m_linearWindow;
 
     // Thread-safe atomic result snapshotting (Seqlock + Atomics)
     alignas(64) std::atomic<uint32_t> m_resultSeq{0};

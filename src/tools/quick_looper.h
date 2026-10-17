@@ -6,6 +6,10 @@
 #include <atomic>
 #include <algorithm>
 
+#include <array>
+#include <thread>
+#include <cstdint>
+
 namespace praccy::tools {
 
 enum class LooperState {
@@ -21,7 +25,8 @@ enum class LooperCommand : uint32_t {
     Clear,
     TriggerAction,
     Undo,
-    Redo
+    Redo,
+    Stop
 };
 
 class QuickLooper {
@@ -86,7 +91,21 @@ private:
 
     std::atomic<LooperCommand> m_pendingCommand{LooperCommand::None};
     std::atomic<bool> m_isProcessingAudio{false};
+    std::atomic<uint64_t> m_lastProcessEpoch{0};
+    std::atomic<int64_t> m_lastProcessTimeNs{0};
+    std::atomic<std::thread::id> m_audioThreadId{};
+    std::atomic_flag m_stateLock = ATOMIC_FLAG_INIT;
 
+    static constexpr size_t kCmdQueueCapacity = 64;
+    std::array<std::atomic<LooperCommand>, kCmdQueueCapacity> m_cmdQueue{};
+    std::atomic<size_t> m_cmdWriteHead{0};
+    std::atomic<size_t> m_cmdReadHead{0};
+
+    void enqueueCommand(LooperCommand cmd) noexcept;
+    bool popCommand(LooperCommand& outCmd) noexcept;
+    void drainCommands();
+    void drainCommandsSafe();
+    [[nodiscard]] bool isAudioThreadActive() const noexcept;
     void executeCommand(LooperCommand cmd);
 };
 

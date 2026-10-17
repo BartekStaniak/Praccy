@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <atomic>
 #include <cstring>
+#include <cmath>
+#include <algorithm>
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -107,6 +109,7 @@ struct SurfaceTokens {
     ColorToken branchBHeader;
     ColorToken combinerBg;
     ColorToken sceneActiveEmerald;
+    ColorToken cardShadow{0, 0, 0, 48};
 };
 
 struct BorderTokens {
@@ -412,6 +415,10 @@ inline float dpiScale() noexcept {
     return detail::s_dpiScale.load(std::memory_order_relaxed);
 }
 
+[[nodiscard]] inline float px(float basePixels) noexcept {
+    return std::round(basePixels * dpiScale());
+}
+
 inline const ThemeTokens& getThemeTokens(ThemeId id) noexcept {
     const size_t idx = static_cast<size_t>(id);
     if (idx >= static_cast<size_t>(ThemeId::Count)) {
@@ -550,3 +557,10 @@ inline void applyTheme(ThemeId id) {
 }
 
 } // namespace praccy::ui
+
+namespace praccy {
+namespace ui = praccy::ui;
+} // namespace praccy
+
+namespace ui = praccy::ui;
+

@@ -621,101 +621,128 @@ void PluginScanner::runScan() {
 
 void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vector<PluginDescriptor>& outPlugins) {
     std::error_code ec;
-    for (auto iter = std::filesystem::recursive_directory_iterator(dirPath, std::filesystem::directory_options::skip_permission_denied, ec);
-         iter != std::filesystem::recursive_directory_iterator(); ++iter) {
-        if (m_shouldStop.load() || ec) break;
+    try {
+        for (auto iter = std::filesystem::recursive_directory_iterator(dirPath, std::filesystem::directory_options::skip_permission_denied, ec);
+             iter != std::filesystem::recursive_directory_iterator(); ++iter) {
+            if (m_shouldStop.load() || ec) break;
 
-        const auto& path = iter->path();
-        const std::string ext = path.extension().string();
+            const auto& path = iter->path();
+            const std::string ext = path.extension().string();
 
-        if (ext == ".clap") {
-            const std::string name = path.stem().string();
-            auto itExists = std::find_if(outPlugins.begin(), outPlugins.end(), [&](const PluginDescriptor& d) {
-                return d.name == name;
-            });
-            if (itExists == outPlugins.end()) {
-                PluginDescriptor desc;
-                desc.name = name;
-                desc.path = path.string();
-                desc.bundleFileName = path.filename().string();
-                desc.type = PluginType::CLAP;
-                desc.vendor = detectVendor(path, name);
+            if (ext == ".clap") {
+                const std::string name = path.stem().string();
+                auto itExists = std::find_if(outPlugins.begin(), outPlugins.end(), [&](const PluginDescriptor& d) {
+                    return d.name == name;
+                });
+                if (itExists == outPlugins.end()) {
+                    PluginDescriptor desc;
+                    desc.name = name;
+                    desc.path = path.string();
+                    desc.bundleFileName = path.filename().string();
+                    desc.type = PluginType::CLAP;
+                    desc.vendor = detectVendor(path, name);
 
-                // Extract canonical CLAP plugin ID for Tier-1 PluginResolver
-                if (HMODULE hLib = LoadLibraryExW(path.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH)) {
-                    const auto* entry = reinterpret_cast<const clap_plugin_entry_t*>(
-                        reinterpret_cast<void*>(GetProcAddress(hLib, "clap_entry")));
-                    if (entry && entry->init && entry->init(path.string().c_str())) {
-                        if (entry->get_factory) {
-                            const auto* fac = static_cast<const clap_plugin_factory_t*>(
-                                entry->get_factory(CLAP_PLUGIN_FACTORY_ID));
-                            if (fac && fac->get_plugin_count && fac->get_plugin_count(fac) > 0 && fac->get_plugin_descriptor) {
-                                if (const auto* cDesc = fac->get_plugin_descriptor(fac, 0)) {
-                                    if (cDesc->id) desc.clapId = cDesc->id;
-                                    if (cDesc->vendor && cDesc->vendor[0] != '\0') desc.vendor = cDesc->vendor;
-                                }
-                            }
-                        }
-                        if (entry->deinit) entry->deinit();
-                    }
-                    FreeLibrary(hLib);
-                }
-
-                auto catIt = m_categoryOverrides.find(name);
-                desc.category = (catIt != m_categoryOverrides.end()) ? catIt->second : detectPluginCategory(name, desc.vendor);
-                outPlugins.push_back(std::move(desc));
-            }
-        } else if (ext == ".vst3") {
-            const std::string name = path.stem().string();
-            auto itExists = std::find_if(outPlugins.begin(), outPlugins.end(), [&](const PluginDescriptor& d) {
-                return d.name == name;
-            });
-            if (itExists == outPlugins.end()) {
-                PluginDescriptor desc;
-                desc.name = name;
-                desc.path = path.string();
-                desc.bundleFileName = path.filename().string();
-                desc.type = PluginType::VST3;
-                desc.vendor = detectVendor(path, name);
-
-                // Extract canonical 32-char VST3 Class GUID for Tier-1 PluginResolver
-                std::filesystem::path dllPath = path;
-                if (std::filesystem::is_directory(path)) {
-                    auto candidate = path / "Contents" / "x86_64-win" / (path.stem().string() + ".vst3");
-                    if (std::filesystem::exists(candidate)) dllPath = candidate;
-                }
-                if (HMODULE hLib = LoadLibraryExW(dllPath.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH)) {
-                    using GetFactoryProc = Steinberg::IPluginFactory* (PLUGIN_API*)();
-                    auto* getFactory = reinterpret_cast<GetFactoryProc>(reinterpret_cast<void*>(GetProcAddress(hLib, "GetPluginFactory")));
-                    if (getFactory) {
-                        if (auto* factory = getFactory()) {
-                            const int32_t nClasses = factory->countClasses();
-                            Steinberg::PClassInfo ci{};
-                            for (int32_t cIdx = 0; cIdx < nClasses; ++cIdx) {
-                                if (factory->getClassInfo(cIdx, &ci) == Steinberg::kResultOk &&
-                                    std::strcmp(ci.category, "Audio Module Class") == 0) {
-                                    char hex[33] = {0};
-                                    for (int b = 0; b < 16; ++b) {
-                                        std::snprintf(hex + b * 2, 3, "%02X", static_cast<unsigned char>(ci.cid[b]));
+                    // Extract canonical CLAP plugin ID for Tier-1 PluginResolver
+                    try {
+                        if (HMODULE hLib = LoadLibraryExW(path.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH)) {
+                            const auto* entry = reinterpret_cast<const clap_plugin_entry_t*>(
+                                reinterpret_cast<void*>(GetProcAddress(hLib, "clap_entry")));
+                            if (entry && entry->init && entry->init(path.string().c_str())) {
+                                if (entry->get_factory) {
+                                    const auto* fac = static_cast<const clap_plugin_factory_t*>(
+                                        entry->get_factory(CLAP_PLUGIN_FACTORY_ID));
+                                    if (fac && fac->get_plugin_count && fac->get_plugin_count(fac) > 0 && fac->get_plugin_descriptor) {
+                                        if (const auto* cDesc = fac->get_plugin_descriptor(fac, 0)) {
+                                            if (cDesc->id) desc.clapId = cDesc->id;
+                                            if (cDesc->vendor && cDesc->vendor[0] != '\0') desc.vendor = cDesc->vendor;
+                                        }
                                     }
-                                    desc.classGuid = hex;
-                                    break;
                                 }
+                                if (entry->deinit) entry->deinit();
+                            } else {
+                                std::cerr << "[PluginScanner] Failed to initialize CLAP plugin: " << path.string() << "\n";
                             }
-                            factory->release();
+                            FreeLibrary(hLib);
+                        } else {
+                            std::cerr << "[PluginScanner] Failed to load CLAP library: " << path.string() << " (error: " << GetLastError() << ")\n";
                         }
+                    } catch (const std::exception& ex) {
+                        std::cerr << "[PluginScanner] Exception inspecting CLAP " << path.string() << ": " << ex.what() << "\n";
+                    } catch (...) {
+                        std::cerr << "[PluginScanner] Unknown exception inspecting CLAP " << path.string() << "\n";
                     }
-                    FreeLibrary(hLib);
-                }
 
-                auto catIt = m_categoryOverrides.find(name);
-                desc.category = (catIt != m_categoryOverrides.end()) ? catIt->second : detectPluginCategory(name, desc.vendor);
-                outPlugins.push_back(std::move(desc));
-            }
-            if (iter->is_directory()) {
-                iter.disable_recursion_pending();
+                    auto catIt = m_categoryOverrides.find(name);
+                    desc.category = (catIt != m_categoryOverrides.end()) ? catIt->second : detectPluginCategory(name, desc.vendor);
+                    outPlugins.push_back(std::move(desc));
+                }
+            } else if (ext == ".vst3") {
+                const std::string name = path.stem().string();
+                auto itExists = std::find_if(outPlugins.begin(), outPlugins.end(), [&](const PluginDescriptor& d) {
+                    return d.name == name;
+                });
+                if (itExists == outPlugins.end()) {
+                    PluginDescriptor desc;
+                    desc.name = name;
+                    desc.path = path.string();
+                    desc.bundleFileName = path.filename().string();
+                    desc.type = PluginType::VST3;
+                    desc.vendor = detectVendor(path, name);
+
+                    // Extract canonical 32-char VST3 Class GUID for Tier-1 PluginResolver
+                    try {
+                        std::filesystem::path dllPath = path;
+                        if (std::filesystem::is_directory(path)) {
+                            auto candidate = path / "Contents" / "x86_64-win" / (path.stem().string() + ".vst3");
+                            if (std::filesystem::exists(candidate)) dllPath = candidate;
+                        }
+                        if (HMODULE hLib = LoadLibraryExW(dllPath.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH)) {
+                            auto* getFactory = reinterpret_cast<GetFactoryProc>(reinterpret_cast<void*>(GetProcAddress(hLib, "GetPluginFactory")));
+                            if (getFactory) {
+                                if (auto* factory = getFactory()) {
+                                    const int32_t nClasses = factory->countClasses();
+                                    Steinberg::PClassInfo ci{};
+                                    for (int32_t cIdx = 0; cIdx < nClasses; ++cIdx) {
+                                        if (factory->getClassInfo(cIdx, &ci) == Steinberg::kResultOk &&
+                                            std::strcmp(ci.category, "Audio Module Class") == 0) {
+                                            char hex[33] = {0};
+                                            for (int b = 0; b < 16; ++b) {
+                                                std::snprintf(hex + b * 2, 3, "%02X", static_cast<unsigned char>(ci.cid[b]));
+                                            }
+                                            desc.classGuid = hex;
+                                            break;
+                                        }
+                                    }
+                                    factory->release();
+                                } else {
+                                    std::cerr << "[PluginScanner] GetPluginFactory returned nullptr for: " << dllPath.string() << "\n";
+                                }
+                            } else {
+                                std::cerr << "[PluginScanner] GetPluginFactory not found in: " << dllPath.string() << "\n";
+                            }
+                            FreeLibrary(hLib);
+                        } else {
+                            std::cerr << "[PluginScanner] Failed to load VST3 library: " << dllPath.string() << " (error: " << GetLastError() << ")\n";
+                        }
+                    } catch (const std::exception& ex) {
+                        std::cerr << "[PluginScanner] Exception inspecting VST3 " << path.string() << ": " << ex.what() << "\n";
+                    } catch (...) {
+                        std::cerr << "[PluginScanner] Unknown exception inspecting VST3 " << path.string() << "\n";
+                    }
+
+                    auto catIt = m_categoryOverrides.find(name);
+                    desc.category = (catIt != m_categoryOverrides.end()) ? catIt->second : detectPluginCategory(name, desc.vendor);
+                    outPlugins.push_back(std::move(desc));
+                }
+                if (iter->is_directory()) {
+                    iter.disable_recursion_pending();
+                }
             }
         }
+    } catch (const std::exception& ex) {
+        std::cerr << "[PluginScanner] Error iterating directory " << dirPath.string() << ": " << ex.what() << "\n";
+    } catch (...) {
+        std::cerr << "[PluginScanner] Unknown error iterating directory " << dirPath.string() << "\n";
     }
 }
 

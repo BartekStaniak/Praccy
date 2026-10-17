@@ -1,9 +1,17 @@
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpragma-once-outside-header"
+#endif
 #pragma once
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 #include "../audio/input_config.h"
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <cstdint>
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -35,13 +43,34 @@ struct ScannedPluginEntry {
     }
 };
 
+struct KeyBindingEntry {
+    int key{0};
+    int slotIndex{-1};
+    int branchIndex{-1};
+    int branchSlotIndex{-1};
+    uint32_t targetType{0};
+    uint32_t paramId{0};
+
+    bool operator==(const KeyBindingEntry& other) const {
+        return key == other.key &&
+               slotIndex == other.slotIndex &&
+               branchIndex == other.branchIndex &&
+               branchSlotIndex == other.branchSlotIndex &&
+               targetType == other.targetType &&
+               paramId == other.paramId;
+    }
+};
+
 struct AppConfig {
+    using KeyBindingEntry = praccy::state::KeyBindingEntry;
+
     std::string lastAsioDriver;
     audio::InputRoutingMode inputMode{audio::InputRoutingMode::MonoLeft};
     float inputGainDb{0.0f};
     float masterVolumeDb{0.0f};
     float metronomeBpm{120.0f};
     bool checkBetaUpdates{false};
+    bool enableLiveThumbnails{false};
     std::vector<std::string> customPluginPaths;
     std::vector<std::string> favoritePlugins;
     std::vector<std::string> favoritePresets;
@@ -50,6 +79,7 @@ struct AppConfig {
     std::unordered_map<std::string, std::string> customPluginCategories;
     std::vector<std::string> recentPlugins;
     std::vector<ScannedPluginEntry> scannedPlugins;
+    std::vector<KeyBindingEntry> keyBindings;
 
     uint32_t retroactiveBufferMinutes{2};
     std::string riffDirectory;

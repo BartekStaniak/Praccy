@@ -33,7 +33,10 @@ struct DropContext {
     tools::QuickLooper* looper{nullptr};
     state::SceneManager* scenes{nullptr};
     audio::GraphEngine* graph{nullptr};
+    bool preferLooper{false};
 };
+
+using DragDropContext = DropContext;
 
 class DragDropRouter {
 public:

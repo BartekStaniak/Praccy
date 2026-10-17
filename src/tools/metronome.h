@@ -37,6 +37,8 @@ public:
     [[nodiscard]] int currentBeat() const noexcept { return m_currentBeat.load(std::memory_order_relaxed); }
 
 private:
+    void triggerClick(bool isAccent) noexcept;
+
     double m_sampleRate{48000.0};
     std::atomic<float> m_bpm{120.0f};
     std::atomic<int> m_beatsPerBar{4};
@@ -49,6 +51,13 @@ private:
     uint32_t m_clickSamplePosition{0};
     uint32_t m_clickLengthSamples{0};
     bool m_isAccent{false};
+
+    float m_decay{0.0f};
+    float m_decayFactor{1.0f};
+    float m_phasorCos{1.0f};
+    float m_phasorSin{0.0f};
+    float m_rotCos{1.0f};
+    float m_rotSin{0.0f};
 };
 
 } // namespace praccy::tools

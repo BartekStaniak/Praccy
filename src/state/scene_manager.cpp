@@ -1,3 +1,8 @@
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+#endif
+
 #include "scene_manager.h"
 #include "app_config.h"
 #include "../plugins/builtin_dsp.h"
@@ -82,16 +87,19 @@ static void captureSlotToPreset(audio::PluginSlot* slot, PluginSlotPreset& sp) {
     }
 }
 
-static void applyPresetToSlot(const PluginSlotPreset& sp, audio::PluginSlot* slot, plugins::IPluginInstance* inner) {
+static void applyPresetToSlot(const PluginSlotPreset& sp,
+                              audio::PluginSlot* slot,
+                              plugins::IPluginInstance* inner,
+                              bool allowBinaryStateReload) {
     if (!slot) return;
 
-    slot->automationRegister().reset();
+    // Invariant INV-RT-01 / F-02: Never call automationRegister().reset() on live slots.
     slot->setBypassed(sp.bypassed);
     slot->setDryWet(sp.dryWet);
     slot->setInputGainDb(sp.inputGainDb);
     slot->setOutputGainDb(sp.outputGainDb);
 
-    if (!sp.state.empty() && inner) {
+    if (allowBinaryStateReload && !sp.state.empty() && inner) {
         inner->loadState(sp.state);
     } else if (!sp.paramValues.empty() && inner) {
         for (const auto& pv : sp.paramValues) {
@@ -302,7 +310,7 @@ std::unique_ptr<audio::PluginSlot> SceneManager::createSlotFromPreset(const Plug
 
     auto* rawInst = inst.get();
     auto slot = std::make_unique<audio::PluginSlot>(std::move(inst));
-    applyPresetToSlot(p, slot.get(), rawInst);
+    applyPresetToSlot(p, slot.get(), rawInst, true /* allowBinaryStateReload */);
     return slot;
 }
 
@@ -362,24 +370,57 @@ static bool isSamePlugin(const PluginSlotPreset& p, audio::PluginSlot* slot) {
     if (!slot) return false;
     auto* inner = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
     if (!inner) return false;
+
+    // If both have paths specified and they differ, they cannot be the same plugin.
     if (!p.path.empty() && !inner->path().empty()) {
-        if (p.path == inner->path()) return true;
+        return p.path == inner->path();
     }
-    if (!p.name.empty() && (p.name == slot->name() || p.name == inner->name())) {
-        return true;
-    }
+
     if ((p.path == "builtin://drive" || p.name == "Praccy Drive") &&
         dynamic_cast<plugins::OverdriveEffect*>(inner)) return true;
     if ((p.path == "builtin://amp" || p.name == "Praccy Amp Sim") &&
         dynamic_cast<plugins::TubeAmpEffect*>(inner)) return true;
     if ((p.path == "builtin://delay" || p.name == "Praccy Stereo Delay") &&
         dynamic_cast<plugins::StereoDelayEffect*>(inner)) return true;
+
+    if (!p.classGuid.empty() && !inner->classGuid().empty()) {
+        return p.classGuid == inner->classGuid();
+    }
+    if (!p.clapId.empty() && !inner->clapId().empty()) {
+        return p.clapId == inner->clapId();
+    }
+
+    if (!p.name.empty() && (p.name == slot->name() || p.name == inner->name())) {
+        return true;
+    }
     return false;
 }
 
 bool SceneManager::canApplyInPlace(const ScenePreset& scene, audio::GraphEngine& graph) {
     if (scene.nodes.empty()) return false;
     if (graph.numNodes() != scene.nodes.size()) return false;
+
+    auto canSlotApplyInPlace = [](const PluginSlotPreset& sp, audio::PluginSlot* slot) -> bool {
+        if (!slot || !isSamePlugin(sp, slot)) return false;
+        auto* inner = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
+        if (!inner) return false;
+
+        const bool isThirdParty = (dynamic_cast<plugins::Vst3PluginInstance*>(inner) != nullptr ||
+                                   dynamic_cast<plugins::ClapPluginInstance*>(inner) != nullptr ||
+                                   sp.type == "VST3" || sp.type == "CLAP");
+        if (isThirdParty) {
+            // F-02: Live UI-thread loadState() races with audio-thread process().
+            // For third-party VST3 or CLAP plugins, only allow in-place update if
+            // sp.state matches the currently loaded binary chunk (or is empty).
+            if (!sp.state.empty()) {
+                const auto currentState = inner->saveState();
+                if (currentState != sp.state) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
 
     for (size_t i = 0; i < scene.nodes.size(); ++i) {
         auto* node = graph.getNode(i);
@@ -388,7 +429,7 @@ bool SceneManager::canApplyInPlace(const ScenePreset& scene, audio::GraphEngine&
         const auto& np = scene.nodes[i];
         if (np.kind == NodePreset::Kind::Plugin) {
             auto* slot = dynamic_cast<audio::PluginSlot*>(node);
-            if (!slot || !isSamePlugin(np.slot, slot)) return false;
+            if (!canSlotApplyInPlace(np.slot, slot)) return false;
         } else if (np.kind == NodePreset::Kind::ParallelBlock) {
             auto* block = dynamic_cast<audio::ParallelSplitMergeBlock*>(node);
             if (!block || block->numBranches() != np.branches.size()) return false;
@@ -397,7 +438,7 @@ bool SceneManager::canApplyInPlace(const ScenePreset& scene, audio::GraphEngine&
                 if (!branch || branch->numSlots() != np.branches[b].slots.size()) return false;
                 for (size_t s = 0; s < np.branches[b].slots.size(); ++s) {
                     auto* bSlot = branch->getSlot(s);
-                    if (!bSlot || !isSamePlugin(np.branches[b].slots[s], bSlot)) return false;
+                    if (!canSlotApplyInPlace(np.branches[b].slots[s], bSlot)) return false;
                 }
             }
         } else {
@@ -416,7 +457,7 @@ bool SceneManager::applyGraphSnapshotInPlace(const ScenePreset& scene, audio::Gr
             auto* slot = dynamic_cast<audio::PluginSlot*>(node);
             if (!slot) continue;
             auto* inner = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
-            applyPresetToSlot(np.slot, slot, inner);
+            applyPresetToSlot(np.slot, slot, inner, false /* allowBinaryStateReload */);
         } else if (np.kind == NodePreset::Kind::ParallelBlock) {
             auto* block = dynamic_cast<audio::ParallelSplitMergeBlock*>(node);
             if (!block) continue;
@@ -434,7 +475,7 @@ bool SceneManager::applyGraphSnapshotInPlace(const ScenePreset& scene, audio::Gr
                     auto* bSlot = branch->getSlot(s);
                     if (!bSlot) continue;
                     auto* bInner = dynamic_cast<plugins::IPluginInstance*>(bSlot->innerNode());
-                    applyPresetToSlot(bp.slots[s], bSlot, bInner);
+                    applyPresetToSlot(bp.slots[s], bSlot, bInner, false /* allowBinaryStateReload */);
                 }
             }
         }
@@ -781,25 +822,25 @@ void SceneManager::initializeDefaultUserPresets() {
 
 static void serializePreset(std::ostream& os, const ScenePreset& p, const std::string& sectionPrefix) {
     os << "[" << sectionPrefix << "]\n";
-    os << "name=" << p.name << "\n";
+    os << "name=" << praccy::utils::escapeIniField(p.name) << "\n";
     if (!p.category.empty()) {
-        os << "category=" << p.category << "\n";
+        os << "category=" << praccy::utils::escapeIniField(p.category) << "\n";
     }
     os << "numNodes=" << p.nodes.size() << "\n";
     for (size_t n = 0; n < p.nodes.size(); ++n) {
         const auto& node = p.nodes[n];
         os << "node_" << n << "_kind=" << (node.kind == NodePreset::Kind::Plugin ? "plugin" : "parallel") << "\n";
         if (node.kind == NodePreset::Kind::Plugin) {
-            os << "node_" << n << "_name=" << node.slot.name << "\n";
-            os << "node_" << n << "_path=" << node.slot.path << "\n";
-            os << "node_" << n << "_type=" << node.slot.type << "\n";
+            os << "node_" << n << "_name=" << praccy::utils::escapeIniField(node.slot.name) << "\n";
+            os << "node_" << n << "_path=" << praccy::utils::escapeIniField(node.slot.path) << "\n";
+            os << "node_" << n << "_type=" << praccy::utils::escapeIniField(node.slot.type) << "\n";
             os << "node_" << n << "_bypassed=" << (node.slot.bypassed ? "1" : "0") << "\n";
             os << "node_" << n << "_dryWet=" << node.slot.dryWet << "\n";
             os << "node_" << n << "_inGain=" << node.slot.inputGainDb << "\n";
             os << "node_" << n << "_outGain=" << node.slot.outputGainDb << "\n";
-            if (!node.slot.bundleFileName.empty()) os << "node_" << n << "_bundle=" << node.slot.bundleFileName << "\n";
-            if (!node.slot.classGuid.empty()) os << "node_" << n << "_guid=" << node.slot.classGuid << "\n";
-            if (!node.slot.clapId.empty()) os << "node_" << n << "_clapId=" << node.slot.clapId << "\n";
+            if (!node.slot.bundleFileName.empty()) os << "node_" << n << "_bundle=" << praccy::utils::escapeIniField(node.slot.bundleFileName) << "\n";
+            if (!node.slot.classGuid.empty()) os << "node_" << n << "_guid=" << praccy::utils::escapeIniField(node.slot.classGuid) << "\n";
+            if (!node.slot.clapId.empty()) os << "node_" << n << "_clapId=" << praccy::utils::escapeIniField(node.slot.clapId) << "\n";
             if (!node.slot.state.empty()) {
                 os << "node_" << n << "_state=" << bytesToHex(node.slot.state) << "\n";
             }
@@ -807,7 +848,7 @@ static void serializePreset(std::ostream& os, const ScenePreset& p, const std::s
             for (size_t m = 0; m < node.slot.macros.size(); ++m) {
                 const auto& mb = node.slot.macros[m];
                 os << "node_" << n << "_m_" << m << "_id=" << mb.paramId << "\n";
-                os << "node_" << n << "_m_" << m << "_lbl=" << mb.label << "\n";
+                os << "node_" << n << "_m_" << m << "_lbl=" << praccy::utils::escapeIniField(mb.label) << "\n";
                 os << "node_" << n << "_m_" << m << "_val=" << mb.value << "\n";
                 os << "node_" << n << "_m_" << m << "_def=" << mb.defaultValue << "\n";
                 os << "node_" << n << "_m_" << m << "_min=" << mb.minValue << "\n";
@@ -821,7 +862,7 @@ static void serializePreset(std::ostream& os, const ScenePreset& p, const std::s
             os << "node_" << n << "_numBranches=" << node.branches.size() << "\n";
             for (size_t b = 0; b < node.branches.size(); ++b) {
                 const auto& br = node.branches[b];
-                os << "node_" << n << "_b_" << b << "_name=" << br.name << "\n";
+                os << "node_" << n << "_b_" << b << "_name=" << praccy::utils::escapeIniField(br.name) << "\n";
                 os << "node_" << n << "_b_" << b << "_gain=" << br.gainDb << "\n";
                 os << "node_" << n << "_b_" << b << "_pan=" << br.pan << "\n";
                 os << "node_" << n << "_b_" << b << "_muted=" << (br.muted ? "1" : "0") << "\n";
@@ -830,16 +871,16 @@ static void serializePreset(std::ostream& os, const ScenePreset& p, const std::s
                 os << "node_" << n << "_b_" << b << "_numSlots=" << br.slots.size() << "\n";
                 for (size_t s = 0; s < br.slots.size(); ++s) {
                     const auto& sl = br.slots[s];
-                    os << "node_" << n << "_b_" << b << "_s_" << s << "_name=" << sl.name << "\n";
-                    os << "node_" << n << "_b_" << b << "_s_" << s << "_path=" << sl.path << "\n";
-                    os << "node_" << n << "_b_" << b << "_s_" << s << "_type=" << sl.type << "\n";
+                    os << "node_" << n << "_b_" << b << "_s_" << s << "_name=" << praccy::utils::escapeIniField(sl.name) << "\n";
+                    os << "node_" << n << "_b_" << b << "_s_" << s << "_path=" << praccy::utils::escapeIniField(sl.path) << "\n";
+                    os << "node_" << n << "_b_" << b << "_s_" << s << "_type=" << praccy::utils::escapeIniField(sl.type) << "\n";
                     os << "node_" << n << "_b_" << b << "_s_" << s << "_bypassed=" << (sl.bypassed ? "1" : "0") << "\n";
                     os << "node_" << n << "_b_" << b << "_s_" << s << "_dryWet=" << sl.dryWet << "\n";
                     os << "node_" << n << "_b_" << b << "_s_" << s << "_inGain=" << sl.inputGainDb << "\n";
                     os << "node_" << n << "_b_" << b << "_s_" << s << "_outGain=" << sl.outputGainDb << "\n";
-                    if (!sl.bundleFileName.empty()) os << "node_" << n << "_b_" << b << "_s_" << s << "_bundle=" << sl.bundleFileName << "\n";
-                    if (!sl.classGuid.empty()) os << "node_" << n << "_b_" << b << "_s_" << s << "_guid=" << sl.classGuid << "\n";
-                    if (!sl.clapId.empty()) os << "node_" << n << "_b_" << b << "_s_" << s << "_clapId=" << sl.clapId << "\n";
+                    if (!sl.bundleFileName.empty()) os << "node_" << n << "_b_" << b << "_s_" << s << "_bundle=" << praccy::utils::escapeIniField(sl.bundleFileName) << "\n";
+                    if (!sl.classGuid.empty()) os << "node_" << n << "_b_" << b << "_s_" << s << "_guid=" << praccy::utils::escapeIniField(sl.classGuid) << "\n";
+                    if (!sl.clapId.empty()) os << "node_" << n << "_b_" << b << "_s_" << s << "_clapId=" << praccy::utils::escapeIniField(sl.clapId) << "\n";
                     if (!sl.state.empty()) {
                         os << "node_" << n << "_b_" << b << "_s_" << s << "_state=" << bytesToHex(sl.state) << "\n";
                     }
@@ -847,7 +888,7 @@ static void serializePreset(std::ostream& os, const ScenePreset& p, const std::s
                     for (size_t m = 0; m < sl.macros.size(); ++m) {
                         const auto& mb = sl.macros[m];
                         os << "node_" << n << "_b_" << b << "_s_" << s << "_m_" << m << "_id=" << mb.paramId << "\n";
-                        os << "node_" << n << "_b_" << b << "_s_" << s << "_m_" << m << "_lbl=" << mb.label << "\n";
+                        os << "node_" << n << "_b_" << b << "_s_" << s << "_m_" << m << "_lbl=" << praccy::utils::escapeIniField(mb.label) << "\n";
                         os << "node_" << n << "_b_" << b << "_s_" << s << "_m_" << m << "_val=" << mb.value << "\n";
                         os << "node_" << n << "_b_" << b << "_s_" << s << "_m_" << m << "_def=" << mb.defaultValue << "\n";
                         os << "node_" << n << "_b_" << b << "_s_" << s << "_m_" << m << "_min=" << mb.minValue << "\n";
@@ -919,7 +960,7 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
             std::string mpfx = pfx + "m_" + std::to_string(m) + "_";
             PluginSlotPreset::MacroBinding mb;
             mb.paramId = kv.count(mpfx + "id") ? praccy::utils::parseInteger<uint32_t>(kv.at(mpfx + "id"), 0) : 0;
-            mb.label = kv.count(mpfx + "lbl") ? kv.at(mpfx + "lbl") : "";
+            mb.label = kv.count(mpfx + "lbl") ? praccy::utils::unescapeIniField(kv.at(mpfx + "lbl")) : "";
             mb.value = kv.count(mpfx + "val") ? praccy::utils::parseFloat(kv.at(mpfx + "val"), 0.0f) : 0.0f;
             mb.defaultValue = kv.count(mpfx + "def") ? praccy::utils::parseFloat(kv.at(mpfx + "def"), 0.0f) : 0.0f;
             mb.minValue = kv.count(mpfx + "min") ? praccy::utils::parseFloat(kv.at(mpfx + "min"), 0.0f) : 0.0f;
@@ -934,9 +975,9 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
     auto parsePreset = [&](const std::unordered_map<std::string, std::string>& kv) -> ScenePreset {
         ScenePreset sp;
         auto itName = kv.find("name");
-        if (itName != kv.end()) sp.name = itName->second;
+        if (itName != kv.end()) sp.name = praccy::utils::unescapeIniField(itName->second);
         auto itCat = kv.find("category");
-        if (itCat != kv.end()) sp.category = itCat->second;
+        if (itCat != kv.end()) sp.category = praccy::utils::unescapeIniField(itCat->second);
         auto itNodes = kv.find("numNodes");
         size_t count = (itNodes != kv.end()) ? praccy::utils::parseInteger<size_t>(itNodes->second, 0) : 0;
 
@@ -946,12 +987,12 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
             std::string kind = kv.count(pfx + "kind") ? kv.at(pfx + "kind") : "plugin";
             if (kind == "plugin") {
                 np.kind = NodePreset::Kind::Plugin;
-                np.slot.name = kv.count(pfx + "name") ? kv.at(pfx + "name") : "Plugin";
-                np.slot.path = kv.count(pfx + "path") ? kv.at(pfx + "path") : "";
-                np.slot.type = kv.count(pfx + "type") ? kv.at(pfx + "type") : "BuiltIn";
-                np.slot.bundleFileName = kv.count(pfx + "bundle") ? kv.at(pfx + "bundle") : "";
-                np.slot.classGuid = kv.count(pfx + "guid") ? kv.at(pfx + "guid") : "";
-                np.slot.clapId = kv.count(pfx + "clapId") ? kv.at(pfx + "clapId") : "";
+                np.slot.name = kv.count(pfx + "name") ? praccy::utils::unescapeIniField(kv.at(pfx + "name")) : "Plugin";
+                np.slot.path = kv.count(pfx + "path") ? praccy::utils::unescapeIniField(kv.at(pfx + "path")) : "";
+                np.slot.type = kv.count(pfx + "type") ? praccy::utils::unescapeIniField(kv.at(pfx + "type")) : "BuiltIn";
+                np.slot.bundleFileName = kv.count(pfx + "bundle") ? praccy::utils::unescapeIniField(kv.at(pfx + "bundle")) : "";
+                np.slot.classGuid = kv.count(pfx + "guid") ? praccy::utils::unescapeIniField(kv.at(pfx + "guid")) : "";
+                np.slot.clapId = kv.count(pfx + "clapId") ? praccy::utils::unescapeIniField(kv.at(pfx + "clapId")) : "";
                 np.slot.bypassed = kv.count(pfx + "bypassed") && kv.at(pfx + "bypassed") == "1";
                 np.slot.dryWet = kv.count(pfx + "dryWet") ? praccy::utils::parseFloat(kv.at(pfx + "dryWet"), 1.0f) : 1.0f;
                 np.slot.inputGainDb = kv.count(pfx + "inGain") ? praccy::utils::parseFloat(kv.at(pfx + "inGain"), 0.0f) : 0.0f;
@@ -967,7 +1008,7 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
                 for (size_t b = 0; b < numBr; ++b) {
                     std::string bpfx = pfx + "b_" + std::to_string(b) + "_";
                     BranchPreset bp;
-                    bp.name = kv.count(bpfx + "name") ? kv.at(bpfx + "name") : "Branch";
+                    bp.name = kv.count(bpfx + "name") ? praccy::utils::unescapeIniField(kv.at(bpfx + "name")) : "Branch";
                     bp.gainDb = kv.count(bpfx + "gain") ? praccy::utils::parseFloat(kv.at(bpfx + "gain"), 0.0f) : 0.0f;
                     bp.pan = kv.count(bpfx + "pan") ? praccy::utils::parseFloat(kv.at(bpfx + "pan"), 0.0f) : 0.0f;
                     bp.muted = kv.count(bpfx + "muted") && kv.at(bpfx + "muted") == "1";
@@ -978,12 +1019,12 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
                     for (size_t s = 0; s < numSl; ++s) {
                         std::string spfx = bpfx + "s_" + std::to_string(s) + "_";
                         PluginSlotPreset sl;
-                        sl.name = kv.count(spfx + "name") ? kv.at(spfx + "name") : "Plugin";
-                        sl.path = kv.count(spfx + "path") ? kv.at(spfx + "path") : "";
-                        sl.type = kv.count(spfx + "type") ? kv.at(spfx + "type") : "BuiltIn";
-                        sl.bundleFileName = kv.count(spfx + "bundle") ? kv.at(spfx + "bundle") : "";
-                        sl.classGuid = kv.count(spfx + "guid") ? kv.at(spfx + "guid") : "";
-                        sl.clapId = kv.count(spfx + "clapId") ? kv.at(spfx + "clapId") : "";
+                        sl.name = kv.count(spfx + "name") ? praccy::utils::unescapeIniField(kv.at(spfx + "name")) : "Plugin";
+                        sl.path = kv.count(spfx + "path") ? praccy::utils::unescapeIniField(kv.at(spfx + "path")) : "";
+                        sl.type = kv.count(spfx + "type") ? praccy::utils::unescapeIniField(kv.at(spfx + "type")) : "BuiltIn";
+                        sl.bundleFileName = kv.count(spfx + "bundle") ? praccy::utils::unescapeIniField(kv.at(spfx + "bundle")) : "";
+                        sl.classGuid = kv.count(spfx + "guid") ? praccy::utils::unescapeIniField(kv.at(spfx + "guid")) : "";
+                        sl.clapId = kv.count(spfx + "clapId") ? praccy::utils::unescapeIniField(kv.at(spfx + "clapId")) : "";
                         sl.bypassed = kv.count(spfx + "bypassed") && kv.at(spfx + "bypassed") == "1";
                         sl.dryWet = kv.count(spfx + "dryWet") ? praccy::utils::parseFloat(kv.at(spfx + "dryWet"), 1.0f) : 1.0f;
                         sl.inputGainDb = kv.count(spfx + "inGain") ? praccy::utils::parseFloat(kv.at(spfx + "inGain"), 0.0f) : 0.0f;

@@ -157,6 +157,68 @@ void runTest24BitBitExactness() {
     // 1.5f should clamp to +8388607 (0xFF, 0xFF, 0x7F)
     assert(packedEdge24[15] == 0xFF && packedEdge24[16] == 0xFF && packedEdge24[17] == 0x7F);
 
+    // 1.5 Test ASIOSTInt32LSB Packing across edge cases (F-10, F-26)
+    // Input values: {-1.5f, -1.0f, 0.0f, 0.99999988f, 1.0f, 1.5f, NAN, INFINITY, -INFINITY}
+    float testInt32Inputs[9] = { -1.5f, -1.0f, 0.0f, 0.99999988f, 1.0f, 1.5f, NAN, INFINITY, -INFINITY };
+    int32_t packedInt32[9] = {};
+    audio::AsioManager::packInt32LSB(testInt32Inputs, packedInt32, 9);
+
+    // -1.5f should clamp to -1.0f scaled to INT32_MAX range (-2147483647)
+    assert(packedInt32[0] == -2147483647);
+    // -1.0f should scale to -2147483647
+    assert(packedInt32[1] == -2147483647);
+    // 0.0f should scale to 0
+    assert(packedInt32[2] == 0);
+    // 0.99999988f should be close to INT32_MAX but strictly <= INT32_MAX and > 0
+    assert(packedInt32[3] > 0 && packedInt32[3] <= 2147483647);
+    // +1.0f MUST produce exactly 2147483647 (INT32_MAX), NEVER -2147483648 (UBSan signed overflow)
+    assert(packedInt32[4] == 2147483647);
+    assert(packedInt32[4] != static_cast<int32_t>(-2147483648LL));
+    // +1.5f should clamp to +1.0f producing 2147483647
+    assert(packedInt32[5] == 2147483647);
+    // NAN should be sanitized to 0
+    assert(packedInt32[6] == 0);
+    // +INFINITY should be sanitized to 0
+    assert(packedInt32[7] == 0);
+    // -INFINITY should be sanitized to 0
+    assert(packedInt32[8] == 0);
+
+    // Explicit single-sample verification of +1.0f packing contract
+    float singleOne = 1.0f;
+    int32_t singlePackedInt32 = 0;
+    audio::AsioManager::packInt32LSB(&singleOne, &singlePackedInt32, 1);
+    assert(singlePackedInt32 == 2147483647);
+    assert(singlePackedInt32 != static_cast<int32_t>(-2147483648LL));
+
+    // 1.6 Test ASIOSTFloat32LSB Packing across edge cases (F-10, F-26)
+    // Input values: {-1.5f, -1.0f, 0.0f, 1.0f, 1.5f, NAN, INFINITY, -INFINITY}
+    float testFloat32Inputs[8] = { -1.5f, -1.0f, 0.0f, 1.0f, 1.5f, NAN, INFINITY, -INFINITY };
+    float packedFloat32[8] = {};
+    audio::AsioManager::packFloat32LSB(testFloat32Inputs, packedFloat32, 8);
+
+    // -1.5f clamped to -1.0f
+    assert(packedFloat32[0] == -1.0f);
+    // -1.0f preserved
+    assert(packedFloat32[1] == -1.0f);
+    // 0.0f preserved
+    assert(packedFloat32[2] == 0.0f);
+    // 1.0f preserved
+    assert(packedFloat32[3] == 1.0f);
+    // 1.5f clamped to 1.0f
+    assert(packedFloat32[4] == 1.0f);
+    // NAN sanitized to 0.0f
+    assert(packedFloat32[5] == 0.0f);
+    // +INFINITY sanitized to 0.0f
+    assert(packedFloat32[6] == 0.0f);
+    // -INFINITY sanitized to 0.0f
+    assert(packedFloat32[7] == 0.0f);
+
+    // Verify all packed floats are finite and strictly within [-1.0f, 1.0f]
+    for (size_t k = 0; k < 8; ++k) {
+        assert(std::isfinite(packedFloat32[k]));
+        assert(packedFloat32[k] >= -1.0f && packedFloat32[k] <= 1.0f);
+    }
+
     std::cout << "PASSED\n";
 }
 

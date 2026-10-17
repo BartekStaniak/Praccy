@@ -103,6 +103,10 @@ struct ASIOChannelInfo {
 /**
  * @brief IASIO COM Interface definition.
  */
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wnon-virtual-dtor"
+#endif
 class IASIO : public IUnknown {
 public:
     virtual ASIOBool init(void* sysHandle) = 0;
@@ -127,5 +131,8 @@ public:
     virtual ASIOError future(int32_t selector, void* opt) = 0;
     virtual ASIOError outputReady() = 0;
 };
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 } // namespace praccy::audio

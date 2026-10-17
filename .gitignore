@@ -41,3 +41,5 @@ temp_out/
 run_tool.py
 Testing/
 *.patch
+run_audio.log
+test_archive_sandbox_legit/

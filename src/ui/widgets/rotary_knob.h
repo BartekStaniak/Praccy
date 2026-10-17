@@ -70,9 +70,13 @@ inline bool DrawHardwareKnob(
     bool valueChanged = false;
 
     // 1. Double-click reset with drag suppression
-    if (s_suppressResetId == knobId) {
+    ImGuiStorage* storage = ImGui::GetStateStorage();
+    const ImGuiID suppressResetKey = ImGui::GetID("##PraccySuppressResetId");
+    const ImGuiID suppressResetId = storage ? static_cast<ImGuiID>(storage->GetInt(suppressResetKey, 0)) : 0;
+
+    if (suppressResetId == knobId) {
         if (!io.MouseDown[0]) {
-            s_suppressResetId = 0;
+            if (storage) storage->SetInt(suppressResetKey, 0);
         } else {
             const float clampedDef = std::clamp(defaultVal, minVal, maxVal);
             if (*value != clampedDef) {
@@ -101,7 +105,7 @@ inline bool DrawHardwareKnob(
 
     if (isHovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         *value = std::clamp(defaultVal, minVal, maxVal);
-        s_suppressResetId = knobId;
+        if (storage) storage->SetInt(suppressResetKey, static_cast<int>(knobId));
         ImGui::MarkItemEdited(knobId);
         ImGui::ClearActiveID();
         valueChanged = true;

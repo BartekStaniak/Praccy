@@ -142,14 +142,14 @@ public:
                             int32_t val = (static_cast<int32_t>(b[0]) << 8) |
                                           (static_cast<int32_t>(b[1]) << 16) |
                                           (static_cast<int32_t>(b[2]) << 24);
-                            return (val >> 8) / 8388608.0f;
+                            return static_cast<float>(static_cast<double>(val >> 8) / 8388608.0);
                         };
                         s0 = read24(ptr);
                         s1 = (fmt.numChannels > 1) ? read24(ptr + 3) : s0;
                     } else if (fmt.bitsPerSample == 32) {
                         const int32_t* p32 = reinterpret_cast<const int32_t*>(ptr);
-                        s0 = p32[0] / 2147483648.0f;
-                        s1 = (fmt.numChannels > 1) ? (p32[1] / 2147483648.0f) : s0;
+                        s0 = static_cast<float>(static_cast<double>(p32[0]) / 2147483648.0);
+                        s1 = (fmt.numChannels > 1) ? static_cast<float>(static_cast<double>(p32[1]) / 2147483648.0) : s0;
                     } else if (fmt.bitsPerSample == 8) {
                         s0 = (static_cast<float>(ptr[0]) - 128.0f) / 128.0f;
                         s1 = (fmt.numChannels > 1) ? ((static_cast<float>(ptr[1]) - 128.0f) / 128.0f) : s0;

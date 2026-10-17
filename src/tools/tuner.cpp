@@ -60,15 +60,39 @@ uint32_t AudioRingBuffer::push(const float* in, uint32_t count) noexcept {
 
     const size_t offset = write & m_mask;
     const size_t firstPart = std::min(toWrite, m_capacity - offset);
-    std::memcpy(&m_buffer[offset], in, firstPart * sizeof(float));
+    for (size_t i = 0; i < firstPart; ++i) {
+        float s = in[i];
+        if (!std::isfinite(s)) s = 0.0f;
+        m_buffer[offset + i] = s;
+    }
 
     const size_t secondPart = toWrite - firstPart;
     if (secondPart > 0) {
-        std::memcpy(&m_buffer[0], in + firstPart, secondPart * sizeof(float));
+        for (size_t i = 0; i < secondPart; ++i) {
+            float s = in[firstPart + i];
+            if (!std::isfinite(s)) s = 0.0f;
+            m_buffer[i] = s;
+        }
     }
 
     m_writeHead.store(write + toWrite, std::memory_order_release);
     return static_cast<uint32_t>(toWrite);
+}
+
+// ============================================================================
+// BiquadFilter Implementation
+// ============================================================================
+
+float BiquadFilter::process(float in) noexcept {
+    float out = m_b0 * in + m_z1;
+    if (!std::isfinite(out)) {
+        m_z1 = 0.0f;
+        m_z2 = 0.0f;
+        return 0.0f;
+    }
+    m_z1 = m_b1 * in - m_a1 * out + m_z2;
+    m_z2 = m_b2 * in - m_a2 * out;
+    return out;
 }
 
 uint32_t AudioRingBuffer::pushStereo(const float* left, const float* right, uint32_t count) noexcept {
@@ -85,13 +109,17 @@ uint32_t AudioRingBuffer::pushStereo(const float* left, const float* right, uint
     const size_t offset = write & m_mask;
     const size_t firstPart = std::min(toWrite, m_capacity - offset);
     for (size_t i = 0; i < firstPart; ++i) {
-        m_buffer[offset + i] = 0.5f * (left[i] + right[i]);
+        float s = 0.5f * (left[i] + right[i]);
+        if (!std::isfinite(s)) s = 0.0f;
+        m_buffer[offset + i] = s;
     }
 
     const size_t secondPart = toWrite - firstPart;
     if (secondPart > 0) {
         for (size_t i = 0; i < secondPart; ++i) {
-            m_buffer[i] = 0.5f * (left[firstPart + i] + right[firstPart + i]);
+            float s = 0.5f * (left[firstPart + i] + right[firstPart + i]);
+            if (!std::isfinite(s)) s = 0.0f;
+            m_buffer[i] = s;
         }
     }
 
@@ -140,7 +168,8 @@ InstrumentTuner::InstrumentTuner(uint32_t bufferSize)
       m_inputHistory(bufferSize, 0.0f),
       m_drainBuffer(bufferSize, 0.0f),
       m_differenceBuffer(bufferSize / 2, 0.0f),
-      m_cumulativeDiffBuffer(bufferSize / 2, 0.0f) {
+      m_cumulativeDiffBuffer(bufferSize / 2, 0.0f),
+      m_linearWindow(bufferSize, 0.0f) {
     start();
 }
 
@@ -172,6 +201,7 @@ void InstrumentTuner::prepare(double sampleRate, uint32_t maxBlockSize) {
     m_drainBuffer.assign(m_bufferSize, 0.0f);
     m_differenceBuffer.assign(m_bufferSize / 2, 0.0f);
     m_cumulativeDiffBuffer.assign(m_bufferSize / 2, 0.0f);
+    m_linearWindow.assign(m_bufferSize, 0.0f);
 
     publishResult(false, 0.0f, 0, 0.0f);
 
@@ -296,10 +326,21 @@ void InstrumentTuner::workerLoop() {
 void InstrumentTuner::detectPitchYin() {
     const uint32_t halfBuffer = m_bufferSize / 2;
 
+    // Unwrap circular m_inputHistory starting at startIdx into contiguous m_linearWindow
+    if (m_linearWindow.size() < m_bufferSize) {
+        m_linearWindow.resize(m_bufferSize, 0.0f);
+    }
+    const uint32_t startIdx = m_writeIndex % m_bufferSize;
+    const uint32_t firstPart = m_bufferSize - startIdx;
+    std::memcpy(m_linearWindow.data(), m_inputHistory.data() + startIdx, firstPart * sizeof(float));
+    if (startIdx > 0) {
+        std::memcpy(m_linearWindow.data() + firstPart, m_inputHistory.data(), startIdx * sizeof(float));
+    }
+
     // Check minimum signal energy (RMS threshold) to avoid tracking background noise
     float energy = 0.0f;
     for (uint32_t i = 0; i < m_bufferSize; ++i) {
-        energy += m_inputHistory[i] * m_inputHistory[i];
+        energy += m_linearWindow[i] * m_linearWindow[i];
     }
     const float rms = std::sqrt(energy / static_cast<float>(m_bufferSize));
     if (rms < 0.005f) { // -46 dB noise gate for tuner
@@ -307,13 +348,13 @@ void InstrumentTuner::detectPitchYin() {
         return;
     }
 
-    // Step 1: Difference function
+    // Step 1: Difference function over contiguous pointers with ZERO modulo operations
+    const float* w0 = m_linearWindow.data();
     for (uint32_t tau = 0; tau < halfBuffer; ++tau) {
+        const float* wTau = w0 + tau;
         float sum = 0.0f;
         for (uint32_t j = 0; j < halfBuffer; ++j) {
-            const uint32_t idx1 = (m_writeIndex + j) % m_bufferSize;
-            const uint32_t idx2 = (m_writeIndex + j + tau) % m_bufferSize;
-            const float diff = m_inputHistory[idx1] - m_inputHistory[idx2];
+            const float diff = w0[j] - wTau[j];
             sum += diff * diff;
         }
         m_differenceBuffer[tau] = sum;
@@ -442,7 +483,7 @@ TunerResult InstrumentTuner::currentResult() const {
 
     const int noteIndex = (result.noteNumber % 12 + 12) % 12;
     const int octave = (result.noteNumber / 12) - 1;
-    result.noteName = std::string(NOTE_NAMES[noteIndex]) + std::to_string(octave);
+    result.noteName.setNote(NOTE_NAMES[noteIndex], octave);
 
     // Match against current instrument string tunings
     const float a4Ref = m_a4Reference.load(std::memory_order_relaxed);

@@ -49,21 +49,28 @@ class UpdateChecker {
 public:
     static UpdateChecker& instance();
 
+    UpdateChecker();
+    ~UpdateChecker();
+
+    UpdateChecker(const UpdateChecker&) = delete;
+    UpdateChecker& operator=(const UpdateChecker&) = delete;
+    UpdateChecker(UpdateChecker&&) = delete;
+    UpdateChecker& operator=(UpdateChecker&&) = delete;
+
     void checkForUpdates(bool includeBeta);
     void startDownload();
     bool applyUpdateAndRestart();
     UpdateInfo getInfo() const;
 
 private:
-    UpdateChecker();
-    ~UpdateChecker();
-
-    void runCheck(bool includeBeta);
-    void runDownload();
+    void runCheck(bool includeBeta, std::stop_token st);
+    void runDownload(std::stop_token st);
 
     mutable std::mutex m_mutex;
     UpdateInfo m_info;
     std::atomic<bool> m_isBusy{false};
+    std::jthread m_checkThread;
+    std::jthread m_downloadThread;
 };
 
 } // namespace praccy::ui

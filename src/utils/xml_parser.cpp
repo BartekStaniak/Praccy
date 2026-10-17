@@ -4,6 +4,8 @@
 #include <stack>
 #include <cctype>
 #include <algorithm>
+#include <charconv>
+#include <cstdint>
 
 namespace praccy::utils {
 
@@ -49,7 +51,7 @@ std::string XmlParser::decodeEntities(std::string_view input) {
     for (size_t i = 0; i < input.size(); ++i) {
         if (input[i] == '&') {
             size_t semi = input.find(';', i);
-            if (semi != std::string_view::npos && semi - i <= 10) {
+            if (semi != std::string_view::npos && semi - i <= 16) {
                 std::string_view ent = input.substr(i + 1, semi - (i + 1));
                 if (ent == "amp") { out += '&'; i = semi; continue; }
                 if (ent == "lt") { out += '<'; i = semi; continue; }
@@ -57,17 +59,46 @@ std::string XmlParser::decodeEntities(std::string_view input) {
                 if (ent == "quot") { out += '"'; i = semi; continue; }
                 if (ent == "apos") { out += '\''; i = semi; continue; }
                 if (!ent.empty() && ent[0] == '#') {
-                    // Numeric entity
-                    unsigned long code = 0;
+                    // Numeric entity: &#...; (dec) or &#x...; (hex)
+                    bool isHex = false;
+                    std::string_view digits;
                     if (ent.size() > 1 && (ent[1] == 'x' || ent[1] == 'X')) {
-                        code = std::strtoul(ent.data() + 2, nullptr, 16);
+                        isHex = true;
+                        digits = ent.substr(2);
                     } else {
-                        code = std::strtoul(ent.data() + 1, nullptr, 10);
+                        digits = ent.substr(1);
                     }
-                    if (code > 0 && code <= 0x7F) {
-                        out += static_cast<char>(code);
-                        i = semi;
-                        continue;
+
+                    if (!digits.empty()) {
+                        uint32_t code = 0;
+                        auto [ptr, ec] = std::from_chars(
+                            digits.data(), digits.data() + digits.size(), code, isHex ? 16 : 10);
+                        if (ec == std::errc() && ptr == digits.data() + digits.size()) {
+                            if (code >= 0x0001 && code <= 0x007F) {
+                                out += static_cast<char>(code);
+                                i = semi;
+                                continue;
+                            } else if (code >= 0x0080 && code <= 0x07FF) {
+                                out += static_cast<char>(static_cast<unsigned char>(0xC0u | ((code >> 6) & 0x1Fu)));
+                                out += static_cast<char>(static_cast<unsigned char>(0x80u | (code & 0x3Fu)));
+                                i = semi;
+                                continue;
+                            } else if ((code >= 0x0800 && code <= 0xD7FF) || (code >= 0xE000 && code <= 0xFFFF)) {
+                                out += static_cast<char>(static_cast<unsigned char>(0xE0u | ((code >> 12) & 0x0Fu)));
+                                out += static_cast<char>(static_cast<unsigned char>(0x80u | ((code >> 6) & 0x3Fu)));
+                                out += static_cast<char>(static_cast<unsigned char>(0x80u | (code & 0x3Fu)));
+                                i = semi;
+                                continue;
+                            } else if (code >= 0x10000 && code <= 0x10FFFF) {
+                                out += static_cast<char>(static_cast<unsigned char>(0xF0u | ((code >> 18) & 0x07u)));
+                                out += static_cast<char>(static_cast<unsigned char>(0x80u | ((code >> 12) & 0x3Fu)));
+                                out += static_cast<char>(static_cast<unsigned char>(0x80u | ((code >> 6) & 0x3Fu)));
+                                out += static_cast<char>(static_cast<unsigned char>(0x80u | (code & 0x3Fu)));
+                                i = semi;
+                                continue;
+                            }
+                            // Surrogates (0xD800..0xDFFF) or > 0x10FFFF or code == 0 are rejected/skipped
+                        }
                     }
                 }
             }

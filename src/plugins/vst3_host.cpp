@@ -30,6 +30,11 @@ using InitDllProc = bool (PLUGIN_API *)();
 using ExitDllProc = bool (PLUGIN_API *)();
 using GetFactoryProc = Steinberg::IPluginFactory* (PLUGIN_API *)();
 
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wnon-virtual-dtor"
+#endif
+
 class PraccyMemoryStream : public Steinberg::IBStream {
 public:
     std::vector<char> buffer;
@@ -51,8 +56,14 @@ public:
         *obj = nullptr;
         return Steinberg::kNoInterface;
     }
-    Steinberg::uint32 PLUGIN_API addRef() override { return 1; }
-    Steinberg::uint32 PLUGIN_API release() override { return 1; }
+    std::atomic<uint32_t> m_refCount{1};
+    Steinberg::uint32 PLUGIN_API addRef() override {
+        return m_refCount.fetch_add(1, std::memory_order_relaxed) + 1;
+    }
+    Steinberg::uint32 PLUGIN_API release() override {
+        const uint32_t prev = m_refCount.fetch_sub(1, std::memory_order_acq_rel);
+        return (prev > 0) ? (prev - 1) : 0;
+    }
 
     Steinberg::tresult PLUGIN_API read(void* dest, Steinberg::int32 numBytes, Steinberg::int32* numBytesRead) override {
         if (!dest || numBytes < 0) return Steinberg::kInvalidArgument;
@@ -94,8 +105,14 @@ public:
 
 class PraccyComponentHandler : public Steinberg::Vst::IComponentHandler {
 public:
-    Vst3PluginInstance* owner{nullptr};
+    std::atomic<Vst3PluginInstance*> owner{nullptr};
+    std::atomic<uint32_t> m_refCount{1};
+
     virtual ~PraccyComponentHandler() = default;
+
+    void detachHost() noexcept {
+        owner.store(nullptr, std::memory_order_release);
+    }
 
     Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID _iid, void** obj) override {
         if (memcmp(_iid, Steinberg::Vst::IComponentHandler::iid, sizeof(Steinberg::TUID)) == 0 ||
@@ -107,32 +124,47 @@ public:
         *obj = nullptr;
         return Steinberg::kNoInterface;
     }
-    Steinberg::uint32 PLUGIN_API addRef() override { return 1; }
-    Steinberg::uint32 PLUGIN_API release() override { return 1; }
+    Steinberg::uint32 PLUGIN_API addRef() override {
+        return m_refCount.fetch_add(1, std::memory_order_relaxed) + 1;
+    }
+    Steinberg::uint32 PLUGIN_API release() override {
+        const uint32_t prev = m_refCount.fetch_sub(1, std::memory_order_acq_rel);
+        return (prev > 0) ? (prev - 1) : 0;
+    }
 
     Steinberg::tresult PLUGIN_API beginEdit(Steinberg::Vst::ParamID id) override {
-        if (owner) owner->onGuiBeginEdit(id);
+        auto* o = owner.load(std::memory_order_acquire);
+        if (o) o->onGuiBeginEdit(id);
         return Steinberg::kResultOk;
     }
     Steinberg::tresult PLUGIN_API performEdit(Steinberg::Vst::ParamID id, Steinberg::Vst::ParamValue valueNormalized) override {
-        if (owner) owner->onGuiPerformEdit(id, valueNormalized);
+        auto* o = owner.load(std::memory_order_acquire);
+        if (o) o->onGuiPerformEdit(id, valueNormalized);
         return Steinberg::kResultOk;
     }
     Steinberg::tresult PLUGIN_API endEdit(Steinberg::Vst::ParamID id) override {
-        if (owner) owner->onGuiEndEdit(id);
+        auto* o = owner.load(std::memory_order_acquire);
+        if (o) o->onGuiEndEdit(id);
         return Steinberg::kResultOk;
     }
     Steinberg::tresult PLUGIN_API restartComponent(Steinberg::int32 flags) override {
-        if (owner) owner->onGuiRestartComponent(flags);
+        auto* o = owner.load(std::memory_order_acquire);
+        if (o) o->onGuiRestartComponent(flags);
         return Steinberg::kResultOk;
     }
 };
 
 class PraccyPlugFrame : public Steinberg::IPlugFrame {
 public:
-    HWND parentHwnd{nullptr};
-    bool inResize{false};
+    std::atomic<HWND> parentHwnd{nullptr};
+    std::atomic<bool> inResize{false};
+    std::atomic<uint32_t> m_refCount{1};
+
     virtual ~PraccyPlugFrame() = default;
+
+    void detachHost() noexcept {
+        parentHwnd.store(nullptr, std::memory_order_release);
+    }
 
     Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID _iid, void** obj) override {
         if (memcmp(_iid, Steinberg::IPlugFrame::iid, sizeof(Steinberg::TUID)) == 0 ||
@@ -144,27 +176,36 @@ public:
         *obj = nullptr;
         return Steinberg::kNoInterface;
     }
-    Steinberg::uint32 PLUGIN_API addRef() override { return 1; }
-    Steinberg::uint32 PLUGIN_API release() override { return 1; }
+    Steinberg::uint32 PLUGIN_API addRef() override {
+        return m_refCount.fetch_add(1, std::memory_order_relaxed) + 1;
+    }
+    Steinberg::uint32 PLUGIN_API release() override {
+        const uint32_t prev = m_refCount.fetch_sub(1, std::memory_order_acq_rel);
+        return (prev > 0) ? (prev - 1) : 0;
+    }
 
     Steinberg::tresult PLUGIN_API resizeView(Steinberg::IPlugView* view, Steinberg::ViewRect* newSize) override {
         if (!view || !newSize) return Steinberg::kInvalidArgument;
-        if (inResize) return Steinberg::kResultOk;
-        inResize = true;
-        if (parentHwnd && IsWindow(parentHwnd)) {
-            int newW = newSize->right - newSize->left;
-            int newH = newSize->bottom - newSize->top;
-            RECT wr = {0, 0, newW, newH};
-            AdjustWindowRectEx(&wr, GetWindowLongW(parentHwnd, GWL_STYLE), FALSE, GetWindowLongW(parentHwnd, GWL_EXSTYLE));
-            int totalW = wr.right - wr.left;
-            int totalH = wr.bottom - wr.top;
-            SetWindowPos(parentHwnd, nullptr, 0, 0, totalW, totalH, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-            view->onSize(newSize);
-        }
-        inResize = false;
+        HWND hwnd = parentHwnd.load(std::memory_order_acquire);
+        if (!hwnd || !IsWindow(hwnd)) return Steinberg::kResultOk;
+        bool expected = false;
+        if (!inResize.compare_exchange_strong(expected, true)) return Steinberg::kResultOk;
+        int newW = newSize->right - newSize->left;
+        int newH = newSize->bottom - newSize->top;
+        RECT wr = {0, 0, newW, newH};
+        AdjustWindowRectEx(&wr, static_cast<DWORD>(GetWindowLongW(hwnd, GWL_STYLE)), FALSE, static_cast<DWORD>(GetWindowLongW(hwnd, GWL_EXSTYLE)));
+        int totalW = wr.right - wr.left;
+        int totalH = wr.bottom - wr.top;
+        SetWindowPos(hwnd, nullptr, 0, 0, totalW, totalH, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        view->onSize(newSize);
+        inResize.store(false, std::memory_order_release);
         return Steinberg::kResultOk;
     }
 };
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 struct Vst3PluginInstance::Impl {
     PraccyComponentHandler componentHandler;
@@ -173,7 +214,7 @@ struct Vst3PluginInstance::Impl {
 };
 
 Vst3PluginInstance::Vst3PluginInstance() : m_impl(std::make_unique<Impl>()) {
-    m_impl->componentHandler.owner = this;
+    m_impl->componentHandler.owner.store(this, std::memory_order_release);
 }
 
 void Vst3PluginInstance::onGuiBeginEdit(Steinberg::Vst::ParamID paramId) noexcept {
@@ -318,7 +359,7 @@ std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::
         return nullptr;
     }
 
-    auto instance = std::unique_ptr<Vst3PluginInstance>(new Vst3PluginInstance());
+    auto instance = std::make_unique<Vst3PluginInstance>();
     instance->m_module = hLib;
     instance->m_factory = factory;
     instance->m_path = path;
@@ -439,6 +480,10 @@ std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::
 
 Vst3PluginInstance::~Vst3PluginInstance() {
     closeGui();
+    if (m_impl) {
+        m_impl->componentHandler.detachHost();
+        m_impl->plugFrame.detachHost();
+    }
 
     // 1. Disconnect connection points between component and controller
     if (m_component && m_controller) {
@@ -556,10 +601,16 @@ void Vst3PluginInstance::process(audio::AudioProcessContext& ctx) {
     m_audioThreadId.store(GetCurrentThreadId(), std::memory_order_relaxed);
 
     m_inputParamChanges.clear();
+    // 1. Drain UI thread parameter changes (SPSC)
     std::pair<Steinberg::Vst::ParamID, double> paramChange;
     while (m_paramQueue.try_dequeue(paramChange)) {
         m_inputParamChanges.addParameterChange(paramChange.first, paramChange.second);
     }
+    // 2. Drain audio-thread parameter automation
+    for (size_t i = 0; i < m_audioThreadParamCount; ++i) {
+        m_inputParamChanges.addParameterChange(m_audioThreadParamEvents[i].id, m_audioThreadParamEvents[i].value);
+    }
+    m_audioThreadParamCount = 0;
 
     const uint32_t numSamples = ctx.numSamples;
     Steinberg::Vst::ProcessData data{};
@@ -567,16 +618,31 @@ void Vst3PluginInstance::process(audio::AudioProcessContext& ctx) {
     data.symbolicSampleSize = Steinberg::Vst::kSample32;
     data.numSamples = numSamples;
 
+    // Live transport broadcast (F-12)
     m_impl->processContext.sampleRate = ctx.sampleRate > 0.0 ? ctx.sampleRate : m_sampleRate;
+    m_impl->processContext.tempo = (ctx.tempoBpm > 1.0) ? ctx.tempoBpm : 120.0;
+    m_impl->processContext.timeSigNumerator = (ctx.timeSigNumerator > 0) ? ctx.timeSigNumerator : 4;
+    m_impl->processContext.timeSigDenominator = (ctx.timeSigDenominator > 0) ? ctx.timeSigDenominator : 4;
+    m_impl->processContext.projectTimeSamples = ctx.projectTimeSamples;
     data.processContext = &m_impl->processContext;
 
+    const uint32_t inCh = ctx.input.numChannels();
+    const uint32_t safeInCh = (std::min)(inCh, static_cast<uint32_t>(m_inChannelPtrs.size()));
+    for (uint32_t c = 0; c < safeInCh; ++c) {
+        m_inChannelPtrs[c] = ctx.input.channel(c);
+    }
     Steinberg::Vst::AudioBusBuffers inBus{};
-    inBus.numChannels = ctx.input.numChannels();
-    inBus.channelBuffers32 = const_cast<float**>(ctx.input.rawChannels());
+    inBus.numChannels = static_cast<Steinberg::int32>(inCh);
+    inBus.channelBuffers32 = m_inChannelPtrs.data();
 
+    const uint32_t outCh = ctx.output.numChannels();
+    const uint32_t safeOutCh = (std::min)(outCh, static_cast<uint32_t>(m_outChannelPtrs.size()));
+    for (uint32_t c = 0; c < safeOutCh; ++c) {
+        m_outChannelPtrs[c] = ctx.output.channel(c);
+    }
     Steinberg::Vst::AudioBusBuffers outBus{};
-    outBus.numChannels = ctx.output.numChannels();
-    outBus.channelBuffers32 = const_cast<float**>(ctx.output.rawChannels());
+    outBus.numChannels = static_cast<Steinberg::int32>(outCh);
+    outBus.channelBuffers32 = m_outChannelPtrs.data();
 
     data.numInputs = 1;
     data.inputs = &inBus;
@@ -600,7 +666,9 @@ void Vst3PluginInstance::process(audio::AudioProcessContext& ctx) {
 
     if (!ok) {
         m_faulted.store(true, std::memory_order_release);
-        setFaultReason(getExceptionDescription(exCode));
+        m_faultCode.store(exCode, std::memory_order_release);
+        formatFaultReason(m_faultReasonBuf, "VST3 crash: ", exCode);
+        m_faultReason.store(m_faultReasonBuf, std::memory_order_release);
         ctx.output.copyFrom(ctx.input);
     }
 }
@@ -608,6 +676,7 @@ void Vst3PluginInstance::process(audio::AudioProcessContext& ctx) {
 void Vst3PluginInstance::reset() {
     std::pair<Steinberg::Vst::ParamID, double> dummy;
     while (m_paramQueue.try_dequeue(dummy)) {}
+    m_audioThreadParamCount = 0;
     m_inputParamChanges.clear();
     m_impl->processContext.projectTimeSamples = 0;
     if (m_processor) {
@@ -664,8 +733,18 @@ void Vst3PluginInstance::setParameterValue(uint32_t paramId, float value) {
 void Vst3PluginInstance::setParameterFromAudioThread(uint32_t paramId, float value) noexcept {
     if (m_faulted.load(std::memory_order_relaxed)) return;
     const float normVal = std::clamp(value, 0.0f, 1.0f);
-    // Directly enqueue to param queue without touching m_controller
-    m_paramQueue.try_enqueue({static_cast<Steinberg::Vst::ParamID>(paramId), static_cast<double>(normVal)});
+    const auto vid = static_cast<Steinberg::Vst::ParamID>(paramId);
+    const double dval = static_cast<double>(normVal);
+    // Real-time audio thread automation: write directly into audio-thread array (never touch m_paramQueue)
+    for (size_t i = 0; i < m_audioThreadParamCount; ++i) {
+        if (m_audioThreadParamEvents[i].id == vid) {
+            m_audioThreadParamEvents[i].value = dval;
+            return;
+        }
+    }
+    if (m_audioThreadParamCount < m_audioThreadParamEvents.size()) {
+        m_audioThreadParamEvents[m_audioThreadParamCount++] = {vid, dval};
+    }
 }
 
 float Vst3PluginInstance::getParameterValue(uint32_t paramId) const {
@@ -690,7 +769,7 @@ bool Vst3PluginInstance::openGui(HWND parentHwnd) {
         }
 
         if (m_plugView && m_plugView->isPlatformTypeSupported(Steinberg::kPlatformTypeHWND) == Steinberg::kResultOk) {
-            m_impl->plugFrame.parentHwnd = parentHwnd;
+            m_impl->plugFrame.parentHwnd.store(parentHwnd, std::memory_order_release);
             m_plugView->setFrame(&m_impl->plugFrame);
 
             if (m_plugView->attached(reinterpret_cast<void*>(parentHwnd), Steinberg::kPlatformTypeHWND) == Steinberg::kResultOk) {
@@ -712,7 +791,9 @@ bool Vst3PluginInstance::openGui(HWND parentHwnd) {
 
     if (!ok) {
         m_faulted.store(true, std::memory_order_release);
-        setFaultReason(getExceptionDescription(exCode));
+        m_faultCode.store(exCode, std::memory_order_release);
+        formatFaultReason(m_faultReasonBuf, "VST3 GUI error: ", exCode);
+        m_faultReason.store(m_faultReasonBuf, std::memory_order_release);
         return false;
     }
 
@@ -763,7 +844,9 @@ void Vst3PluginInstance::closeGui() {
         });
         m_plugView = nullptr;
         m_guiParentHwnd = nullptr;
-        m_impl->plugFrame.parentHwnd = nullptr;
+        if (m_impl) {
+            m_impl->plugFrame.detachHost();
+        }
     }
 }
 

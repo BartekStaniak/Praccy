@@ -18,14 +18,23 @@ TunerSettingsModal::TunerSettingsModal(tools::InstrumentTuner& tuner)
     : m_tuner(tuner)
 {
     initNoteOptions();
+    updateCachedTuning();
 }
 
 TunerSettingsModal::~TunerSettingsModal() = default;
+
+void TunerSettingsModal::updateCachedTuning() {
+    const auto& cfg = m_tuner.config();
+    m_cachedStringNotes = cfg.getStringInfoList();
+    m_cachedFullTuningTitle = cfg.fullTuningTitle();
+    m_cachedA4Reference = m_tuner.a4Reference();
+}
 
 void TunerSettingsModal::open() {
     m_isOpen = true;
     m_pitchEditingText = false;
     m_lastQuickPitchStandard = m_tuner.a4Reference();
+    updateCachedTuning();
 }
 
 void TunerSettingsModal::close() {
@@ -104,8 +113,8 @@ void TunerSettingsModal::renderPitchStandardSection() {
 
     ImGui::AlignTextToFramePadding();
     ImGui::Text("Pitch Standard:");
-    ImGui::SameLine(130.0f);
-    ImGui::SetNextItemWidth(std::max(140.0f, ImGui::GetContentRegionAvail().x - 8.0f));
+    ImGui::SameLine(ui::px(130.0f));
+    ImGui::SetNextItemWidth(std::max(ui::px(140.0f), ImGui::GetContentRegionAvail().x - ui::px(8.0f)));
     if (ImGui::BeginCombo("##QuickPitchStandardsCombo", previewBuf)) {
         for (int i = 0; i < static_cast<int>(IM_ARRAYSIZE(kStandards)); ++i) {
             const bool isSelected = (matchedIdx == i);
@@ -113,6 +122,7 @@ void TunerSettingsModal::renderPitchStandardSection() {
                 m_tuner.setA4Reference(kStandards[i].freq);
                 m_lastQuickPitchStandard = kStandards[i].freq;
                 m_pitchEditingText = false;
+                updateCachedTuning();
             }
             if (isSelected) {
                 ImGui::SetItemDefaultFocus();
@@ -126,8 +136,8 @@ void TunerSettingsModal::renderPitchStandardSection() {
     // 2. Middle A Slider with click-to-edit float input and double-click reset
     ImGui::AlignTextToFramePadding();
     ImGui::Text("Middle A (A4):");
-    ImGui::SameLine(130.0f);
-    ImGui::SetNextItemWidth(std::max(140.0f, ImGui::GetContentRegionAvail().x - 8.0f));
+    ImGui::SameLine(ui::px(130.0f));
+    ImGui::SetNextItemWidth(std::max(ui::px(140.0f), ImGui::GetContentRegionAvail().x - ui::px(8.0f)));
 
     if (m_pitchEditingText) {
         ImGui::SetKeyboardFocusHere();
@@ -137,11 +147,13 @@ void TunerSettingsModal::renderPitchStandardSection() {
             m_tuner.setA4Reference(std::clamp(inputVal, 400.0f, 480.0f));
             m_pitchEditingText = false;
             committed = true;
+            updateCachedTuning();
         }
         if (!committed) {
             if (ImGui::IsItemDeactivated()) {
                 m_tuner.setA4Reference(std::clamp(inputVal, 400.0f, 480.0f));
                 m_pitchEditingText = false;
+                updateCachedTuning();
             } else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
                 m_pitchEditingText = false;
             }
@@ -149,11 +161,13 @@ void TunerSettingsModal::renderPitchStandardSection() {
         if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             m_tuner.setA4Reference(m_lastQuickPitchStandard);
             m_pitchEditingText = false;
+            updateCachedTuning();
         }
     } else {
         float sliderVal = currentA4;
         if (ResettableSliderFloat("##PitchStandardSlider", &sliderVal, 400.0f, 480.0f, m_lastQuickPitchStandard, "%.1f Hz", ImGuiSliderFlags_AlwaysClamp)) {
             m_tuner.setA4Reference(sliderVal);
+            updateCachedTuning();
         }
 
         const bool isHovered = ImGui::IsItemHovered();
@@ -163,6 +177,7 @@ void TunerSettingsModal::renderPitchStandardSection() {
         if (isDoubleClicked) {
             m_tuner.setA4Reference(m_lastQuickPitchStandard);
             m_pitchEditingText = false;
+            updateCachedTuning();
         } else if (isDeactivated) {
             // User clicked on slider without dragging -> switch to float text input
             if (ImGui::GetIO().MouseDragMaxDistanceSqr[0] < 9.0f) {
@@ -189,7 +204,7 @@ void TunerSettingsModal::renderInstrumentSection() {
     // 1. Instrument Type Selector (string counts removed from names)
     ImGui::AlignTextToFramePadding();
     ImGui::Text("Instrument Type:");
-    ImGui::SameLine(135.0f);
+    ImGui::SameLine(ui::px(135.0f));
 
     const char* instNames[] = {
         "Guitar",
@@ -202,10 +217,11 @@ void TunerSettingsModal::renderInstrumentSection() {
     };
     int currentInstIdx = static_cast<int>(cfg.instrument);
 
-    ImGui::SetNextItemWidth(std::max(140.0f, ImGui::GetContentRegionAvail().x - 8.0f));
+    ImGui::SetNextItemWidth(std::max(ui::px(140.0f), ImGui::GetContentRegionAvail().x - ui::px(8.0f)));
     if (ImGui::Combo("##InstrumentTypeCombo", &currentInstIdx, instNames, IM_ARRAYSIZE(instNames))) {
         cfg.setInstrument(static_cast<tools::InstrumentType>(currentInstIdx));
         m_tuner.setConfig(cfg);
+        updateCachedTuning();
     }
 
     ImGui::Spacing();
@@ -213,23 +229,30 @@ void TunerSettingsModal::renderInstrumentSection() {
     // 2. Amount of Strings Dropdown
     ImGui::AlignTextToFramePadding();
     ImGui::Text("Amount of Strings:");
-    ImGui::SameLine(135.0f);
+    ImGui::SameLine(ui::px(135.0f));
 
-    std::vector<int> availableCounts;
+    int availableCounts[12]{};
+    size_t nCounts = 0;
     if (cfg.instrument == tools::InstrumentType::ElectricMandolin) {
-        availableCounts = { 4, 5, 8 };
+        availableCounts[0] = 4;
+        availableCounts[1] = 5;
+        availableCounts[2] = 8;
+        nCounts = 3;
     } else if (cfg.instrument == tools::InstrumentType::LapSteel) {
-        availableCounts = { 6, 8 };
+        availableCounts[0] = 6;
+        availableCounts[1] = 8;
+        nCounts = 2;
     } else {
-        for (int s = cfg.minStrings(); s <= cfg.maxStrings(); ++s) {
-            availableCounts.push_back(s);
+        const int minS = cfg.minStrings();
+        const int maxS = cfg.maxStrings();
+        for (int s = minS; s <= maxS && nCounts < 12; ++s) {
+            availableCounts[nCounts++] = s;
         }
     }
 
     int currentStrCountIdx = 0;
     char strCountLabels[12][24]{};
     const char* strCountCStrs[12]{};
-    const size_t nCounts = std::min<size_t>(availableCounts.size(), 12);
     for (size_t i = 0; i < nCounts; ++i) {
         std::snprintf(strCountLabels[i], sizeof(strCountLabels[i]), "%d Strings", availableCounts[i]);
         strCountCStrs[i] = strCountLabels[i];
@@ -238,10 +261,11 @@ void TunerSettingsModal::renderInstrumentSection() {
         }
     }
 
-    ImGui::SetNextItemWidth(std::max(140.0f, ImGui::GetContentRegionAvail().x - 8.0f));
+    ImGui::SetNextItemWidth(std::max(ui::px(140.0f), ImGui::GetContentRegionAvail().x - ui::px(8.0f)));
     if (ImGui::Combo("##StringCountCombo", &currentStrCountIdx, strCountCStrs, static_cast<int>(nCounts))) {
         cfg.setStringCount(availableCounts[currentStrCountIdx]);
         m_tuner.setConfig(cfg);
+        updateCachedTuning();
     }
 }
 
@@ -256,23 +280,24 @@ void TunerSettingsModal::renderPresetTuningSection() {
     // 1. Root string note selector
     ImGui::AlignTextToFramePadding();
     ImGui::Text("Root String Note:");
-    ImGui::SameLine(150.0f);
+    ImGui::SameLine(ui::px(150.0f));
 
     const char* rootNotes[] = {
         "C", "C# / Db", "D", "D# / Eb", "E", "F", "F# / Gb", "G", "G# / Ab", "A", "A# / Bb", "B"
     };
     int rootIdx = cfg.rootNoteIndex;
-    ImGui::SetNextItemWidth(140.0f);
+    ImGui::SetNextItemWidth(ui::px(140.0f));
     if (ImGui::Combo("##TuningRootCombo", &rootIdx, rootNotes, IM_ARRAYSIZE(rootNotes))) {
         cfg.setTuningPreset(cfg.tuningType, rootIdx);
         m_tuner.setConfig(cfg);
+        updateCachedTuning();
     }
 
     // 2. Tuning selector (label says "Tuning:" instead of "Tuning Type:")
-    ImGui::SameLine(320.0f);
+    ImGui::SameLine(ui::px(320.0f));
     ImGui::AlignTextToFramePadding();
     ImGui::Text("Tuning:");
-    ImGui::SameLine(390.0f);
+    ImGui::SameLine(ui::px(390.0f));
 
     const char* typeNames[] = {
         "Standard",
@@ -288,12 +313,13 @@ void TunerSettingsModal::renderPresetTuningSection() {
         "DADGAD"
     };
     int typeIdx = static_cast<int>(cfg.tuningType);
-    ImGui::SetNextItemWidth(170.0f);
+    ImGui::SetNextItemWidth(ui::px(170.0f));
     if (ImGui::Combo("##TuningTypeCombo", &typeIdx, typeNames, IM_ARRAYSIZE(typeNames))) {
         auto newType = static_cast<tools::TuningType>(typeIdx);
         int newRoot = tools::TunerConfig::defaultRootNoteIndex(cfg.instrument, cfg.stringCount, newType);
         cfg.setTuningPreset(newType, newRoot);
         m_tuner.setConfig(cfg);
+        updateCachedTuning();
     }
 
     ImGui::Spacing();
@@ -304,12 +330,12 @@ void TunerSettingsModal::renderPresetTuningSection() {
     ImGui::TextColored(tokens.text.accent.vec4, "Calculated Target Strings Preview (Live Tuner Active):");
     ImGui::Spacing();
 
-    auto strings = cfg.getStringInfoList();
+    const auto& strings = m_cachedStringNotes;
     ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, Spec::tableCellPadding());
     if (ImGui::BeginTable("PresetStringsTable", 4, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {
-        ImGui::TableSetupColumn("String", ImGuiTableColumnFlags_WidthFixed, 130.0f);
-        ImGui::TableSetupColumn("Target Note", ImGuiTableColumnFlags_WidthFixed, 100.0f);
-        ImGui::TableSetupColumn("Frequency", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+        ImGui::TableSetupColumn("String", ImGuiTableColumnFlags_WidthFixed, ui::px(130.0f));
+        ImGui::TableSetupColumn("Target Note", ImGuiTableColumnFlags_WidthFixed, ui::px(100.0f));
+        ImGui::TableSetupColumn("Frequency", ImGuiTableColumnFlags_WidthFixed, ui::px(110.0f));
         ImGui::TableSetupColumn("Live Tuner Feedback", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
 
@@ -383,9 +409,10 @@ void TunerSettingsModal::renderPresetTuningSection() {
     ImGui::PopStyleVar();
 
     ImGui::Spacing();
-    if (CenteredButton("Switch to Custom Mode with These Notes", ImVec2(320.0f, Metrics::kButtonHeight))) {
+    if (CenteredButton("Switch to Custom Mode with These Notes", ImVec2(ui::px(320.0f), Metrics::kButtonHeight))) {
         cfg.mode = tools::TuningMode::Custom;
         m_tuner.setConfig(cfg);
+        updateCachedTuning();
     }
 }
 
@@ -397,13 +424,13 @@ void TunerSettingsModal::renderCustomTuningSection() {
     ImGui::TextColored(tokens.text.secondary.vec4, "Select the note and octave for each string independently:");
     ImGui::Spacing();
 
-    auto strings = cfg.getStringInfoList();
+    const auto& strings = m_cachedStringNotes;
     ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, Spec::tableCellPadding());
     if (ImGui::BeginTable("CustomStringsTable", 5, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {
-        ImGui::TableSetupColumn("String", ImGuiTableColumnFlags_WidthFixed, 130.0f);
-        ImGui::TableSetupColumn("Note Dropdown", ImGuiTableColumnFlags_WidthFixed, 130.0f);
-        ImGui::TableSetupColumn("Semitone Step", ImGuiTableColumnFlags_WidthFixed, 120.0f);
-        ImGui::TableSetupColumn("Octave Step", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+        ImGui::TableSetupColumn("String", ImGuiTableColumnFlags_WidthFixed, ui::px(130.0f));
+        ImGui::TableSetupColumn("Note Dropdown", ImGuiTableColumnFlags_WidthFixed, ui::px(130.0f));
+        ImGui::TableSetupColumn("Semitone Step", ImGuiTableColumnFlags_WidthFixed, ui::px(120.0f));
+        ImGui::TableSetupColumn("Octave Step", ImGuiTableColumnFlags_WidthFixed, ui::px(120.0f));
         ImGui::TableSetupColumn("Target & Live Tuning", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
 
@@ -448,7 +475,7 @@ void TunerSettingsModal::renderCustomTuningSection() {
             Spec::alignTableCellCenter(Spec::comboHeight(), Spec::tableRowHeight());
             char comboId[32];
             std::snprintf(comboId, sizeof(comboId), "##StrNoteCombo_%zu", i);
-            ImGui::SetNextItemWidth(110.0f);
+            ImGui::SetNextItemWidth(ui::px(110.0f));
 
             if (ImGui::BeginCombo(comboId, str.noteName.c_str())) {
                 for (const auto& opt : m_noteOptions) {
@@ -456,6 +483,7 @@ void TunerSettingsModal::renderCustomTuningSection() {
                     if (ImGui::Selectable(opt.label.c_str(), isSelected)) {
                         cfg.setCustomStringNote(i, opt.midiNote);
                         m_tuner.setConfig(cfg);
+                        updateCachedTuning();
                     }
                     if (isSelected) {
                         ImGui::SetItemDefaultFocus();
@@ -471,14 +499,16 @@ void TunerSettingsModal::renderCustomTuningSection() {
             std::snprintf(minusId, sizeof(minusId), "-1 st##Minus_%zu", i);
             std::snprintf(plusId, sizeof(plusId), "+1 st##Plus_%zu", i);
 
-            if (CenteredButton(minusId, ImVec2(52.0f, Spec::buttonHeight()))) {
+            if (CenteredButton(minusId, ImVec2(ui::px(52.0f), Spec::buttonHeight()))) {
                 cfg.setCustomStringNote(i, str.midiNote - 1);
                 m_tuner.setConfig(cfg);
+                updateCachedTuning();
             }
-            ImGui::SameLine(0, 4.0f);
-            if (CenteredButton(plusId, ImVec2(52.0f, Spec::buttonHeight()))) {
+            ImGui::SameLine(0, ui::px(4.0f));
+            if (CenteredButton(plusId, ImVec2(ui::px(52.0f), Spec::buttonHeight()))) {
                 cfg.setCustomStringNote(i, str.midiNote + 1);
                 m_tuner.setConfig(cfg);
+                updateCachedTuning();
             }
 
             // 4. Octave +/- buttons (Vertically centered)
@@ -488,14 +518,16 @@ void TunerSettingsModal::renderCustomTuningSection() {
             std::snprintf(octMinusId, sizeof(octMinusId), "- Oct##OctMinus_%zu", i);
             std::snprintf(octPlusId, sizeof(octPlusId), "+ Oct##OctPlus_%zu", i);
 
-            if (CenteredButton(octMinusId, ImVec2(52.0f, Spec::buttonHeight()))) {
+            if (CenteredButton(octMinusId, ImVec2(ui::px(52.0f), Spec::buttonHeight()))) {
                 cfg.setCustomStringNote(i, str.midiNote - 12);
                 m_tuner.setConfig(cfg);
+                updateCachedTuning();
             }
-            ImGui::SameLine(0, 4.0f);
-            if (CenteredButton(octPlusId, ImVec2(52.0f, Spec::buttonHeight()))) {
+            ImGui::SameLine(0, ui::px(4.0f));
+            if (CenteredButton(octPlusId, ImVec2(ui::px(52.0f), Spec::buttonHeight()))) {
                 cfg.setCustomStringNote(i, str.midiNote + 12);
                 m_tuner.setConfig(cfg);
+                updateCachedTuning();
             }
 
             // 5. Monospace frequency readout & live feedback (Vertically centered)
@@ -520,10 +552,11 @@ void TunerSettingsModal::renderCustomTuningSection() {
     ImGui::PopStyleVar();
 
     ImGui::Spacing();
-    if (CenteredButton("Reset Strings to Preset", ImVec2(180.0f, Spec::buttonHeight()))) {
+    if (CenteredButton("Reset Strings to Preset", ImVec2(ui::px(180.0f), Spec::buttonHeight()))) {
         cfg.applyPreset();
         cfg.mode = tools::TuningMode::Preset;
         m_tuner.setConfig(cfg);
+        updateCachedTuning();
     }
 }
 
@@ -540,15 +573,15 @@ void TunerSettingsModal::render() {
     }
 
     const ImGuiViewport* vp = ImGui::GetMainViewport();
-    const float initW = vp ? std::clamp(vp->Size.x * 0.65f, 680.0f, 920.0f) : 700.0f;
-    const float initH = vp ? std::clamp(vp->Size.y * 0.72f, 540.0f, 760.0f) : 580.0f;
+    const float initW = vp ? std::clamp(vp->Size.x * 0.65f, ui::px(680.0f), ui::px(920.0f)) : ui::px(700.0f);
+    const float initH = vp ? std::clamp(vp->Size.y * 0.72f, ui::px(540.0f), ui::px(760.0f)) : ui::px(580.0f);
 
     ImGui::OpenPopup("Tuner Settings##Modal");
     ImGui::SetNextWindowSize(ImVec2(initW, initH), ImGuiCond_Appearing);
     if (vp) {
-        ImGui::SetNextWindowSizeConstraints(ImVec2(580.0f, 440.0f), ImVec2(vp->Size.x * 0.95f, vp->Size.y * 0.95f));
+        ImGui::SetNextWindowSizeConstraints(ImVec2(ui::px(580.0f), ui::px(440.0f)), ImVec2(vp->Size.x * 0.95f, vp->Size.y * 0.95f));
     }
-    ImGui::SetNextWindowPos(vp ? vp->GetCenter() : ImVec2(100.0f, 100.0f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowPos(vp ? vp->GetCenter() : ImVec2(ui::px(100.0f), ui::px(100.0f)), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
 
     const auto& tokens = themeTokens();
     ImGui::PushStyleColor(ImGuiCol_WindowBg, tokens.surfaces.popupBg.vec4);
@@ -564,7 +597,7 @@ void TunerSettingsModal::render() {
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ColorToken::transparent().vec4);
         if (ImGui::BeginChild("TunerSettingsContentRegion", ImVec2(0, contentHeight), false)) {
             // Side-by-side 2-column top layout with generous 14px column padding so text never touches the divider
-            ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(14.0f, 4.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(ui::px(14.0f), ui::px(4.0f)));
             if (ImGui::BeginTable("##TunerTopConfigGrid", 2, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_BordersInnerV)) {
                 ImGui::TableNextColumn();
                 renderPitchStandardSection();
@@ -587,14 +620,15 @@ void TunerSettingsModal::render() {
 
             ImGui::AlignTextToFramePadding();
             ImGui::Text("Tuning Mode:");
-            ImGui::SameLine(150.0f);
-            ImGui::SetNextItemWidth(280.0f);
+            ImGui::SameLine(ui::px(150.0f));
+            ImGui::SetNextItemWidth(ui::px(280.0f));
 
             const char* modeNames[] = { "Presets", "Custom" };
             int modeIdx = (cfg.mode == tools::TuningMode::Custom) ? 1 : 0;
             if (ImGui::Combo("##TuningModeCombo", &modeIdx, modeNames, IM_ARRAYSIZE(modeNames))) {
                 cfg.mode = (modeIdx == 1) ? tools::TuningMode::Custom : tools::TuningMode::Preset;
                 m_tuner.setConfig(cfg);
+                updateCachedTuning();
             }
 
             if (cfg.mode == tools::TuningMode::Preset) {
@@ -610,13 +644,15 @@ void TunerSettingsModal::render() {
         ImGui::Spacing();
 
         // Footer: Active tuning badge and Done button
-        const auto& cfg = m_tuner.config();
-        std::string summary = cfg.fullTuningTitle() + "  |  A4 = " + std::to_string(static_cast<int>(std::round(m_tuner.a4Reference()))) + " Hz";
+        char summary[128];
+        std::snprintf(summary, sizeof(summary), "%s  |  A4 = %d Hz",
+                      m_cachedFullTuningTitle.c_str(),
+                      static_cast<int>(std::round(m_tuner.a4Reference())));
         ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(tokens.text.muted.vec4, "%s", summary.c_str());
+        ImGui::TextColored(tokens.text.muted.vec4, "%s", summary);
 
-        ImGui::SameLine(ImGui::GetWindowWidth() - 110.0f);
-        if (CenteredButton("Done", ImVec2(90, Metrics::buttonHeight()))) {
+        ImGui::SameLine(ImGui::GetWindowWidth() - ui::px(110.0f));
+        if (CenteredButton("Done", ImVec2(ui::px(90.0f), Metrics::buttonHeight()))) {
             close();
             ImGui::CloseCurrentPopup();
         }

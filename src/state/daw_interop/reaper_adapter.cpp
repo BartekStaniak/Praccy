@@ -113,13 +113,60 @@ std::optional<ScenePreset> ReaperAdapter::parseToScene(const std::filesystem::pa
     scene.timeSigNumerator = 4;
     scene.timeSigDenominator = 4;
 
+    struct BranchMeta {
+        std::string name;
+        float gainDb{0.0f};
+        float pan{0.0f};
+        bool muted{false};
+        bool solo{false};
+        bool phaseInvert{false};
+        bool hasData{false};
+    };
+
     struct ParsedSlot {
         PluginSlotPreset slot;
         bool hasPinmap{false};
         uint64_t inPins{0};
         uint64_t outPins{0};
         bool isBranchB{false};
+        BranchMeta branchMeta;
     };
+
+    auto parseBranchMeta = [](std::string_view metaLine, BranchMeta& meta) {
+        meta = BranchMeta{};
+        meta.hasData = true;
+        auto getVal = [&](std::string_view key) -> std::string {
+            size_t pos = metaLine.find(key);
+            if (pos == std::string_view::npos) return "";
+            pos += key.size();
+            if (pos >= metaLine.size()) return "";
+            if (metaLine[pos] == '"') {
+                size_t endQ = metaLine.find('"', pos + 1);
+                if (endQ != std::string_view::npos) {
+                    return std::string(metaLine.substr(pos + 1, endQ - (pos + 1)));
+                }
+            }
+            size_t endW = pos;
+            while (endW < metaLine.size() && !std::isspace(static_cast<unsigned char>(metaLine[endW]))) endW++;
+            return std::string(metaLine.substr(pos, endW - pos));
+        };
+        std::string n = getVal("name=");
+        if (!n.empty()) meta.name = n;
+        std::string g = getVal("gainDb=");
+        if (!g.empty()) meta.gainDb = std::strtof(g.c_str(), nullptr);
+        std::string p = getVal("pan=");
+        if (!p.empty()) meta.pan = std::strtof(p.c_str(), nullptr);
+        std::string m = getVal("muted=");
+        if (!m.empty()) meta.muted = (m == "1" || m == "true");
+        std::string s = getVal("solo=");
+        if (!s.empty()) meta.solo = (s == "1" || s == "true");
+        std::string pi = getVal("phaseInvert=");
+        if (!pi.empty()) meta.phaseInvert = (pi == "1" || pi == "true");
+    };
+
+    BranchMeta currentBranchAMeta;
+    BranchMeta currentBranchBMeta;
+    std::string pendingSlotType;
 
     std::vector<ParsedSlot> parsedSlots;
     std::string line;
@@ -145,9 +192,38 @@ std::optional<ScenePreset> ReaperAdapter::parseToScene(const std::filesystem::pa
             continue;
         }
 
+        if (trimmed.starts_with("; PRACCY_BRANCH_A") || trimmed.starts_with("// PRACCY_BRANCH_A")) {
+            parseBranchMeta(trimmed, currentBranchAMeta);
+            continue;
+        }
+
+        if (trimmed.starts_with("; PRACCY_BRANCH_B") || trimmed.starts_with("// PRACCY_BRANCH_B")) {
+            parseBranchMeta(trimmed, currentBranchBMeta);
+            continue;
+        }
+
+        if (trimmed.starts_with("; PRACCY_TYPE") || trimmed.starts_with("// PRACCY_TYPE")) {
+            size_t sepPos = trimmed.find_first_of("=:\t ");
+            if (sepPos != std::string_view::npos) {
+                size_t valStart = trimmed.find_first_not_of("=:\t ", sepPos);
+                if (valStart != std::string_view::npos) {
+                    pendingSlotType = std::string(trimmed.substr(valStart));
+                    while (!pendingSlotType.empty() && std::isspace(static_cast<unsigned char>(pendingSlotType.back()))) {
+                        pendingSlotType.pop_back();
+                    }
+                }
+            }
+            continue;
+        }
+
         if (trimmed.starts_with("<VST") || trimmed.starts_with("<CLAP")) {
             ParsedSlot ps;
-            ps.slot.type = trimmed.starts_with("<VST") ? "VST3" : "CLAP";
+            if (!pendingSlotType.empty()) {
+                ps.slot.type = pendingSlotType;
+                pendingSlotType.clear();
+            } else {
+                ps.slot.type = trimmed.starts_with("<VST") ? "VST3" : "CLAP";
+            }
 
             // Extract plugin name and bundle name: <VST "name" "bundle" ...
             size_t q1 = trimmed.find('"');
@@ -155,9 +231,16 @@ std::optional<ScenePreset> ReaperAdapter::parseToScene(const std::filesystem::pa
                 size_t q2 = trimmed.find('"', q1 + 1);
                 if (q2 != std::string_view::npos) {
                     std::string rawName = std::string(trimmed.substr(q1 + 1, q2 - (q1 + 1)));
-                    // Strip "VST3: " or "CLAP: " prefix if present
-                    if (rawName.starts_with("VST3: ")) rawName = rawName.substr(6);
-                    else if (rawName.starts_with("CLAP: ")) rawName = rawName.substr(6);
+                    // Strip "VST3: ", "CLAP: ", or "BuiltIn: " prefix if present
+                    if (rawName.starts_with("VST3: ")) {
+                        rawName = rawName.substr(6);
+                    } else if (rawName.starts_with("CLAP: ")) {
+                        rawName = rawName.substr(6);
+                        ps.slot.type = "CLAP";
+                    } else if (rawName.starts_with("BuiltIn: ")) {
+                        rawName = rawName.substr(9);
+                        ps.slot.type = "BuiltIn";
+                    }
                     ps.slot.name = rawName;
 
                     size_t q3 = trimmed.find('"', q2 + 1);
@@ -211,13 +294,45 @@ std::optional<ScenePreset> ReaperAdapter::parseToScene(const std::filesystem::pa
                     if ((ps.inPins & 12) != 0 || (ps.outPins & 12) != 0) { // 4|8
                         ps.isBranchB = true;
                     }
-                } else if (pTrimmed.starts_with("<") || pTrimmed == ">") {
-                    // Start of next plugin or end of chain: buffer line and finish slot
+                } else if (pTrimmed.starts_with("PRACCY_TYPE")) {
+                    size_t tPos = 11;
+                    while (tPos < pTrimmed.size() && (std::isspace(static_cast<unsigned char>(pTrimmed[tPos])) || pTrimmed[tPos] == '=')) tPos++;
+                    if (tPos < pTrimmed.size()) {
+                        std::string t = std::string(pTrimmed.substr(tPos));
+                        while (!t.empty() && std::isspace(static_cast<unsigned char>(t.back()))) t.pop_back();
+                        if (!t.empty()) ps.slot.type = t;
+                    }
+                } else if (pTrimmed.starts_with("PRACCY_PATH")) {
+                    size_t pPos = 11;
+                    while (pPos < pTrimmed.size() && (std::isspace(static_cast<unsigned char>(pTrimmed[pPos])) || pTrimmed[pPos] == '=')) pPos++;
+                    if (pPos < pTrimmed.size()) {
+                        std::string p = std::string(pTrimmed.substr(pPos));
+                        while (!p.empty() && std::isspace(static_cast<unsigned char>(p.back()))) p.pop_back();
+                        if (!p.empty()) ps.slot.path = p;
+                    }
+                } else if (pTrimmed.starts_with("PRACCY_CLAP_ID")) {
+                    size_t cPos = 14;
+                    while (cPos < pTrimmed.size() && (std::isspace(static_cast<unsigned char>(pTrimmed[cPos])) || pTrimmed[cPos] == '=')) cPos++;
+                    if (cPos < pTrimmed.size()) {
+                        std::string cid = std::string(pTrimmed.substr(cPos));
+                        while (!cid.empty() && std::isspace(static_cast<unsigned char>(cid.back()))) cid.pop_back();
+                        if (!cid.empty()) ps.slot.clapId = cid;
+                    }
+                } else if (pTrimmed.starts_with("<") || pTrimmed == ">" ||
+                           pTrimmed.starts_with(";") || pTrimmed.starts_with("//")) {
+                    // Start of next plugin, comment/metadata, or end of chain: buffer line and finish slot
                     pendingLine = line;
                     break;
                 }
             }
 
+            if (ps.hasPinmap) {
+                if (ps.isBranchB) {
+                    ps.branchMeta = currentBranchBMeta;
+                } else {
+                    ps.branchMeta = currentBranchAMeta;
+                }
+            }
             parsedSlots.push_back(std::move(ps));
         }
     }
@@ -249,8 +364,24 @@ std::optional<ScenePreset> ReaperAdapter::parseToScene(const std::filesystem::pa
 
             while (idx < parsedSlots.size() && parsedSlots[idx].hasPinmap) {
                 if (parsedSlots[idx].isBranchB) {
+                    if (parsedSlots[idx].branchMeta.hasData) {
+                        if (!parsedSlots[idx].branchMeta.name.empty()) branchB.name = parsedSlots[idx].branchMeta.name;
+                        branchB.gainDb = parsedSlots[idx].branchMeta.gainDb;
+                        branchB.pan = parsedSlots[idx].branchMeta.pan;
+                        branchB.muted = parsedSlots[idx].branchMeta.muted;
+                        branchB.solo = parsedSlots[idx].branchMeta.solo;
+                        branchB.phaseInvert = parsedSlots[idx].branchMeta.phaseInvert;
+                    }
                     branchB.slots.push_back(std::move(parsedSlots[idx].slot));
                 } else {
+                    if (parsedSlots[idx].branchMeta.hasData) {
+                        if (!parsedSlots[idx].branchMeta.name.empty()) branchA.name = parsedSlots[idx].branchMeta.name;
+                        branchA.gainDb = parsedSlots[idx].branchMeta.gainDb;
+                        branchA.pan = parsedSlots[idx].branchMeta.pan;
+                        branchA.muted = parsedSlots[idx].branchMeta.muted;
+                        branchA.solo = parsedSlots[idx].branchMeta.solo;
+                        branchA.phaseInvert = parsedSlots[idx].branchMeta.phaseInvert;
+                    }
                     branchA.slots.push_back(std::move(parsedSlots[idx].slot));
                 }
                 idx++;
@@ -277,9 +408,30 @@ bool ReaperAdapter::exportFromScene(const ScenePreset& scene, const std::filesys
     out << "  BYPASS 0 0 0\n";
 
     auto writeSlot = [&](const PluginSlotPreset& slot, bool hasPinmap, uint64_t inPins, uint64_t outPins) {
-        out << "  <VST \"VST3: " << slot.name << "\" \""
-            << (slot.bundleFileName.empty() ? (slot.name + ".vst3") : slot.bundleFileName)
-            << "\" 0 \"\" 0\n";
+        std::string plugType = slot.type;
+        if (plugType.empty()) {
+            plugType = "VST3";
+        }
+
+        std::string displayName = slot.name;
+        if (displayName.starts_with("VST3: ")) displayName = displayName.substr(6);
+        else if (displayName.starts_with("CLAP: ")) displayName = displayName.substr(6);
+        else if (displayName.starts_with("BuiltIn: ")) displayName = displayName.substr(9);
+
+        if (plugType == "CLAP") {
+            out << "  <CLAP \"CLAP: " << displayName << "\" \""
+                << (slot.bundleFileName.empty() ? (displayName + ".clap") : slot.bundleFileName)
+                << "\" 0 \"\" 0\n";
+        } else if (plugType == "BuiltIn") {
+            out << "  ; PRACCY_TYPE=BuiltIn\n";
+            out << "  <VST \"BuiltIn: " << displayName << "\" \""
+                << (slot.bundleFileName.empty() ? (displayName + ".vst3") : slot.bundleFileName)
+                << "\" 0 \"\" 0\n";
+        } else {
+            out << "  <VST \"VST3: " << displayName << "\" \""
+                << (slot.bundleFileName.empty() ? (displayName + ".vst3") : slot.bundleFileName)
+                << "\" 0 \"\" 0\n";
+        }
 
         // Pack envelope & base64
         std::vector<uint8_t> emptyCtrl;
@@ -296,6 +448,13 @@ bool ReaperAdapter::exportFromScene(const ScenePreset& scene, const std::filesys
         if (hasPinmap) {
             out << "  PINMAP " << inPins << " " << outPins << "\n";
         }
+        out << "  PRACCY_TYPE " << plugType << "\n";
+        if (!slot.path.empty()) {
+            out << "  PRACCY_PATH " << slot.path << "\n";
+        }
+        if (!slot.clapId.empty()) {
+            out << "  PRACCY_CLAP_ID " << slot.clapId << "\n";
+        }
         out << "  WAK 0 0\n";
     };
 
@@ -305,13 +464,29 @@ bool ReaperAdapter::exportFromScene(const ScenePreset& scene, const std::filesys
         } else if (node.kind == NodePreset::Kind::ParallelBlock) {
             // Branch A
             if (!node.branches.empty()) {
-                for (const auto& slot : node.branches[0].slots) {
+                const auto& bA = node.branches[0];
+                out << "  ; PRACCY_BRANCH_A name=\"" << bA.name
+                    << "\" gainDb=" << bA.gainDb
+                    << " pan=" << bA.pan
+                    << " muted=" << (bA.muted ? 1 : 0)
+                    << " solo=" << (bA.solo ? 1 : 0)
+                    << " phaseInvert=" << (bA.phaseInvert ? 1 : 0)
+                    << "\n";
+                for (const auto& slot : bA.slots) {
                     writeSlot(slot, true, 3, 3); // 1|2 pins -> Branch A
                 }
             }
             // Branch B
             if (node.branches.size() > 1) {
-                for (const auto& slot : node.branches[1].slots) {
+                const auto& bB = node.branches[1];
+                out << "  ; PRACCY_BRANCH_B name=\"" << bB.name
+                    << "\" gainDb=" << bB.gainDb
+                    << " pan=" << bB.pan
+                    << " muted=" << (bB.muted ? 1 : 0)
+                    << " solo=" << (bB.solo ? 1 : 0)
+                    << " phaseInvert=" << (bB.phaseInvert ? 1 : 0)
+                    << "\n";
+                for (const auto& slot : bB.slots) {
                     writeSlot(slot, true, 12, 12); // 4|8 pins -> Branch B
                 }
             }

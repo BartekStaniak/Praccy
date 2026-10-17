@@ -13,7 +13,9 @@ namespace praccy::audio {
 AsioManager* AsioManager::s_instance = nullptr;
 
 AsioManager::AsioManager() {
-    s_instance = this;
+    if (s_instance == nullptr) {
+        s_instance = this;
+    }
     CoInitialize(nullptr);
 }
 
@@ -124,6 +126,7 @@ bool AsioManager::loadDriver(const AsioDriverDesc& desc, HWND windowHandle) {
         m_driver->getChannelInfo(&m_info.outputChannels[i]);
     }
 
+    s_instance = this;
     return true;
 }
 
@@ -186,11 +189,6 @@ bool AsioManager::start(int32_t bufferSize) {
     ASIOError err = m_driver->createBuffers(m_bufferInfos.data(), totalChannels, bufferSize, &m_callbacks);
     if (err != ASE_OK) {
         std::cerr << "createBuffers failed with error: " << err << "\n";
-        if (m_mmcssHandle) {
-            AvRevertMmThreadCharacteristics(m_mmcssHandle);
-            m_mmcssHandle = nullptr;
-            m_mmcssTaskIndex = 0;
-        }
         return false;
     }
 
@@ -201,11 +199,6 @@ bool AsioManager::start(int32_t bufferSize) {
     if (err != ASE_OK) {
         std::cerr << "driver start failed with error: " << err << "\n";
         m_driver->disposeBuffers();
-        if (m_mmcssHandle) {
-            AvRevertMmThreadCharacteristics(m_mmcssHandle);
-            m_mmcssHandle = nullptr;
-            m_mmcssTaskIndex = 0;
-        }
         return false;
     }
 
@@ -219,13 +212,6 @@ void AsioManager::stop() {
     m_isRunning.store(false);
     m_driver->stop();
     m_driver->disposeBuffers();
-
-    // Cleanly revert MMCSS association on the same calling control thread
-    if (m_mmcssHandle) {
-        AvRevertMmThreadCharacteristics(m_mmcssHandle);
-        m_mmcssHandle = nullptr;
-        m_mmcssTaskIndex = 0;
-    }
 }
 
 void AsioManager::openControlPanel() {
@@ -309,13 +295,13 @@ bool AsioManager::checkHardwareChanges() {
     return changed;
 }
 
-void AsioManager::bufferSwitchCallback(int32_t doubleBufferIndex, ASIOBool directProcess) {
+void AsioManager::bufferSwitchCallback(int32_t doubleBufferIndex, ASIOBool /*directProcess*/) {
     if (s_instance) {
         s_instance->processAudio(doubleBufferIndex);
     }
 }
 
-ASIOTime* AsioManager::bufferSwitchTimeInfoCallback(ASIOTime* params, int32_t doubleBufferIndex, ASIOBool directProcess) {
+ASIOTime* AsioManager::bufferSwitchTimeInfoCallback(ASIOTime* /*params*/, int32_t doubleBufferIndex, ASIOBool /*directProcess*/) {
     if (s_instance) {
         s_instance->processAudio(doubleBufferIndex);
     }
@@ -329,7 +315,7 @@ void AsioManager::sampleRateDidChangeCallback(double sRate) {
     }
 }
 
-int32_t AsioManager::asioMessageCallback(int32_t selector, int32_t value, void* message, double* opt) {
+int32_t AsioManager::asioMessageCallback(int32_t selector, int32_t value, void* /*message*/, double* /*opt*/) {
     switch (selector) {
         case 1: // kAsioSelectorSupported
             if (value == 2) return 1; // kAsioEngineVersion
@@ -423,7 +409,12 @@ void AsioManager::unpackSamples(ASIOSampleType type, const void* src, float* dst
             break;
         }
         case ASIOSTFloat32LSB: {
-            std::memcpy(dst, src, numSamples * sizeof(float));
+            const auto* s = static_cast<const float*>(src);
+            for (uint32_t i = 0; i < numSamples; ++i) {
+                float val = s[i];
+                if (!std::isfinite(val)) val = 0.0f;
+                dst[i] = val;
+            }
             break;
         }
         case ASIOSTInt16LSB: {
@@ -446,34 +437,44 @@ void AsioManager::unpackSamples(ASIOSampleType type, const void* src, float* dst
     }
 }
 
+void AsioManager::packInt32LSB(const float* src, int32_t* dst, uint32_t numSamples) noexcept {
+    if (!src || !dst || numSamples == 0) return;
+
+    for (uint32_t i = 0; i < numSamples; ++i) {
+        float sample = src[i];
+        if (!std::isfinite(sample)) sample = 0.0f;
+        const double scaled = std::clamp(static_cast<double>(sample), -1.0, 1.0) * 2147483647.0;
+        dst[i] = static_cast<int32_t>(std::lrint(scaled));
+    }
+}
+
+void AsioManager::packFloat32LSB(const float* src, float* dst, uint32_t numSamples) noexcept {
+    if (!src || !dst || numSamples == 0) return;
+
+    for (uint32_t i = 0; i < numSamples; ++i) {
+        float s = src[i];
+        if (!std::isfinite(s)) s = 0.0f;
+        dst[i] = std::clamp(s, -1.0f, 1.0f);
+    }
+}
+
 void AsioManager::packSamples(ASIOSampleType type, const float* src, void* dst, uint32_t numSamples) noexcept {
     if (!src || !dst || numSamples == 0) return;
 
     switch (type) {
         case ASIOSTInt32LSB: {
-            auto* d = static_cast<int32_t*>(dst);
-            for (uint32_t i = 0; i < numSamples; ++i) {
-                float sample = src[i];
-                if (std::isnan(sample)) sample = 0.0f;
-                sample = std::clamp(sample, -1.0f, 1.0f);
-                d[i] = static_cast<int32_t>(sample * 2147483647.0f);
-            }
+            packInt32LSB(src, static_cast<int32_t*>(dst), numSamples);
             break;
         }
         case ASIOSTFloat32LSB: {
-            auto* d = static_cast<float*>(dst);
-            for (uint32_t i = 0; i < numSamples; ++i) {
-                float sample = src[i];
-                if (std::isnan(sample)) sample = 0.0f;
-                d[i] = sample;
-            }
+            packFloat32LSB(src, static_cast<float*>(dst), numSamples);
             break;
         }
         case ASIOSTInt16LSB: {
             auto* d = static_cast<int16_t*>(dst);
             for (uint32_t i = 0; i < numSamples; ++i) {
                 float sample = src[i];
-                if (std::isnan(sample)) sample = 0.0f;
+                if (!std::isfinite(sample)) sample = 0.0f;
                 sample = std::clamp(sample, -1.0f, 1.0f);
                 d[i] = static_cast<int16_t>(sample * 32767.0f);
             }
@@ -492,13 +493,34 @@ void AsioManager::packSamples(ASIOSampleType type, const float* src, void* dst, 
     }
 }
 
+namespace {
+
+struct ThreadLocalMmcssGuard {
+    HANDLE handle{nullptr};
+    DWORD taskIndex{0};
+
+    ThreadLocalMmcssGuard() {
+        taskIndex = 0;
+        handle = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
+    }
+
+    ~ThreadLocalMmcssGuard() {
+        if (handle) {
+            AvRevertMmThreadCharacteristics(handle);
+            handle = nullptr;
+        }
+    }
+
+    ThreadLocalMmcssGuard(const ThreadLocalMmcssGuard&) = delete;
+    ThreadLocalMmcssGuard& operator=(const ThreadLocalMmcssGuard&) = delete;
+};
+
+} // namespace
+
 void AsioManager::processAudio(int32_t doubleBufferIndex) {
     if (!m_isRunning.load(std::memory_order_relaxed)) return;
 
-    if (!m_mmcssHandle) {
-        m_mmcssTaskIndex = 0;
-        m_mmcssHandle = AvSetMmThreadCharacteristicsW(L"Pro Audio", &m_mmcssTaskIndex);
-    }
+    thread_local ThreadLocalMmcssGuard mmcssGuard;
 
 #if defined(_M_X64) || defined(__x86_64__)
     // Denormal Prevention: FTZ (Flush-to-Zero) & DAZ (Denormals-Are-Zero)

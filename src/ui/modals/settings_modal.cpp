@@ -529,6 +529,11 @@ void SettingsModal::renderPluginsTab() {
     ImGui::PopStyleColor(2);
 
     ImGui::Spacing();
+    auto& m_config = m_cachedConfig;
+    if (ImGui::Checkbox("Enable Live Plugin Thumbnails (CPU intensive)", &m_config.enableLiveThumbnails)) {
+        m_config.save();
+    }
+    ImGui::Spacing();
     ImGui::TextDisabled("Formats Supported: VST3 (64-bit), CLAP (64-bit), Native DSP Effects");
     ImGui::TextDisabled("Thumbnail Cache: Auto-captures live plugin GUI previews");
 }

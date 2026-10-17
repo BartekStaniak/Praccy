@@ -69,12 +69,22 @@ private:
 };
 
 // State tracking for double-click resets to suppress subsequent mouse-drag overrides
-inline ImGuiID s_suppressResetId = 0;
+// Uses per-window/context ImGui state storage keyed by ##PraccySuppressResetId
+inline ImGuiID getSuppressResetId() {
+    ImGuiStorage* storage = ImGui::GetStateStorage();
+    return storage ? static_cast<ImGuiID>(storage->GetInt(ImGui::GetID("##PraccySuppressResetId"), 0)) : 0;
+}
+
+inline void setSuppressResetId(ImGuiID id) {
+    if (ImGuiStorage* storage = ImGui::GetStateStorage()) {
+        storage->SetInt(ImGui::GetID("##PraccySuppressResetId"), static_cast<int>(id));
+    }
+}
 
 inline bool ResettableSliderFloat(const char* label, float* v, float v_min, float v_max, float default_val, const char* format = "%.3f", ImGuiSliderFlags flags = 0) {
     ImGuiID id = ImGui::GetID(label);
-    if (!ImGui::GetIO().MouseDown[0] && s_suppressResetId == id) {
-        s_suppressResetId = 0;
+    if (!ImGui::GetIO().MouseDown[0] && getSuppressResetId() == id) {
+        setSuppressResetId(0);
     }
 
     // Suppress stock opaque grab block so it never collides behind value text
@@ -94,7 +104,7 @@ inline bool ResettableSliderFloat(const char* label, float* v, float v_min, floa
     const bool hovered = ImGui::IsItemHovered();
     const bool active  = ImGui::IsItemActive();
 
-    if (s_suppressResetId == id) {
+    if (getSuppressResetId() == id) {
         if (*v != default_val) {
             *v = default_val;
             changed = true;
@@ -105,7 +115,7 @@ inline bool ResettableSliderFloat(const char* label, float* v, float v_min, floa
 
     if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         *v = default_val;
-        s_suppressResetId = id;
+        setSuppressResetId(id);
         ImGui::MarkItemEdited(id);
         ImGui::ClearActiveID();
         changed = true;
@@ -187,13 +197,13 @@ inline bool ResettableSliderFloat(const char* label, float* v, float v_min, floa
 
 inline bool ResettableVSliderFloat(const char* label, const ImVec2& size, float* v, float v_min, float v_max, float default_val, const char* format = "", ImGuiSliderFlags flags = 0) {
     ImGuiID id = ImGui::GetID(label);
-    if (!ImGui::GetIO().MouseDown[0] && s_suppressResetId == id) {
-        s_suppressResetId = 0;
+    if (!ImGui::GetIO().MouseDown[0] && getSuppressResetId() == id) {
+        setSuppressResetId(0);
     }
 
     bool changed = ImGui::VSliderFloat(label, size, v, v_min, v_max, format, flags);
 
-    if (s_suppressResetId == id) {
+    if (getSuppressResetId() == id) {
         if (*v != default_val) {
             *v = default_val;
             changed = true;
@@ -204,7 +214,7 @@ inline bool ResettableVSliderFloat(const char* label, const ImVec2& size, float*
 
     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         *v = default_val;
-        s_suppressResetId = id;
+        setSuppressResetId(id);
         ImGui::MarkItemEdited(id);
         ImGui::ClearActiveID();
         changed = true;
@@ -215,13 +225,13 @@ inline bool ResettableVSliderFloat(const char* label, const ImVec2& size, float*
 
 [[maybe_unused]] inline bool ResettableDragFloat(const char* label, float* v, float v_speed, float v_min, float v_max, float default_val, const char* format = "%.0f", ImGuiSliderFlags flags = 0) {
     ImGuiID id = ImGui::GetID(label);
-    if (!ImGui::GetIO().MouseDown[0] && s_suppressResetId == id) {
-        s_suppressResetId = 0;
+    if (!ImGui::GetIO().MouseDown[0] && getSuppressResetId() == id) {
+        setSuppressResetId(0);
     }
 
     bool changed = ImGui::DragFloat(label, v, v_speed, v_min, v_max, format, flags);
 
-    if (s_suppressResetId == id) {
+    if (getSuppressResetId() == id) {
         if (*v != default_val) {
             *v = default_val;
             changed = true;
@@ -232,7 +242,7 @@ inline bool ResettableVSliderFloat(const char* label, const ImVec2& size, float*
 
     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         *v = default_val;
-        s_suppressResetId = id;
+        setSuppressResetId(id);
         ImGui::MarkItemEdited(id);
         ImGui::ClearActiveID();
         changed = true;
@@ -268,7 +278,7 @@ inline void drawStarGeometry(ImDrawList* dl, ImVec2 center, float rOuter, float 
     const float pi = 3.1415926535f;
     ImVec2 pts[10];
     for (int i = 0; i < 10; ++i) {
-        float angle = -pi * 0.5f + (i * pi / 5.0f);
+        float angle = -pi * 0.5f + (static_cast<float>(i) * pi / 5.0f);
         float r = (i % 2 == 0) ? rOuter : rInner;
         pts[i] = ImVec2(center.x + std::cos(angle) * r, center.y + std::sin(angle) * r);
     }

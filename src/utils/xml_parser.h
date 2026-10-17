@@ -1,4 +1,11 @@
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpragma-once-outside-header"
+#endif
 #pragma once
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 #include <string>
 #include <string_view>

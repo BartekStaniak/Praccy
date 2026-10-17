@@ -1062,7 +1062,7 @@ void testTunerAsynchronousDecoupling() {
     constexpr double sampleRate = 48000.0;
     for (int block = 0; block < 16; ++block) {
         for (size_t i = 0; i < sineBlock.size(); ++i) {
-            double phase = 2.0 * std::numbers::pi * freq * ((block * 256.0 + i) / sampleRate);
+            double phase = 2.0 * std::numbers::pi * freq * ((static_cast<double>(block) * 256.0 + static_cast<double>(i)) / sampleRate);
             sineBlock[i] = static_cast<float>(std::sin(phase) * 0.7);
         }
         tuner.pushSamples(sineBlock.data(), static_cast<uint32_t>(sineBlock.size()));
@@ -2533,7 +2533,7 @@ void testGraphEngineVariableBlockSizes() {
 
         for (uint32_t ch = 0; ch < 2; ++ch) {
             for (uint32_t s = 0; s < bs; ++s) {
-                inView.channel(ch)[s] = 0.5f * std::sin(2.0f * 3.14159265f * 440.0f * s / 48000.0f);
+                inView.channel(ch)[s] = 0.5f * std::sin(2.0f * 3.14159265f * 440.0f * static_cast<float>(s) / 48000.0f);
             }
         }
         outView.clear();
@@ -2563,7 +2563,7 @@ void testStereoBypassRampSymmetry() {
     auto outView = outBuf.view(512);
 
     for (uint32_t s = 0; s < 512; ++s) {
-        float v = 0.4f * std::sin(2.0f * 3.14159265f * 220.0f * s / 48000.0f);
+        float v = 0.4f * std::sin(2.0f * 3.14159265f * 220.0f * static_cast<float>(s) / 48000.0f);
         inView.channel(0)[s] = v;
         inView.channel(1)[s] = v;
     }
@@ -2714,7 +2714,7 @@ void testDynamicSampleRateAndBufferSizeUpdates() {
 
             for (uint32_t ch = 0; ch < 2; ++ch) {
                 for (uint32_t s = 0; s < bs; ++s) {
-                    inView.channel(ch)[s] = 0.3f * std::sin(2.0f * 3.14159265f * 440.0f * s / static_cast<float>(sr));
+                    inView.channel(ch)[s] = 0.3f * std::sin(2.0f * 3.14159265f * 440.0f * static_cast<float>(s) / static_cast<float>(sr));
                 }
             }
             outView.clear();

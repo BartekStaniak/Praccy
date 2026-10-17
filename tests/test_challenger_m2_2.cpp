@@ -632,50 +632,53 @@ void runAudioThreadHeapAllocationAudit() {
         assert(slotProcessAllocs == 0 && "CRITICAL: PluginSlot::process allocated heap memory during crash!");
     }
 
-    // 4.3 EMPIRICAL CHALLENGE: Verify Vst3PluginInstance / ClapPluginInstance faultReason string formatting
-    // Let's test the exact pattern from vst3_host.cpp:379 and clap_host.cpp:172:
-    // m_faultReason = std::string("VST3 crash: ") + getExceptionDescription(exCode);
+    // 4.3 Production Verification: Zero-allocation plugins::formatFaultReason (F-08, F-26)
     {
+        t_isAudioThread = true;
         g_audioThreadAllocCount.store(0);
         g_audioThreadAllocBytes.store(0);
-        t_isAudioThread = true;
 
         DWORD testExCode = EXCEPTION_ACCESS_VIOLATION;
-        std::string testFaultReason;
-        testFaultReason = std::string("VST3 crash: ") + plugins::getExceptionDescription(testExCode);
+        char faultBuf[128] = {};
+        plugins::formatFaultReason(faultBuf, sizeof(faultBuf), "VST3 crash: ", testExCode);
 
         t_isAudioThread = false;
         size_t stringConcatAllocs = g_audioThreadAllocCount.load();
         size_t bytesAllocated = g_audioThreadAllocBytes.load();
 
-        std::cout << "  - std::string(\"VST3 crash: \") + getExceptionDescription() on audio thread:\n";
-        std::cout << "    * Length of string: " << testFaultReason.length() << " chars\n";
+        std::cout << "  - plugins::formatFaultReason(\"VST3 crash: \", EXCEPTION_ACCESS_VIOLATION) on audio thread:\n";
+        std::cout << "    * Formatted string: " << faultBuf << "\n";
         std::cout << "    * Allocations detected: " << stringConcatAllocs << "\n";
         std::cout << "    * Bytes allocated: " << bytesAllocated << "\n";
 
-        if (stringConcatAllocs > 0) {
-            std::cout << "    [VULNERABILITY IDENTIFIED] Vst3PluginInstance::process and ClapPluginInstance::process\n";
-            std::cout << "    allocate dynamic heap memory on the audio callback thread during crash latching!\n";
-        }
+        assert(stringConcatAllocs == 0 && "CRITICAL: plugins::formatFaultReason allocated heap memory on the audio thread!");
+        assert(std::strlen(faultBuf) > 0 && "CRITICAL: faultBuf must not be empty!");
+        assert(std::strstr(faultBuf, "VST3 crash: ") != nullptr && "CRITICAL: faultBuf must contain the prefix!");
+        assert(std::strstr(faultBuf, "Access Violation") != nullptr && "CRITICAL: faultBuf must contain exception description!");
     }
 
-    // 4.4 Test CrashingMockPlugin allocation from test_praccy.cpp
+    // 4.4 Production Verification: Array-ref formatFaultReason without prefix on audio thread
     {
+        t_isAudioThread = true;
         g_audioThreadAllocCount.store(0);
         g_audioThreadAllocBytes.store(0);
-        t_isAudioThread = true;
 
-        std::string mockFaultReason;
-        mockFaultReason = plugins::getExceptionDescription(EXCEPTION_ACCESS_VIOLATION);
+        DWORD testExCode = EXCEPTION_ACCESS_VIOLATION;
+        char mockFaultBuf[128] = {};
+        plugins::formatFaultReason(mockFaultBuf, nullptr, testExCode);
 
         t_isAudioThread = false;
         size_t mockAllocs = g_audioThreadAllocCount.load();
         size_t mockBytes = g_audioThreadAllocBytes.load();
 
-        std::cout << "  - m_faultReason = getExceptionDescription() from test_praccy.cpp:\n";
-        std::cout << "    * Length of string: " << mockFaultReason.length() << " chars\n";
+        std::cout << "  - plugins::formatFaultReason(nullptr, EXCEPTION_ACCESS_VIOLATION) on audio thread:\n";
+        std::cout << "    * Formatted string: " << mockFaultBuf << "\n";
         std::cout << "    * Allocations detected: " << mockAllocs << "\n";
         std::cout << "    * Bytes allocated: " << mockBytes << "\n";
+
+        assert(mockAllocs == 0 && "CRITICAL: formatFaultReason array overload allocated heap memory on audio thread!");
+        assert(std::strlen(mockFaultBuf) > 0);
+        assert(std::strstr(mockFaultBuf, "Access Violation") != nullptr);
     }
 
     std::cout << "  -> Audio thread allocation audit completed\n\n";

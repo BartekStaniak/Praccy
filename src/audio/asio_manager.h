@@ -72,6 +72,9 @@ public:
     static void unpackInt32LSB24(const void* src, float* dst, uint32_t numSamples) noexcept;
     static void packInt32LSB24(const float* src, void* dst, uint32_t numSamples) noexcept;
 
+    static void packInt32LSB(const float* src, int32_t* dst, uint32_t numSamples) noexcept;
+    static void packFloat32LSB(const float* src, float* dst, uint32_t numSamples) noexcept;
+
 private:
     static void bufferSwitchCallback(int32_t doubleBufferIndex, ASIOBool directProcess);
     static ASIOTime* bufferSwitchTimeInfoCallback(ASIOTime* params, int32_t doubleBufferIndex, ASIOBool directProcess);
@@ -94,9 +97,6 @@ private:
     // Pre-allocated conversion buffers for zero-allocation realtime streaming
     OwnedAudioBuffer m_inputFloatBuffer;
     OwnedAudioBuffer m_outputFloatBuffer;
-
-    HANDLE m_mmcssHandle{nullptr};
-    DWORD m_mmcssTaskIndex{0};
 };
 
 } // namespace praccy::audio

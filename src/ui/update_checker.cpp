@@ -42,7 +42,16 @@ UpdateChecker& UpdateChecker::instance() {
 
 UpdateChecker::UpdateChecker() = default;
 
-UpdateChecker::~UpdateChecker() = default;
+UpdateChecker::~UpdateChecker() {
+    m_checkThread.request_stop();
+    m_downloadThread.request_stop();
+    if (m_checkThread.joinable()) {
+        m_checkThread.join();
+    }
+    if (m_downloadThread.joinable()) {
+        m_downloadThread.join();
+    }
+}
 
 UpdateInfo UpdateChecker::getInfo() const {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -139,13 +148,22 @@ void UpdateChecker::checkForUpdates(bool includeBeta) {
         m_info.downloadedBytes = 0;
     }
 
-    std::thread([this, includeBeta]() {
-        runCheck(includeBeta);
+    if (m_checkThread.joinable()) {
+        m_checkThread.request_stop();
+        m_checkThread.join();
+    }
+
+    m_checkThread = std::jthread([this, includeBeta](std::stop_token st) {
+        runCheck(includeBeta, st);
         m_isBusy.store(false);
-    }).detach();
+    });
 }
 
-void UpdateChecker::runCheck(bool includeBeta) {
+void UpdateChecker::runCheck(bool includeBeta, std::stop_token st) {
+    if (st.stop_requested()) {
+        return;
+    }
+
     UpdateInfo result;
     result.currentVersion = praccy::kVersionString;
     result.isBeta = includeBeta;
@@ -177,6 +195,9 @@ void UpdateChecker::runCheck(bool includeBeta) {
     if (includeBeta) {
         // Query latest commit on 'dev' branch
         std::string json = httpGet("https://api.github.com/repos/BartekStaniak/Praccy/commits/dev");
+        if (st.stop_requested()) {
+            return;
+        }
         if (json.empty()) {
             result.status = UpdateStatus::Error;
             result.errorMessage = "Unable to connect to GitHub. Check your network connection.";
@@ -197,9 +218,11 @@ void UpdateChecker::runCheck(bool includeBeta) {
                 result.downloadUrl = "https://github.com/BartekStaniak/Praccy/tree/dev";
 
                 // Check if any release asset is available (e.g. latest release package)
-                std::string allReleases = httpGet("https://api.github.com/repos/BartekStaniak/Praccy/releases");
-                if (!allReleases.empty()) {
-                    parseReleaseAsset(allReleases, result);
+                if (!st.stop_requested()) {
+                    std::string allReleases = httpGet("https://api.github.com/repos/BartekStaniak/Praccy/releases");
+                    if (!allReleases.empty()) {
+                        parseReleaseAsset(allReleases, result);
+                    }
                 }
 
                 result.status = UpdateStatus::UpdateAvailable;
@@ -208,6 +231,9 @@ void UpdateChecker::runCheck(bool includeBeta) {
     } else {
         // Query latest official release
         std::string json = httpGet("https://api.github.com/repos/BartekStaniak/Praccy/releases/latest");
+        if (st.stop_requested()) {
+            return;
+        }
         if (json.empty()) {
             result.status = UpdateStatus::Error;
             result.errorMessage = "Unable to connect to GitHub. Check your network connection.";
@@ -239,6 +265,10 @@ void UpdateChecker::runCheck(bool includeBeta) {
         }
     }
 
+    if (st.stop_requested()) {
+        return;
+    }
+
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_info = result;
@@ -264,13 +294,21 @@ void UpdateChecker::startDownload() {
         m_info.errorMessage.clear();
     }
 
-    std::thread([this]() {
-        runDownload();
+    if (m_downloadThread.joinable()) {
+        m_downloadThread.request_stop();
+        m_downloadThread.join();
+    }
+
+    m_downloadThread = std::jthread([this](std::stop_token st) {
+        runDownload(st);
         m_isBusy.store(false);
-    }).detach();
+    });
 }
 
-void UpdateChecker::runDownload() {
+void UpdateChecker::runDownload(std::stop_token st) {
+    if (st.stop_requested()) {
+        return;
+    }
     std::string downloadUrl;
     std::string assetName;
     std::string expectedSha256;
@@ -346,6 +384,9 @@ void UpdateChecker::runDownload() {
     int64_t totalRead = 0;
 
     while (InternetReadFile(hUrl, buffer, sizeof(buffer), &bytesRead) && bytesRead > 0) {
+        if (st.stop_requested()) {
+            break;
+        }
         outFile.write(buffer, bytesRead);
         totalRead += bytesRead;
 
@@ -363,6 +404,11 @@ void UpdateChecker::runDownload() {
     outFile.close();
     InternetCloseHandle(hUrl);
     InternetCloseHandle(hInternet);
+
+    if (st.stop_requested()) {
+        std::filesystem::remove(zipPath, ec);
+        return;
+    }
 
     if (totalRead <= 1024) {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -418,6 +464,11 @@ void UpdateChecker::runDownload() {
         uint8_t blk[64];
         uint64_t bitLen = 0;
         while (inZip) {
+            if (st.stop_requested()) {
+                inZip.close();
+                std::filesystem::remove(zipPath, ec);
+                return;
+            }
             inZip.read(reinterpret_cast<char*>(blk), 64);
             std::streamsize got = inZip.gcount();
             if (got == 64) {
@@ -455,6 +506,11 @@ void UpdateChecker::runDownload() {
         }
     }
 
+    if (st.stop_requested()) {
+        std::filesystem::remove(zipPath, ec);
+        return;
+    }
+
     // Extract archive
     auto extractDir = updatesDir / "extracted";
     std::filesystem::remove_all(extractDir, ec);
@@ -482,6 +538,10 @@ void UpdateChecker::runDownload() {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_info.status = UpdateStatus::Error;
         m_info.errorMessage = "Extracted update archive does not contain Praccy.exe.";
+        return;
+    }
+
+    if (st.stop_requested()) {
         return;
     }
 

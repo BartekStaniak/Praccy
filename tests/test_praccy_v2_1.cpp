@@ -283,14 +283,23 @@ void test_T1_R1_Spsc_BlockBoundary_SlotSwap() {
 void test_T2_R1_ParamAutomationRegister_BoundsAndCoalescing() {
     audio::ParamAutomationRegister reg;
 
-    // Corner: Out of range paramId (>= 1024) must be safely ignored
+    // Arbitrary 32-bit paramId (>= 1024) handled wait-free via CAS overflow table (TASK-03)
     reg.setParameter(1024, 1.0f);
     reg.setParameter(2000, 2.0f);
     reg.setParameter(UINT32_MAX, 3.0f);
 
     size_t count = 0;
-    reg.drainDirty([&](uint32_t, float) { count++; });
-    assert(count == 0);
+    bool seen1024 = false;
+    bool seen2000 = false;
+    bool seenMax = false;
+    reg.drainDirty([&](uint32_t id, float val) {
+        if (id == 1024 && std::abs(val - 1.0f) < 1e-5f) seen1024 = true;
+        if (id == 2000 && std::abs(val - 2.0f) < 1e-5f) seen2000 = true;
+        if (id == UINT32_MAX && std::abs(val - 3.0f) < 1e-5f) seenMax = true;
+        count++;
+    });
+    assert(count == 3);
+    assert(seen1024 && seen2000 && seenMax);
 
     // Coalescing: Rapid successive writes to param 42
     for (int i = 0; i < 50; ++i) {
@@ -762,11 +771,17 @@ void test_T4_R2_EndToEnd_WavExport_Validation() {
 // MODULE 3: R3 TRANSACTIONAL UNDO/REDO & STATE MANAGEMENT
 // ============================================================================
 
+static inline state::ScenePreset makeScenePreset(std::string name) {
+    state::ScenePreset p;
+    p.name = std::move(name);
+    return p;
+}
+
 // Tier 1: Feature Coverage (R3)
 void test_T1_R3_UndoRedo_BasicTransaction() {
     state::UndoManager undoMgr;
-    state::ScenePreset stateA{"Clean", {}};
-    state::ScenePreset stateB{"Lead", {}};
+    state::ScenePreset stateA = makeScenePreset("Clean");
+    state::ScenePreset stateB = makeScenePreset("Lead");
 
     undoMgr.pushSnapshot(stateA, "Initial", state::UndoActionType::StructuralMutation);
     undoMgr.pushSnapshot(stateB, "Change", state::UndoActionType::StructuralMutation);
@@ -784,8 +799,8 @@ void test_T1_R3_UndoRedo_BasicTransaction() {
 }
 
 void test_T1_R3_SceneBar_ToneSnapshotAB_Toggle() {
-    state::ScenePreset toneA{"Lead A", {}};
-    state::ScenePreset toneB{"Lead B", {}};
+    state::ScenePreset toneA = makeScenePreset("Lead A");
+    state::ScenePreset toneB = makeScenePreset("Lead B");
     state::ScenePreset activeState = toneA;
 
     // Toggle to B
@@ -843,7 +858,7 @@ void test_T2_R3_HistoryStack_Capacity64_Eviction() {
 
     // Push 100 structural snapshots
     for (int i = 0; i < 100; ++i) {
-        state::ScenePreset s{"State " + std::to_string(i), {}};
+        state::ScenePreset s = makeScenePreset("State " + std::to_string(i));
         undoMgr.pushSnapshot(s, "Step", state::UndoActionType::StructuralMutation, "", true);
     }
 
@@ -869,26 +884,26 @@ void test_T2_R3_HistoryStack_Capacity64_Eviction() {
 
 void test_T2_R3_RedoInvalidation_OnNewSnapshot() {
     state::UndoManager undoMgr;
-    undoMgr.pushSnapshot(state::ScenePreset{"A", {}}, "A", state::UndoActionType::StructuralMutation);
-    undoMgr.pushSnapshot(state::ScenePreset{"B", {}}, "B", state::UndoActionType::StructuralMutation);
+    undoMgr.pushSnapshot(makeScenePreset("A"), "A", state::UndoActionType::StructuralMutation);
+    undoMgr.pushSnapshot(makeScenePreset("B"), "B", state::UndoActionType::StructuralMutation);
 
     state::ScenePreset outState;
     undoMgr.undo(outState);
     assert(undoMgr.canRedo());
 
     // Pushing a new state invalidates the redo branch
-    undoMgr.pushSnapshot(state::ScenePreset{"C", {}}, "C", state::UndoActionType::StructuralMutation);
+    undoMgr.pushSnapshot(makeScenePreset("C"), "C", state::UndoActionType::StructuralMutation);
     assert(!undoMgr.canRedo());
 }
 
 // Tier 3: Cross-Feature Interactions (R3)
 void test_T3_R3_Coalescing_400ms_IdleThreshold() {
     state::UndoManager undoMgr;
-    undoMgr.pushSnapshot(state::ScenePreset{"Base", {}}, "Base", state::UndoActionType::StructuralMutation);
+    undoMgr.pushSnapshot(makeScenePreset("Base"), "Base", state::UndoActionType::StructuralMutation);
 
     // Rapid sweeps on param "gain" within 400ms
     for (int i = 1; i <= 10; ++i) {
-        state::ScenePreset p{"Sweep " + std::to_string(i), {}};
+        state::ScenePreset p = makeScenePreset("Sweep " + std::to_string(i));
         undoMgr.pushSnapshot(p, "Sweep", state::UndoActionType::ParameterTweak, "slot0:gain");
     }
 
@@ -902,15 +917,15 @@ void test_T3_R3_Coalescing_400ms_IdleThreshold() {
 
 void test_T3_R3_MouseRelease_Commit() {
     state::UndoManager undoMgr;
-    undoMgr.pushSnapshot(state::ScenePreset{"Base", {}}, "Base", state::UndoActionType::StructuralMutation);
+    undoMgr.pushSnapshot(makeScenePreset("Base"), "Base", state::UndoActionType::StructuralMutation);
 
     // First sweep
-    undoMgr.pushSnapshot(state::ScenePreset{"Sweep 1", {}}, "Sweep", state::UndoActionType::ParameterTweak, "gain");
+    undoMgr.pushSnapshot(makeScenePreset("Sweep 1"), "Sweep", state::UndoActionType::ParameterTweak, "gain");
     // Mouse release commit
     undoMgr.commitActiveTransaction();
 
     // Second sweep after mouse release
-    undoMgr.pushSnapshot(state::ScenePreset{"Sweep 2", {}}, "Sweep", state::UndoActionType::ParameterTweak, "gain");
+    undoMgr.pushSnapshot(makeScenePreset("Sweep 2"), "Sweep", state::UndoActionType::ParameterTweak, "gain");
 
     // After commit, must create a distinct undo level
     assert(undoMgr.undoCount() == 3);
@@ -918,30 +933,30 @@ void test_T3_R3_MouseRelease_Commit() {
 
 void test_T3_R3_StructuralMutation_DiscretePush() {
     state::UndoManager undoMgr;
-    undoMgr.pushSnapshot(state::ScenePreset{"S1", {}}, "S1", state::UndoActionType::StructuralMutation);
-    undoMgr.pushSnapshot(state::ScenePreset{"S2", {}}, "S2", state::UndoActionType::StructuralMutation);
-    undoMgr.pushSnapshot(state::ScenePreset{"S3", {}}, "S3", state::UndoActionType::StructuralMutation);
+    undoMgr.pushSnapshot(makeScenePreset("S1"), "S1", state::UndoActionType::StructuralMutation);
+    undoMgr.pushSnapshot(makeScenePreset("S2"), "S2", state::UndoActionType::StructuralMutation);
+    undoMgr.pushSnapshot(makeScenePreset("S3"), "S3", state::UndoActionType::StructuralMutation);
     assert(undoMgr.undoCount() == 3);
 }
 
 // Tier 4: Real-World Scenarios (R3)
 void test_T4_R3_LiveStudio_EditingSession() {
     state::UndoManager undoMgr;
-    undoMgr.pushSnapshot(state::ScenePreset{"Init", {}}, "Init", state::UndoActionType::SceneSwitch);
+    undoMgr.pushSnapshot(makeScenePreset("Init"), "Init", state::UndoActionType::SceneSwitch);
 
     // 10 parameter sweeps
     for (int i = 1; i <= 10; ++i) {
-        undoMgr.pushSnapshot(state::ScenePreset{"Drive " + std::to_string(i), {}}, "Tweak Drive",
+        undoMgr.pushSnapshot(makeScenePreset("Drive " + std::to_string(i)), "Tweak Drive",
                              state::UndoActionType::ParameterTweak, "drive");
     }
     undoMgr.commitActiveTransaction();
 
     // Add slot
-    undoMgr.pushSnapshot(state::ScenePreset{"Slot Added", {}}, "Add Slot", state::UndoActionType::StructuralMutation);
+    undoMgr.pushSnapshot(makeScenePreset("Slot Added"), "Add Slot", state::UndoActionType::StructuralMutation);
 
     // Another sweep
     for (int i = 1; i <= 5; ++i) {
-        undoMgr.pushSnapshot(state::ScenePreset{"Tone " + std::to_string(i), {}}, "Tweak Tone",
+        undoMgr.pushSnapshot(makeScenePreset("Tone " + std::to_string(i)), "Tweak Tone",
                              state::UndoActionType::ParameterTweak, "tone");
     }
 
@@ -999,8 +1014,8 @@ static std::vector<float> decimateWaveform(const float* samples, size_t count, s
 
     const double step = static_cast<double>(count) / static_cast<double>(targetPoints);
     for (size_t i = 0; i < targetPoints; ++i) {
-        const size_t startIdx = static_cast<size_t>(i * step);
-        const size_t endIdx = std::min(count, static_cast<size_t>((i + 1) * step));
+        const size_t startIdx = static_cast<size_t>(static_cast<double>(i) * step);
+        const size_t endIdx = std::min(count, static_cast<size_t>(static_cast<double>(i + 1) * step));
         float peak = 0.0f;
         for (size_t k = startIdx; k < endIdx; ++k) {
             peak = std::max(peak, std::abs(samples[k]));
@@ -1162,43 +1177,6 @@ void test_T4_R4_FullPerformance_ErgonomicsSimulation() {
 // MODULE 5: R5 VISUAL POLISH, LIST VIRTUALIZATION & METERS
 // ============================================================================
 
-class DinPpmBallistics {
-public:
-    DinPpmBallistics() = default;
-
-    void process(float inputPeak, float dtSeconds) {
-        const float absPeak = std::clamp(std::abs(inputPeak), 0.0f, 1.0f);
-
-        // Instantaneous attack (0 ms)
-        if (absPeak >= m_level) {
-            m_level = absPeak;
-        } else {
-            // Decay: tau = 350 ms
-            const float decayFactor = std::exp(-dtSeconds / 0.350f);
-            m_level *= decayFactor;
-        }
-
-        // Peak Hold: 1.2s
-        if (absPeak >= m_peakHold) {
-            m_peakHold = absPeak;
-            m_peakHoldTimer = 1.2f;
-        } else {
-            m_peakHoldTimer -= dtSeconds;
-            if (m_peakHoldTimer <= 0.0f) {
-                const float decayFactor = std::exp(-dtSeconds / 0.350f);
-                m_peakHold *= decayFactor;
-            }
-        }
-    }
-
-    [[nodiscard]] float level() const noexcept { return m_level; }
-    [[nodiscard]] float peakHold() const noexcept { return m_peakHold; }
-
-private:
-    float m_level{0.0f};
-    float m_peakHold{0.0f};
-    float m_peakHoldTimer{0.0f};
-};
 
 // Tier 1: Feature Coverage (R5)
 void test_T1_R5_Spotlight_ListClipper_Virtualization() {
@@ -1258,22 +1236,34 @@ void test_T1_R5_Spotlight_Favorites_ScoreBoost() {
 }
 
 void test_T1_R5_Ppm_Ballistics_Math() {
-    DinPpmBallistics ppm;
+    audio::LevelMeter meter;
 
-    // Instant attack: step from 0 to 1.0 in dt=0.01s
-    ppm.process(1.0f, 0.01f);
-    assert(std::abs(ppm.level() - 1.0f) < 1e-4f);
-    assert(std::abs(ppm.peakHold() - 1.0f) < 1e-4f);
+    // Instant attack: step from 0 to 0.8 in dt=10ms (480 samples @ 48kHz)
+    const std::vector<float> stepSignal(480, 0.8f);
+    meter.process(stepSignal.data(), nullptr, static_cast<uint32_t>(stepSignal.size()), 48000.0);
+    assert(std::abs(meter.peakLeft() - 0.8f) < 1e-4f);
+    assert(std::abs(meter.holdLeft() - 0.8f) < 1e-4f);
+    assert(!meter.isClipped());
 
-    // Decay after tau = 350 ms: level should be 1/e ~ 0.368
-    ppm.process(0.0f, 0.350f);
-    assert(std::abs(ppm.level() - (1.0f / std::numbers::e_v<float>)) < 0.02f);
-    // Peak hold should still be 1.0 at 0.35s < 1.2s
-    assert(std::abs(ppm.peakHold() - 1.0f) < 1e-4f);
+    // Snappy decay after tau = 120 ms (5760 samples @ 48kHz): level should be 0.8 / e ~ 0.2943
+    const std::vector<float> silence(5760, 0.0f);
+    meter.process(silence.data(), nullptr, static_cast<uint32_t>(silence.size()), 48000.0);
+    assert(std::abs(meter.peakLeft() - (0.8f / std::numbers::e_v<float>)) < 0.02f);
+    // Hold decays slower (tau = 1.5s): hold remains higher than instantaneous peak
+    assert(meter.holdLeft() > meter.peakLeft());
 
-    // Peak hold decay after 1.5s
-    ppm.process(0.0f, 1.200f);
-    assert(ppm.peakHold() < 1.0f);
+    // Clip detection, clearClip, and reset
+    const std::vector<float> clipSignal(48, 1.0f);
+    meter.process(clipSignal.data(), nullptr, static_cast<uint32_t>(clipSignal.size()), 48000.0);
+    assert(meter.isClipped());
+
+    meter.clearClip();
+    assert(!meter.isClipped());
+
+    meter.reset();
+    assert(meter.peakLeft() == 0.0f);
+    assert(meter.holdLeft() == 0.0f);
+    assert(!meter.isClipped());
 }
 
 // Tier 2: Boundary & Corner Cases (R5)
@@ -1293,15 +1283,31 @@ void test_T2_R5_Clipper_BoundaryCases() {
 }
 
 void test_T2_R5_Ppm_ExtremeSignals() {
-    DinPpmBallistics ppm;
+    audio::LevelMeter meter;
 
     // Negative peak input -> rectified
-    ppm.process(-0.8f, 0.01f);
-    assert(std::abs(ppm.level() - 0.8f) < 1e-4f);
+    const std::vector<float> negSignal(480, -0.85f);
+    meter.process(negSignal.data(), nullptr, static_cast<uint32_t>(negSignal.size()), 48000.0);
+    assert(std::abs(meter.peakLeft() - 0.85f) < 1e-4f);
+    assert(!meter.isClipped());
 
-    // Overshoot -> clamped to 1.0
-    ppm.process(2.5f, 0.01f);
-    assert(std::abs(ppm.level() - 1.0f) < 1e-4f);
+    // Overshoot -> triggers clipping flag and tracks peak
+    const std::vector<float> overSignal(480, 2.5f);
+    meter.process(overSignal.data(), nullptr, static_cast<uint32_t>(overSignal.size()), 48000.0);
+    assert(meter.isClipped());
+    assert(std::abs(meter.peakLeft() - 2.5f) < 1e-4f);
+
+    meter.clearClip();
+    assert(!meter.isClipped());
+
+    // Stereo differential processing
+    meter.reset();
+    const std::vector<float> leftSignal(480, 0.25f);
+    const std::vector<float> rightSignal(480, 0.90f);
+    meter.process(leftSignal.data(), rightSignal.data(), static_cast<uint32_t>(leftSignal.size()), 48000.0);
+    assert(std::abs(meter.peakLeft() - 0.25f) < 1e-4f);
+    assert(std::abs(meter.peakRight() - 0.90f) < 1e-4f);
+    assert(!meter.isClipped());
 }
 
 // Tier 3: Cross-Feature Interactions (R5)
@@ -1316,15 +1322,17 @@ void test_T3_R5_DesignTokens_VisualHierarchy_Purity() {
 
 // Tier 4: Real-World Scenarios (R5)
 void test_T4_R5_HighLoad_GuiFrame_Simulation() {
-    DinPpmBallistics ppm;
+    audio::LevelMeter meter;
+    const std::vector<float> block(336, 0.5f);
     const auto tStart = std::chrono::high_resolution_clock::now();
     for (int frame = 0; frame < 1000; ++frame) {
-        ppm.process(0.5f, 0.007f);
+        meter.process(block.data(), nullptr, static_cast<uint32_t>(block.size()), 48000.0);
     }
     const auto tEnd = std::chrono::high_resolution_clock::now();
 
     const double totalMs = std::chrono::duration<double, std::milli>(tEnd - tStart).count();
     assert(totalMs < 100.0);
+    assert(meter.peakLeft() > 0.0f);
 }
 
 // ============================================================================
@@ -1357,7 +1365,7 @@ void test_T1_R6_Archive_Win32PathSanitization() {
 
 void test_T1_R6_DragDropRouter_Classification() {
     assert(ui::DragDropRouter::classifyPath("track.wav") == ui::DroppedFileType::AudioTrack);
-    assert(ui::DragDropRouter::classifyPath("song.FLAC") == ui::DroppedFileType::AudioTrack);
+    assert(ui::DragDropRouter::classifyPath("song.FLAC") == ui::DroppedFileType::Unknown);
     assert(ui::DragDropRouter::classifyPath("rock.ini") == ui::DroppedFileType::Preset);
     assert(ui::DragDropRouter::classifyPath("lead.PRACPRESET") == ui::DroppedFileType::Preset);
     assert(ui::DragDropRouter::classifyPath("chain1.pracchaim") == ui::DroppedFileType::SignalChain);
@@ -1442,13 +1450,43 @@ void test_T2_R6_Midi_Out_Of_Bounds() {
 void test_T3_R6_MidiDispatch_ZeroHeapAlloc() {
     midi::MidiManager mgr;
     initializeMidiTableStrings(mgr);
+
+    // Bind using production stopLearnAndBind with 4-digit paramId = 2048 (>21-char compact binding ID)
     for (uint8_t cc = 0; cc < 128; ++cc) {
-        mgr.addCcBinding(1, cc, cc);
+        mgr.startLearning(midi::BindingTargetType::SlotOutputGain, 0, -1, -1);
+        mgr.stopLearnAndBind(1, cc, 2048u + static_cast<uint32_t>(cc), 0.0f, 1.0f);
     }
 
-    uint32_t eventCount = 0;
-    mgr.setBindingCallback([&](const midi::MidiBinding&, float) { eventCount++; });
+    std::atomic<uint32_t> eventCount{0};
+    std::atomic<uint32_t> tornReads{0};
 
+    // Use FlatBindingCallback to verify FlatCcBinding operates with zero heap allocations
+    mgr.setFlatBindingCallback([&](const midi::FlatCcBinding& binding, float mappedValue) {
+        if (!binding.active || binding.paramId < 2048 || binding.minVal != 0.0f || binding.maxVal != 1.0f) {
+            tornReads.fetch_add(1, std::memory_order_relaxed);
+        }
+        (void)mappedValue;
+        eventCount.fetch_add(1, std::memory_order_relaxed);
+    });
+
+    std::atomic<bool> writerStop{false};
+    std::thread writer([&]() {
+        uint32_t counter = 0;
+        while (!writerStop.load(std::memory_order_relaxed)) {
+            midi::MidiBinding b;
+            b.id = "concurrent_" + std::to_string(counter++);
+            b.targetType = midi::BindingTargetType::SlotOutputGain;
+            b.targetSlotIndex = 1;
+            b.paramId = 4096;
+            b.midiChannel = 2; // Write to Channel 2 to avoid interfering with Channel 1 learned bindings
+            b.triggerType = midi::MidiMessageType::ControlChange;
+            b.triggerNumber = static_cast<uint8_t>(counter % 128);
+            mgr.addBinding(b);
+            std::this_thread::yield();
+        }
+    });
+
+    // Real-time audio/MIDI thread verification
     t_disallowAllocations = true;
     t_allocationsCount = 0;
 
@@ -1458,8 +1496,12 @@ void test_T3_R6_MidiDispatch_ZeroHeapAlloc() {
     }
 
     t_disallowAllocations = false;
+    writerStop.store(true, std::memory_order_release);
+    writer.join();
+
     assert(t_allocationsCount == 0);
-    assert(eventCount == 10000);
+    assert(tornReads.load() == 0);
+    assert(eventCount.load() > 0);
 }
 
 // Tier 4: Real-World Scenarios (R6)

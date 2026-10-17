@@ -5,6 +5,7 @@
 #include <string>
 #include <memory>
 #include <atomic>
+#include <cstdint>
 
 namespace praccy::audio {
 
@@ -13,6 +14,10 @@ struct AudioProcessContext {
     AudioBufferView output;
     double sampleRate{48000.0};
     uint32_t numSamples{0};
+    double tempoBpm{120.0};
+    int32_t timeSigNumerator{4};
+    int32_t timeSigDenominator{4};
+    int64_t projectTimeSamples{0};
 };
 
 enum class NodeType {

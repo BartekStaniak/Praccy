@@ -56,15 +56,14 @@ public:
 
     [[nodiscard]] Steinberg::IPlugView* plugView() const noexcept { return m_plugView; }
 
-    // Invoked by PraccyComponentHandler when the user edits parameters in the VST3 GUI
+    Vst3PluginInstance();
+
     void onGuiBeginEdit(Steinberg::Vst::ParamID paramId) noexcept;
     void onGuiPerformEdit(Steinberg::Vst::ParamID paramId, Steinberg::Vst::ParamValue valueNormalized) noexcept;
     void onGuiEndEdit(Steinberg::Vst::ParamID paramId) noexcept;
     void onGuiRestartComponent(Steinberg::int32 flags) noexcept;
 
 private:
-    Vst3PluginInstance();
-
     HMODULE m_module{nullptr};
     Steinberg::IPluginFactory* m_factory{nullptr};
     Steinberg::Vst::IComponent* m_component{nullptr};
@@ -87,6 +86,17 @@ private:
 
     FastParameterChanges m_inputParamChanges;
     moodycamel::ReaderWriterQueue<std::pair<Steinberg::Vst::ParamID, double>> m_paramQueue{128};
+
+    struct AudioThreadParamEvent {
+        Steinberg::Vst::ParamID id{0};
+        double value{0.0};
+    };
+    std::array<AudioThreadParamEvent, 256> m_audioThreadParamEvents{};
+    size_t m_audioThreadParamCount{0};
+
+    std::array<float*, 16> m_inChannelPtrs{};
+    std::array<float*, 16> m_outChannelPtrs{};
+
     std::atomic<DWORD> m_audioThreadId{0};
     std::atomic<bool> m_suppressHandlerCallbacks{false};
 
