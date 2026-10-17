@@ -98,6 +98,7 @@ set(PRACCY_CORE_SOURCES
     src/audio/asio_manager.cpp
     src/audio/graph_engine.cpp
     src/plugins/clap_host.cpp
+    src/plugins/async_plugin_loader.cpp
     src/plugins/vst3_host.cpp
     src/plugins/plugin_window.cpp
     src/plugins/builtin_dsp.cpp
@@ -315,3 +316,10 @@ target_include_directories(test_remediation_characterization PRIVATE tests)
 target_link_libraries(test_remediation_characterization PRIVATE praccy_core)
 target_compile_options(test_remediation_characterization PRIVATE ${PRACCY_STRICT_FLAGS})
 add_test(NAME test_remediation_characterization COMMAND test_remediation_characterization)
+
+# 18. Async Plugin Loading Tests
+add_executable(test_async_plugin_loading tests/test_async_plugin_loading.cpp)
+target_include_directories(test_async_plugin_loading PRIVATE tests)
+target_link_libraries(test_async_plugin_loading PRIVATE praccy_core)
+target_compile_options(test_async_plugin_loading PRIVATE ${PRACCY_STRICT_FLAGS})
+add_test(NAME test_async_plugin_loading COMMAND test_async_plugin_loading)

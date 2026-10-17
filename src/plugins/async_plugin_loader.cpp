@@ -1,0 +1,279 @@
+#include "async_plugin_loader.h"
+#include "vst3_host.h"
+#include "clap_host.h"
+#include "builtin_dsp.h"
+#include "../audio/graph_engine.h"
+
+#include <objbase.h>
+#include <iostream>
+#include <algorithm>
+
+namespace praccy::plugins {
+
+AsyncPluginLoader& AsyncPluginLoader::instance() {
+    static AsyncPluginLoader s_instance;
+    return s_instance;
+}
+
+AsyncPluginLoader::AsyncPluginLoader() {
+    init(2);
+}
+
+AsyncPluginLoader::~AsyncPluginLoader() {
+    shutdown();
+}
+
+void AsyncPluginLoader::init(size_t numWorkers) {
+    if (m_running.load(std::memory_order_relaxed)) return;
+    m_running.store(true, std::memory_order_release);
+
+    for (size_t i = 0; i < numWorkers; ++i) {
+        m_workers.emplace_back(&AsyncPluginLoader::workerLoop, this);
+    }
+}
+
+void AsyncPluginLoader::shutdown() {
+    if (!m_running.load(std::memory_order_relaxed)) return;
+    m_running.store(false, std::memory_order_release);
+    m_cv.notify_all();
+
+    for (auto& w : m_workers) {
+        if (w.joinable()) {
+            w.join();
+        }
+    }
+    m_workers.clear();
+
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        m_taskQueue.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_resultMutex);
+        m_completedResults.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_cancelMutex);
+        m_cancelledSlots.clear();
+        m_activeLoadingSlots.clear();
+    }
+}
+
+uint64_t AsyncPluginLoader::enqueueLoad(
+    audio::PluginSlot* slot,
+    const std::string& path,
+    PluginType type,
+    const std::string& name,
+    const std::string& vendor,
+    std::vector<uint8_t> initialState,
+    double sampleRate,
+    uint32_t maxBlockSize,
+    bool openGuiWhenDone,
+    std::function<void(bool success)> callback
+) {
+    if (!m_running.load(std::memory_order_relaxed)) {
+        init(2);
+    }
+
+    const uint64_t taskId = m_nextTaskId.fetch_add(1, std::memory_order_relaxed);
+
+    AsyncLoadTask task;
+    task.id = taskId;
+    task.targetSlot = slot;
+    task.path = path;
+    task.type = type;
+    task.name = name;
+    task.vendor = vendor;
+    task.initialState = std::move(initialState);
+    task.sampleRate = sampleRate;
+    task.maxBlockSize = maxBlockSize;
+    task.openGuiWhenDone = openGuiWhenDone;
+    task.completionCallback = std::move(callback);
+
+    {
+        std::lock_guard<std::mutex> lock(m_cancelMutex);
+        if (slot) {
+            m_cancelledSlots.erase(slot);
+            m_activeLoadingSlots.insert(slot);
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        m_taskQueue.push_back(std::move(task));
+    }
+    m_cv.notify_one();
+
+    return taskId;
+}
+
+void AsyncPluginLoader::cancelSlot(audio::PluginSlot* slot) {
+    if (!slot) return;
+    std::lock_guard<std::mutex> lock(m_cancelMutex);
+    m_cancelledSlots.insert(slot);
+    m_activeLoadingSlots.erase(slot);
+}
+
+void AsyncPluginLoader::cancelAll() {
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        m_taskQueue.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_cancelMutex);
+        for (auto* s : m_activeLoadingSlots) {
+            m_cancelledSlots.insert(s);
+        }
+        m_activeLoadingSlots.clear();
+    }
+}
+
+bool AsyncPluginLoader::isSlotLoading(const audio::PluginSlot* slot) const {
+    if (!slot) return false;
+    std::lock_guard<std::mutex> lock(m_cancelMutex);
+    return m_activeLoadingSlots.find(const_cast<audio::PluginSlot*>(slot)) != m_activeLoadingSlots.end();
+}
+
+size_t AsyncPluginLoader::pendingTaskCount() const {
+    std::lock_guard<std::mutex> lock(m_queueMutex);
+    return m_taskQueue.size();
+}
+
+void AsyncPluginLoader::workerLoop() {
+    // Initialize COM on worker thread for VST3/system interop
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    (void)hr;
+
+    while (m_running.load(std::memory_order_relaxed)) {
+        AsyncLoadTask task;
+        {
+            std::unique_lock<std::mutex> lock(m_queueMutex);
+            m_cv.wait(lock, [this]() {
+                return !m_running.load(std::memory_order_relaxed) || !m_taskQueue.empty();
+            });
+
+            if (!m_running.load(std::memory_order_relaxed) && m_taskQueue.empty()) {
+                break;
+            }
+
+            task = std::move(m_taskQueue.front());
+            m_taskQueue.pop_front();
+        }
+
+        // Check if task was cancelled before starting load
+        {
+            std::lock_guard<std::mutex> lock(m_cancelMutex);
+            if (task.targetSlot && m_cancelledSlots.count(task.targetSlot)) {
+                continue;
+            }
+        }
+
+        AsyncLoadResult result;
+        result.id = task.id;
+        result.targetSlot = task.targetSlot;
+        result.openGuiWhenDone = task.openGuiWhenDone;
+        result.completionCallback = std::move(task.completionCallback);
+
+        std::unique_ptr<IPluginInstance> inst;
+        DWORD exCode = 0;
+
+        bool callOk = safeCallPlugin([&]() {
+            if (task.type == PluginType::VST3 || task.path.find(".vst3") != std::string::npos) {
+                inst = Vst3PluginInstance::loadFromFile(task.path);
+            } else if (task.type == PluginType::CLAP || task.path.find(".clap") != std::string::npos) {
+                inst = ClapPluginInstance::loadFromFile(task.path);
+            } else {
+                if (task.path == "builtin://drive" || task.name.find("Drive") != std::string::npos) {
+                    inst = std::make_unique<OverdriveEffect>();
+                } else if (task.path == "builtin://amp" || task.name.find("Amp") != std::string::npos) {
+                    inst = std::make_unique<TubeAmpEffect>();
+                } else if (task.path == "builtin://delay" || task.name.find("Delay") != std::string::npos) {
+                    inst = std::make_unique<StereoDelayEffect>();
+                } else {
+                    inst = std::make_unique<OverdriveEffect>();
+                }
+            }
+
+            if (inst) {
+                inst->prepare(task.sampleRate, task.maxBlockSize);
+                if (!task.initialState.empty()) {
+                    inst->loadState(task.initialState);
+                }
+            }
+        }, &exCode);
+
+        // Check if task was cancelled while loading in background
+        bool wasCancelled = false;
+        {
+            std::lock_guard<std::mutex> lock(m_cancelMutex);
+            if (task.targetSlot && m_cancelledSlots.count(task.targetSlot)) {
+                wasCancelled = true;
+            }
+        }
+
+        if (wasCancelled) {
+            // Cleanly destroy plugin instance on worker thread
+            inst.reset();
+            continue;
+        }
+
+        if (callOk && inst) {
+            result.success = true;
+            result.instance = std::move(inst);
+        } else {
+            result.success = false;
+            result.errorMessage = getExceptionDescription(exCode);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(m_resultMutex);
+            m_completedResults.push_back(std::move(result));
+        }
+    }
+
+    CoUninitialize();
+}
+
+void AsyncPluginLoader::update(std::function<void(
+    audio::PluginSlot* slot,
+    std::unique_ptr<IPluginInstance> instance,
+    bool openGuiWhenDone
+)> onSlotReady) {
+    std::vector<AsyncLoadResult> completed;
+    {
+        std::lock_guard<std::mutex> lock(m_resultMutex);
+        if (m_completedResults.empty()) return;
+        completed.swap(m_completedResults);
+    }
+
+    for (auto& res : completed) {
+        bool cancelled = false;
+        {
+            std::lock_guard<std::mutex> lock(m_cancelMutex);
+            if (res.targetSlot) {
+                m_activeLoadingSlots.erase(res.targetSlot);
+                if (m_cancelledSlots.count(res.targetSlot)) {
+                    cancelled = true;
+                    m_cancelledSlots.erase(res.targetSlot);
+                }
+            }
+        }
+
+        if (cancelled) {
+            res.instance.reset();
+            if (res.completionCallback) res.completionCallback(false);
+            continue;
+        }
+
+        if (res.success && res.instance && res.targetSlot) {
+            if (onSlotReady) {
+                onSlotReady(res.targetSlot, std::move(res.instance), res.openGuiWhenDone);
+            }
+            if (res.completionCallback) res.completionCallback(true);
+        } else {
+            if (res.completionCallback) res.completionCallback(false);
+        }
+    }
+}
+
+} // namespace praccy::plugins

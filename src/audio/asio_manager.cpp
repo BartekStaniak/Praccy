@@ -195,6 +195,9 @@ bool AsioManager::start(int32_t bufferSize) {
     m_inputFloatBuffer.resize(std::max(1, m_info.numInputChannels), bufferSize);
     m_outputFloatBuffer.resize(std::max(1, m_info.numOutputChannels), bufferSize);
 
+    m_atomicBufferSize.store(bufferSize, std::memory_order_release);
+    m_atomicSampleRate.store(m_info.sampleRate, std::memory_order_release);
+
     err = m_driver->start();
     if (err != ASE_OK) {
         std::cerr << "driver start failed with error: " << err << "\n";
@@ -285,9 +288,15 @@ bool AsioManager::checkHardwareChanges() {
     }
 
     if (m_resetRequested.exchange(false, std::memory_order_acq_rel)) {
-        if (prefSz > 0 && m_info.currentBufferSize != prefSz) {
+        int32_t pending = m_pendingBufferSize.exchange(0, std::memory_order_acq_rel);
+        if (pending > 0) {
+            m_info.currentBufferSize = pending;
+            m_info.preferredBufferSize = pending;
+            m_atomicBufferSize.store(pending, std::memory_order_release);
+        } else if (prefSz > 0 && m_info.currentBufferSize != prefSz) {
             m_info.currentBufferSize = prefSz;
             m_info.preferredBufferSize = prefSz;
+            m_atomicBufferSize.store(prefSz, std::memory_order_release);
         }
         changed = true;
     }
@@ -311,6 +320,7 @@ ASIOTime* AsioManager::bufferSwitchTimeInfoCallback(ASIOTime* /*params*/, int32_
 void AsioManager::sampleRateDidChangeCallback(double sRate) {
     if (s_instance && sRate > 0.0) {
         s_instance->m_info.sampleRate = sRate;
+        s_instance->m_atomicSampleRate.store(sRate, std::memory_order_release);
         s_instance->m_resetRequested.store(true, std::memory_order_release);
     }
 }
@@ -333,11 +343,11 @@ int32_t AsioManager::asioMessageCallback(int32_t selector, int32_t value, void* 
         case 4: // kAsioBufferSizeChange
             if (s_instance) {
                 if (value > 0) {
-                    s_instance->m_info.currentBufferSize = value;
+                    s_instance->m_pendingBufferSize.store(value, std::memory_order_release);
                 }
                 s_instance->m_resetRequested.store(true, std::memory_order_release);
             }
-            return 1;
+            return 0; // Host requires asioResetRequest / buffer recreation
         case 7: // kAsioSupportsTimeInfo
             return 1;
         default:
@@ -527,7 +537,11 @@ void AsioManager::processAudio(int32_t doubleBufferIndex) {
     _mm_setcsr(_mm_getcsr() | 0x8040);
 #endif
 
-    const uint32_t bufferSize = static_cast<uint32_t>(m_info.currentBufferSize);
+    const uint32_t maxBuf = static_cast<uint32_t>(m_inputFloatBuffer.maxSamples());
+    const int32_t reqSize = m_atomicBufferSize.load(std::memory_order_relaxed);
+    const uint32_t bufferSize = (maxBuf > 0 && reqSize > 0)
+        ? std::min<uint32_t>(static_cast<uint32_t>(reqSize), maxBuf)
+        : static_cast<uint32_t>(std::max(0, reqSize));
     const int32_t inCh = m_info.numInputChannels;
     const int32_t outCh = m_info.numOutputChannels;
 

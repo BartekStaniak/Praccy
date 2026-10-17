@@ -258,6 +258,29 @@ void PluginScanner::addDefaultPaths() {
     }
 }
 
+bool PluginScanner::isSystemDefaultPath(const std::string& path) const {
+    static const std::vector<std::string> defaultRoots = []() {
+        std::vector<std::string> defaults = {
+            "C:\\Program Files\\Common Files\\VST3",
+            "C:\\Program Files\\Common Files\\CLAP",
+            "C:\\Program Files\\VstPlugins",
+            "C:\\Program Files\\Steinberg\\VstPlugins"
+        };
+        const char* localApp = std::getenv("LOCALAPPDATA");
+        if (localApp) {
+            std::string lap(localApp);
+            defaults.push_back(lap + "\\Programs\\Common\\VST3");
+            defaults.push_back(lap + "\\Programs\\Common\\CLAP");
+        }
+        return defaults;
+    }();
+
+    for (const auto& def : defaultRoots) {
+        if (_stricmp(path.c_str(), def.c_str()) == 0) return true;
+    }
+    return false;
+}
+
 void PluginScanner::addCustomSearchPath(const std::string& path) {
     if (path.empty()) return;
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -631,71 +654,95 @@ void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vec
             if (m_shouldStop.load() || ec) break;
 
             const auto& path = iter->path();
-            const std::string ext = path.extension().string();
+            std::string ext = path.extension().string();
+            for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
             if (ext == ".clap") {
-                const std::string name = path.stem().string();
-                auto itExists = std::find_if(outPlugins.begin(), outPlugins.end(), [&](const PluginDescriptor& d) {
-                    return d.name == name;
-                });
-                if (itExists == outPlugins.end()) {
-                    PluginDescriptor desc;
-                    desc.name = name;
-                    desc.path = path.string();
-                    desc.bundleFileName = path.filename().string();
-                    desc.type = PluginType::CLAP;
-                    desc.vendor = detectVendor(path, name);
+                const std::string stemName = path.stem().string();
+                struct ScannedClapDesc {
+                    std::string id;
+                    std::string name;
+                    std::string vendor;
+                };
+                std::vector<ScannedClapDesc> foundDescs;
+                bool inspected = false;
 
-                    // Extract canonical CLAP plugin ID for Tier-1 PluginResolver (guarded by SEH/VEH)
-                    try {
-                        if (HMODULE hLib = LoadLibraryExW(path.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH)) {
-                            const auto* entry = reinterpret_cast<const clap_plugin_entry_t*>(
-                                reinterpret_cast<void*>(GetProcAddress(hLib, "clap_entry")));
-                            const std::string pathStr = path.string();
-                            char clapIdBuf[256] = {0};
-                            char clapVendorBuf[128] = {0};
-                            bool initSuccess = false;
-                            DWORD exCode = 0;
-                            const bool ok = safeCallPlugin([&]() {
-                                if (entry && entry->init && entry->init(pathStr.c_str())) {
-                                    initSuccess = true;
-                                    if (entry->get_factory) {
-                                        const auto* fac = static_cast<const clap_plugin_factory_t*>(
-                                            entry->get_factory(CLAP_PLUGIN_FACTORY_ID));
-                                        if (fac && fac->get_plugin_count && fac->get_plugin_count(fac) > 0 && fac->get_plugin_descriptor) {
-                                            if (const auto* cDesc = fac->get_plugin_descriptor(fac, 0)) {
-                                                if (cDesc->id) std::strncpy(clapIdBuf, cDesc->id, sizeof(clapIdBuf) - 1);
-                                                if (cDesc->vendor && cDesc->vendor[0] != '\0') {
-                                                    std::strncpy(clapVendorBuf, cDesc->vendor, sizeof(clapVendorBuf) - 1);
-                                                }
+                try {
+                    if (HMODULE hLib = LoadLibraryExW(path.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH)) {
+                        const auto* entry = reinterpret_cast<const clap_plugin_entry_t*>(
+                            reinterpret_cast<void*>(GetProcAddress(hLib, "clap_entry")));
+                        const std::string pathStr = path.string();
+                        bool initSuccess = false;
+                        DWORD exCode = 0;
+                        const bool ok = safeCallPlugin([&]() {
+                            if (entry && entry->init && entry->init(pathStr.c_str())) {
+                                initSuccess = true;
+                                if (entry->get_factory) {
+                                    const auto* fac = static_cast<const clap_plugin_factory_t*>(
+                                        entry->get_factory(CLAP_PLUGIN_FACTORY_ID));
+                                    if (fac && fac->get_plugin_count && fac->get_plugin_descriptor) {
+                                        const uint32_t count = fac->get_plugin_count(fac);
+                                        for (uint32_t cIdx = 0; cIdx < count; ++cIdx) {
+                                            if (const auto* cDesc = fac->get_plugin_descriptor(fac, cIdx)) {
+                                                ScannedClapDesc cd;
+                                                if (cDesc->id) cd.id = cDesc->id;
+                                                if (cDesc->name) cd.name = cDesc->name;
+                                                if (cDesc->vendor && cDesc->vendor[0] != '\0') cd.vendor = cDesc->vendor;
+                                                foundDescs.push_back(std::move(cd));
                                             }
                                         }
                                     }
-                                    if (entry->deinit) entry->deinit();
                                 }
-                            }, &exCode);
-                            if (ok && initSuccess) {
-                                if (clapIdBuf[0] != '\0') desc.clapId = clapIdBuf;
-                                if (clapVendorBuf[0] != '\0') desc.vendor = clapVendorBuf;
-                            } else {
-                                std::cerr << "[PluginScanner] Failed to initialize CLAP plugin: " << pathStr << "\n";
+                                if (entry->deinit) entry->deinit();
                             }
-                            FreeLibrary(hLib);
-                        } else {
-                            std::cerr << "[PluginScanner] Failed to load CLAP library: " << path.string() << " (error: " << GetLastError() << ")\n";
-                        }
-                    } catch (const std::exception& ex) {
-                        std::cerr << "[PluginScanner] Exception inspecting CLAP " << path.string() << ": " << ex.what() << "\n";
-                    } catch (...) {
-                        std::cerr << "[PluginScanner] Unknown exception inspecting CLAP " << path.string() << "\n";
+                        }, &exCode);
+                        FreeLibrary(hLib);
+                        inspected = ok && initSuccess;
                     }
+                } catch (...) {
+                    inspected = false;
+                }
 
-                    {
-                        std::lock_guard<std::mutex> lock(m_mutex);
-                        auto catIt = m_categoryOverrides.find(name);
-                        desc.category = (catIt != m_categoryOverrides.end()) ? catIt->second : detectPluginCategory(name, desc.vendor);
+                if (inspected && !foundDescs.empty()) {
+                    for (const auto& fd : foundDescs) {
+                        const std::string name = fd.name.empty() ? stemName : fd.name;
+                        auto itExists = std::find_if(outPlugins.begin(), outPlugins.end(), [&](const PluginDescriptor& d) {
+                            return d.name == name;
+                        });
+                        if (itExists == outPlugins.end()) {
+                            PluginDescriptor desc;
+                            desc.name = name;
+                            desc.path = path.string();
+                            desc.bundleFileName = path.filename().string();
+                            desc.type = PluginType::CLAP;
+                            desc.clapId = fd.id;
+                            desc.vendor = !fd.vendor.empty() ? fd.vendor : detectVendor(path, name);
+                            {
+                                std::lock_guard<std::mutex> lock(m_mutex);
+                                auto catIt = m_categoryOverrides.find(name);
+                                desc.category = (catIt != m_categoryOverrides.end()) ? catIt->second : detectPluginCategory(name, desc.vendor);
+                            }
+                            outPlugins.push_back(std::move(desc));
+                        }
                     }
-                    outPlugins.push_back(std::move(desc));
+                } else {
+                    auto itExists = std::find_if(outPlugins.begin(), outPlugins.end(), [&](const PluginDescriptor& d) {
+                        return d.name == stemName;
+                    });
+                    if (itExists == outPlugins.end()) {
+                        PluginDescriptor desc;
+                        desc.name = stemName;
+                        desc.path = path.string();
+                        desc.bundleFileName = path.filename().string();
+                        desc.type = PluginType::CLAP;
+                        desc.vendor = detectVendor(path, stemName);
+                        {
+                            std::lock_guard<std::mutex> lock(m_mutex);
+                            auto catIt = m_categoryOverrides.find(stemName);
+                            desc.category = (catIt != m_categoryOverrides.end()) ? catIt->second : detectPluginCategory(stemName, desc.vendor);
+                        }
+                        outPlugins.push_back(std::move(desc));
+                    }
                 }
             } else if (ext == ".vst3") {
                 const std::string name = path.stem().string();
@@ -708,7 +755,7 @@ void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vec
                     desc.path = path.string();
                     desc.bundleFileName = path.filename().string();
                     desc.type = PluginType::VST3;
-                    desc.vendor = detectVendor(path, name);
+                    std::string factoryVendor;
 
                     // Extract canonical 32-char VST3 Class GUID for Tier-1 PluginResolver (guarded by SEH/VEH)
                     try {
@@ -721,11 +768,16 @@ void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vec
                             auto* getFactory = reinterpret_cast<GetFactoryProc>(reinterpret_cast<void*>(GetProcAddress(hLib, "GetPluginFactory")));
                             if (getFactory) {
                                 char hex[33] = {0};
+                                char vendorBuf[128] = {0};
                                 bool hadFactory = false;
                                 DWORD exCode = 0;
                                 const bool ok = safeCallPlugin([&]() {
                                     if (auto* factory = getFactory()) {
                                         hadFactory = true;
+                                        Steinberg::PFactoryInfo fInfo{};
+                                        if (factory->getFactoryInfo(&fInfo) == Steinberg::kResultOk && fInfo.vendor[0] != '\0') {
+                                            std::strncpy(vendorBuf, fInfo.vendor, sizeof(vendorBuf) - 1);
+                                        }
                                         const int32_t nClasses = factory->countClasses();
                                         Steinberg::PClassInfo ci{};
                                         for (int32_t cIdx = 0; cIdx < nClasses; ++cIdx) {
@@ -742,6 +794,7 @@ void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vec
                                 }, &exCode);
                                 if (ok && hadFactory) {
                                     if (hex[0] != '\0') desc.classGuid = hex;
+                                    if (vendorBuf[0] != '\0') factoryVendor = vendorBuf;
                                 } else {
                                     std::cerr << "[PluginScanner] GetPluginFactory failed or returned nullptr for: " << dllPath.string() << "\n";
                                 }
@@ -758,6 +811,7 @@ void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vec
                         std::cerr << "[PluginScanner] Unknown exception inspecting VST3 " << path.string() << "\n";
                     }
 
+                    desc.vendor = !factoryVendor.empty() ? factoryVendor : detectVendor(path, name);
                     {
                         std::lock_guard<std::mutex> lock(m_mutex);
                         auto catIt = m_categoryOverrides.find(name);

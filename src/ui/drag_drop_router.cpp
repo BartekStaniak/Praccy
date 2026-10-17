@@ -135,10 +135,17 @@ bool DragDropRouter::handleDrop(const std::string& path, DropContext& ctx) const
                     return state::UniversalDawInteropManager::instance().importAndApply(p, *ctx.graph, *ctx.scenes, *ctx.scanner);
                 }
                 plugins::PluginScanner fallbackScanner;
+                fallbackScanner.scanAll();
                 return state::UniversalDawInteropManager::instance().importAndApply(p, *ctx.graph, *ctx.scenes, fallbackScanner);
             }
             if (ctx.scenes) {
-                return ctx.scenes->loadFromFile(path);
+                if (std::filesystem::exists(p) && ctx.scenes->loadFromFile(path)) {
+                    if (ctx.graph) {
+                        ctx.scenes->applyScene(0, *ctx.graph, true /* allowAsync */);
+                    }
+                    return true;
+                }
+                return false;
             }
             return false;
         }
@@ -151,10 +158,14 @@ bool DragDropRouter::handleDrop(const std::string& path, DropContext& ctx) const
                         return state::UniversalDawInteropManager::instance().importAndApply(p, *ctx.graph, *ctx.scenes, *ctx.scanner);
                     }
                     plugins::PluginScanner fallbackScanner;
+                    fallbackScanner.scanAll();
                     return state::UniversalDawInteropManager::instance().importAndApply(p, *ctx.graph, *ctx.scenes, fallbackScanner);
                 } else {
-                    ctx.scenes->loadPresetChain(p.stem().string(), *ctx.graph);
-                    return true;
+                    if (std::filesystem::exists(p) && ctx.scenes->loadFromFile(path)) {
+                        ctx.scenes->applyScene(0, *ctx.graph, true /* allowAsync */);
+                        return true;
+                    }
+                    return ctx.scenes->loadPresetChain(p.stem().string(), *ctx.graph, true /* allowAsync */);
                 }
             }
             return false;

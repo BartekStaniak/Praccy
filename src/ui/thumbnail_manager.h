@@ -73,6 +73,9 @@ private:
     std::unordered_map<std::string, Thumbnail> m_cache;
     std::unordered_map<std::string, std::filesystem::path> m_discoveredFiles;
     std::vector<PendingCapture> m_pendingCaptures;
+    std::vector<ID3D11ShaderResourceView*> m_retiredSrvs;
+
+    void flushRetiredResources() noexcept;
 };
 
 } // namespace praccy::ui

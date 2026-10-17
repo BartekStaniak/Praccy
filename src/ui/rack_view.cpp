@@ -9,6 +9,7 @@
 #include "../plugins/clap_host.h"
 #include "../plugins/vst3_host.h"
 #include "../plugins/plugin_window.h"
+#include "../plugins/async_plugin_loader.h"
 #include "../state/app_config.h"
 #include "../utils/wav_writer.h"
 #include "widgets/rotary_knob.h"
@@ -256,7 +257,7 @@ RackView::RackView(audio::GraphEngine& graph,
     m_riffBuffer.prepare(48000.0, static_cast<int>(cfg.retroactiveBufferMinutes));
 
     if (!cfg.lastLoadedPreset.empty()) {
-        if (m_scenes.loadPresetChain(cfg.lastLoadedPreset, m_graph)) {
+        if (m_scenes.loadPresetChain(cfg.lastLoadedPreset, m_graph, true /* allowAsync */)) {
             m_auditionedPreset = cfg.lastLoadedPreset;
         }
     }
@@ -300,6 +301,18 @@ void RackView::applyAudioSettings(double sRate, uint32_t bufSize) {
     m_asio.start(bufSize);
 }
 
+void RackView::recallScene(size_t index) {
+    if (m_scenes.applyScene(static_cast<int>(index), m_graph, true /* allowAsync */)) {
+        syncMacrosFromGraph();
+        const auto* sc = m_scenes.getScene(index);
+        std::string name = sc ? sc->name : ("Preset " + std::to_string(index + 1));
+        triggerHudToast("SCENE: " + name);
+        m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, name),
+                                   name,
+                                   state::UndoActionType::SceneSwitch);
+    }
+}
+
 bool RackView::isPresetFavorite(const std::string& name) const {
     return std::find(m_favoritePresets.begin(), m_favoritePresets.end(), name) != m_favoritePresets.end();
 }
@@ -320,7 +333,7 @@ void RackView::toggleFavoritePreset(const std::string& name) {
 }
 
 bool RackView::loadPresetChain(const std::string& name) {
-    if (m_scenes.loadPresetChain(name, m_graph)) {
+    if (m_scenes.loadPresetChain(name, m_graph, true /* allowAsync */)) {
         m_auditionedPreset = name;
         syncMacrosFromGraph();
         m_undoManager.pushSnapshot(
@@ -347,6 +360,29 @@ void RackView::render() {
     if (m_config.enableLiveThumbnails && m_thumbnailMgr) {
         m_thumbnailMgr->update();
     }
+
+    plugins::AsyncPluginLoader::instance().update([this](audio::PluginSlot* slot, std::unique_ptr<plugins::IPluginInstance> inst, bool openGuiWhenDone) {
+        if (!slot || !inst) return;
+        std::unique_ptr<audio::AudioNode> oldNode;
+        plugins::IPluginInstance* instPtr = inst.get();
+        std::string name = inst->name();
+        slot->replaceInnerNode(std::move(inst), oldNode);
+
+        // Reinitialize macros for newly available parameters
+        initMacrosForSlot(slot);
+
+        triggerHudToast("LOADED: " + name);
+
+        // Option 2.A: Automatically open GUI window if requested
+        if (openGuiWhenDone && instPtr->hasCustomGui()) {
+            refreshGuiParamBaseline(slot);
+            plugins::PluginWindowManager::instance().openPluginWindow(instPtr);
+            HWND hWin = plugins::PluginWindowManager::instance().getWindow(instPtr);
+            if (hWin && m_config.enableLiveThumbnails && m_thumbnailMgr) {
+                m_thumbnailMgr->captureWindowAsync(name, hWin, 30);
+            }
+        }
+    });
 
     pollPluginGuiEdits(false);
 
@@ -462,7 +498,7 @@ void RackView::render() {
                 for (int k = 0; k < 8 && k < static_cast<int>(m_scenes.numScenes()); ++k) {
                     const auto presetKey = static_cast<ImGuiKey>(ImGuiKey_1 + k);
                     if (!isKeyCustomBound(presetKey) && ImGui::IsKeyPressed(presetKey, false)) {
-                        if (m_scenes.applyScene(k, m_graph)) {
+                        if (m_scenes.applyScene(k, m_graph, true /* allowAsync */)) {
                             syncMacrosFromGraph();
                             triggerHudToast("PRESET " + std::to_string(k + 1) + " RECALLED");
                             m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Recall Preset " + std::to_string(k + 1)),
@@ -573,6 +609,9 @@ void RackView::render() {
             m_settingsModal->render();
             if (wasOpen && !m_settingsModal->isOpen()) {
                 m_config.load();
+                double sr = m_asio.currentSampleRate();
+                if (sr <= 0.0) sr = 48000.0;
+                m_riffBuffer.prepare(sr, static_cast<int>(m_config.retroactiveBufferMinutes));
             }
         }
         m_practiceToolsModal->render();
@@ -1831,6 +1870,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
     }
     const bool isFaulted = pluginInst && pluginInst->isFaulted();
     const bool isMissing = slot->innerNode() && slot->innerNode()->isMissing();
+    const bool isLoading = slot->innerNode() && slot->innerNode()->isLoading();
     const bool bypassed = slot->isBypassed();
 
     ImVec4 cardBg = (isFaulted || isMissing) ? static_cast<ImVec4>(tokens.surfaces.cardBgFaulted) :
@@ -1863,7 +1903,10 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         // Format pill badge
         const char* badgeStr = "DSP";
         ImU32 badgeTextCol = tokens.text.badgeInternal;
-        if (isMissing) {
+        if (isLoading) {
+            badgeStr = "LOADING";
+            badgeTextCol = tokens.signal.active.u32;
+        } else if (isMissing) {
             badgeStr = "MISSING";
             badgeTextCol = tokens.signal.faulted.u32;
         } else if (pluginInst) {
@@ -1875,8 +1918,10 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                 badgeTextCol = tokens.text.badgeClap;
             }
         }
-        renderBadgePill(badgeStr, isMissing ? tokens.surfaces.cardBgFaulted : tokens.surfaces.frameBg,
-                        isMissing ? tokens.borders.cardFaulted : tokens.borders.focus, badgeTextCol, ui::px(18.0f));
+        renderBadgePill(badgeStr,
+                        isMissing ? tokens.surfaces.cardBgFaulted : tokens.surfaces.frameBg,
+                        isLoading ? static_cast<ImU32>(tokens.borders.focus) : (isMissing ? static_cast<ImU32>(tokens.borders.cardFaulted) : static_cast<ImU32>(tokens.borders.focus)),
+                        badgeTextCol, ui::px(18.0f));
         ImGui::SameLine(0, ui::px(6.0f));
 
         // Flex title with scrolling marquee if overflowing
@@ -1888,9 +1933,10 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
 
         const float fontH = ImGui::GetFontSize();
         ImGui::SetCursorPosY(ui::px(8.0f));
-        const ImVec4 titleColor = isMissing ? tokens.signal.faulted.vec4 :
+        const ImVec4 titleColor = isLoading ? tokens.signal.active.vec4 :
+                                  (isMissing ? tokens.signal.faulted.vec4 :
                                   (isFaulted ? tokens.signal.faulted.vec4 :
-                                  (bypassed ? tokens.signal.bypassed.vec4 : tokens.text.primary.vec4));
+                                  (bypassed ? tokens.signal.bypassed.vec4 : tokens.text.primary.vec4)));
 
         ImVec2 titlePos = ImGui::GetCursorScreenPos();
         char titleBtnId[64];
@@ -1971,6 +2017,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         char delId[32];
         std::snprintf(delId, sizeof(delId), "##Del_%d_%d_%d", slotIndex, blockIndex, branchIndex);
         if (renderCenteredDeleteButton(delId, ImVec2(ui::px(18.0f), ui::px(18.0f)))) {
+            plugins::AsyncPluginLoader::instance().cancelSlot(slot);
             if (hasGui) plugins::PluginWindowManager::instance().closePluginWindow(pluginInst);
             if (m_dspTweakSlot == slot) m_dspTweakSlot = nullptr;
             if (m_expandedSlot == slot) m_expandedSlot = nullptr;
@@ -2029,7 +2076,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                 m_awaitingKeyTarget.targetLabel = slot->name() + " Bypass";
                 triggerHudToast("PRESS KEY FOR: " + m_awaitingKeyTarget.targetLabel);
             } else if (m_midiMapMode) {
-                m_midi.startLearning(midi::BindingTargetType::SlotBypass, slotIndex, branchIndex);
+                m_midi.startLearning(midi::BindingTargetType::SlotBypass, effSlot, branchIndex, -1, effBranchSlot);
                 triggerHudToast("MIDI LEARN: " + slot->name() + " BYPASS");
             } else {
                 slot->setBypassed(!activeState);
@@ -2051,7 +2098,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             m_awaitingKeyTarget.targetLabel = slot->name() + " Bypass";
             triggerHudToast("PRESS KEY FOR: " + m_awaitingKeyTarget.targetLabel);
         } else if (m_midiMapMode && ImGui::IsItemClicked()) {
-            m_midi.startLearning(midi::BindingTargetType::SlotBypass, slotIndex, branchIndex);
+            m_midi.startLearning(midi::BindingTargetType::SlotBypass, effSlot, branchIndex, -1, effBranchSlot);
             triggerHudToast("MIDI LEARN: " + slot->name() + " BYPASS");
         }
 
@@ -2120,7 +2167,35 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         }
 
         // Preview rendering:
-        if (isMissing) {
+        if (isLoading) {
+            const float t = static_cast<float>(ImGui::GetTime());
+            const float pulse = 0.55f + 0.45f * std::sin(5.0f * t);
+
+            // Animated subtle loading arc spinner
+            const float centerX = previewPos.x + previewW * 0.5f;
+            const float centerY = previewPos.y + previewH * 0.35f;
+            const float radius = ui::px(10.0f);
+
+            const int numSegments = 16;
+            const float startAngle = t * 6.0f;
+            const float arcLength = 4.71239f; // 270 degrees
+            dl->PathClear();
+            for (int i = 0; i <= numSegments; ++i) {
+                float a = startAngle + (static_cast<float>(i) / static_cast<float>(numSegments)) * arcLength;
+                dl->PathLineTo(ImVec2(centerX + std::cos(a) * radius, centerY + std::sin(a) * radius));
+            }
+            dl->PathStroke(tokens.borders.focus.withAlpha(pulse), 0, 2.0f);
+
+            const char* loadTitle = "LOADING PLUGIN...";
+            ImVec2 tSz = ImGui::CalcTextSize(loadTitle);
+            dl->AddText(ImVec2(previewPos.x + (previewW - tSz.x) * 0.5f, previewPos.y + previewH - ui::px(24.0f)),
+                        tokens.signal.active, loadTitle);
+
+            const char* loadSub = "Dry signal pass-through active";
+            ImVec2 sSz = ImGui::CalcTextSize(loadSub);
+            dl->AddText(ImVec2(previewPos.x + (previewW - sSz.x) * 0.5f, previewPos.y + previewH - ui::px(11.0f)),
+                        tokens.text.secondary, loadSub);
+        } else if (isMissing) {
             const char* missTitle = "MISSING PLUGIN";
             ImVec2 tSz = ImGui::CalcTextSize(missTitle);
             dl->AddText(ImVec2(previewPos.x + (previewW - tSz.x) * 0.5f, previewPos.y + 4.0f),
@@ -2152,8 +2227,10 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             char reloadBtnId[48];
             std::snprintf(reloadBtnId, sizeof(reloadBtnId), "RELOAD PLUGIN##%d_%d_%d", slotIndex, blockIndex, branchIndex);
             if (ImGui::Button(reloadBtnId, ImVec2(130.0f, 18.0f))) {
-                pluginInst->resetFault();
-                slot->reset();
+                m_graph.executeWithAudioFence([&]() {
+                    pluginInst->resetFault();
+                    slot->reset();
+                });
             }
         } else {
             bool drawnThumbnail = false;
@@ -2176,29 +2253,34 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         }
 
         // Crisp inner border stroke
-        ImU32 frameBorder = (isFaulted || isMissing) ? static_cast<ImU32>(tokens.borders.cardFaulted) :
+        ImU32 frameBorder = isLoading ? static_cast<ImU32>(tokens.borders.focus.withAlpha(0.6f + 0.4f * std::sin(6.0f * static_cast<float>(ImGui::GetTime())))) :
+                            ((isFaulted || isMissing) ? static_cast<ImU32>(tokens.borders.cardFaulted) :
                             (isWindowOpen ? static_cast<ImU32>(tokens.borders.cardGlowOpen) :
                             (isPreviewHovered ? static_cast<ImU32>(tokens.borders.cardHovered) :
-                            (bypassed ? static_cast<ImU32>(tokens.borders.cardBypassed) : static_cast<ImU32>(tokens.borders.card))));
+                            (bypassed ? static_cast<ImU32>(tokens.borders.cardBypassed) : static_cast<ImU32>(tokens.borders.card)))));
         dl->AddRect(previewPos, ImVec2(previewPos.x + previewW, previewPos.y + previewH), frameBorder, 5.0f, 0, 1.5f);
 
         if (previewClicked && !isFaulted && !isMissing) {
-            m_focusedSlot = slot;
-            m_focusedSlotIndex = slotIndex;
-            m_focusedBlockIndex = blockIndex;
-            m_focusedBranchIndex = branchIndex;
-            if (hasGui) {
-                refreshGuiParamBaseline(slot);
-                plugins::PluginWindowManager::instance().openPluginWindow(pluginInst);
-                HWND hWin = plugins::PluginWindowManager::instance().getWindow(pluginInst);
-                if (hWin && m_config.enableLiveThumbnails && m_thumbnailMgr) {
-                    m_thumbnailMgr->captureWindowAsync(slot->name(), hWin, 30);
-                }
+            if (isLoading) {
+                triggerHudToast("LOADING IN BACKGROUND... WILL ACTIVATE SHORTLY");
             } else {
-                m_dspTweakSlot = (m_dspTweakSlot == slot) ? nullptr : slot;
+                m_focusedSlot = slot;
+                m_focusedSlotIndex = slotIndex;
+                m_focusedBlockIndex = blockIndex;
+                m_focusedBranchIndex = branchIndex;
+                if (hasGui) {
+                    refreshGuiParamBaseline(slot);
+                    plugins::PluginWindowManager::instance().openPluginWindow(pluginInst);
+                    HWND hWin = plugins::PluginWindowManager::instance().getWindow(pluginInst);
+                    if (hWin && m_config.enableLiveThumbnails && m_thumbnailMgr) {
+                        m_thumbnailMgr->captureWindowAsync(slot->name(), hWin, 30);
+                    }
+                } else {
+                    m_dspTweakSlot = (m_dspTweakSlot == slot) ? nullptr : slot;
+                }
+                m_expandedSlot = slot;
+                m_expandPulseTimer = 1.0f;
             }
-            m_expandedSlot = slot;
-            m_expandPulseTimer = 1.0f;
         }
     }
 
@@ -2462,7 +2544,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             triggerHudToast("PRESS KEY FOR: " + m_awaitingKeyTarget.targetLabel);
         } else if (mixChanged) {
             if (m_midiMapMode) {
-                m_midi.startLearning(midi::BindingTargetType::SlotDryWet, slotIndex, branchIndex);
+                m_midi.startLearning(midi::BindingTargetType::SlotDryWet, effSlot, branchIndex, -1, effBranchSlot);
                 triggerHudToast("MIDI LEARN: " + slot->name() + " MIX");
             } else {
                 slot->setDryWet(mix / 100.0f);
@@ -2474,7 +2556,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                 }
             }
         } else if (m_midiMapMode && ImGui::IsItemClicked()) {
-            m_midi.startLearning(midi::BindingTargetType::SlotDryWet, slotIndex, branchIndex);
+            m_midi.startLearning(midi::BindingTargetType::SlotDryWet, effSlot, branchIndex, -1, effBranchSlot);
             triggerHudToast("MIDI LEARN: " + slot->name() + " MIX");
         }
 
@@ -2544,7 +2626,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             triggerHudToast("PRESS KEY FOR: " + m_awaitingKeyTarget.targetLabel);
         } else if (trimChanged) {
             if (m_midiMapMode) {
-                m_midi.startLearning(midi::BindingTargetType::SlotOutputGain, slotIndex, branchIndex);
+                m_midi.startLearning(midi::BindingTargetType::SlotOutputGain, effSlot, branchIndex, -1, effBranchSlot);
                 triggerHudToast("MIDI LEARN: " + slot->name() + " TRIM");
             } else {
                 slot->setOutputGainDb(outTrim);
@@ -2556,7 +2638,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                 }
             }
         } else if (m_midiMapMode && ImGui::IsItemClicked()) {
-            m_midi.startLearning(midi::BindingTargetType::SlotOutputGain, slotIndex, branchIndex);
+            m_midi.startLearning(midi::BindingTargetType::SlotOutputGain, effSlot, branchIndex, -1, effBranchSlot);
             triggerHudToast("MIDI LEARN: " + slot->name() + " TRIM");
         }
 
@@ -2610,14 +2692,16 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             }
             ImGui::Separator();
         }
+        const int effSlot = (blockIndex >= 0 ? blockIndex : slotIndex);
+        const int effBranchSlot = (blockIndex >= 0 ? slotIndex : -1);
         if (ImGui::MenuItem("MIDI Learn: Bypass Toggle")) {
-            m_midi.startLearning(midi::BindingTargetType::SlotBypass, slotIndex, branchIndex);
+            m_midi.startLearning(midi::BindingTargetType::SlotBypass, effSlot, branchIndex, -1, effBranchSlot);
         }
         if (ImGui::MenuItem("MIDI Learn: Dry/Wet Mix")) {
-            m_midi.startLearning(midi::BindingTargetType::SlotDryWet, slotIndex, branchIndex);
+            m_midi.startLearning(midi::BindingTargetType::SlotDryWet, effSlot, branchIndex, -1, effBranchSlot);
         }
         if (ImGui::MenuItem("MIDI Learn: Output Trim")) {
-            m_midi.startLearning(midi::BindingTargetType::SlotOutputGain, slotIndex, branchIndex);
+            m_midi.startLearning(midi::BindingTargetType::SlotOutputGain, effSlot, branchIndex, -1, effBranchSlot);
         }
         if (ImGui::MenuItem("Delete Slot")) {
             if (hasGui) plugins::PluginWindowManager::instance().closePluginWindow(pluginInst);
@@ -4352,7 +4436,7 @@ void RackView::cycleAdjacentScenePreset(int delta) {
     int maxScenes = static_cast<int>(std::min<size_t>(m_scenes.numScenes(), 8));
     int next = std::clamp(current + delta, 0, maxScenes - 1);
     if (next != current) {
-        if (m_scenes.applyScene(next, m_graph)) {
+        if (m_scenes.applyScene(next, m_graph, true /* allowAsync */)) {
             syncMacrosFromGraph();
             const auto* sc = m_scenes.getScene(next);
             std::string name = sc ? sc->name : ("Preset " + std::to_string(next + 1));
@@ -5054,8 +5138,8 @@ void RackView::dispatchKeyBindings() {
                 slot->setDryWet(next);
                 for (size_t m = 0; m < 4; ++m) {
                     if (slot->macros()[m].isSlotMix) {
-                        slot->macros()[m].currentValue = next;
-                        m_slotMacros[slot][m].currentValue = next;
+                        slot->macros()[m].currentValue = next * 100.0f;
+                        m_slotMacros[slot][m].currentValue = next * 100.0f;
                     }
                 }
                 char buf[64];

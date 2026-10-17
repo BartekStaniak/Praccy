@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <charconv>
 
 namespace praccy::state {
 
@@ -23,20 +24,21 @@ bool ReaperAdapter::parsePinmap(std::string_view line, uint64_t& inMask, uint64_
     while (pos < line.size() && std::isspace(static_cast<unsigned char>(line[pos]))) pos++;
     if (pos >= line.size()) return false;
 
-    char* endA = nullptr;
-    const char* strA = line.data() + pos;
-    inMask = std::strtoull(strA, &endA, 10);
-    if (!endA || endA == strA) return false;
+    const char* first = line.data() + pos;
+    const char* last = line.data() + line.size();
 
-    while (*endA && std::isspace(static_cast<unsigned char>(*endA))) endA++;
-    if (!*endA) {
+    auto resA = std::from_chars(first, last, inMask, 10);
+    if (resA.ec != std::errc{}) return false;
+
+    first = resA.ptr;
+    while (first < last && std::isspace(static_cast<unsigned char>(*first))) first++;
+    if (first >= last) {
         outMask = inMask;
         return true;
     }
 
-    char* endB = nullptr;
-    outMask = std::strtoull(endA, &endB, 10);
-    return (endB && endB != endA);
+    auto resB = std::from_chars(first, last, outMask, 10);
+    return resB.ec == std::errc{};
 }
 
 bool ReaperAdapter::unpackVst3ChunkEnvelope(
@@ -103,6 +105,10 @@ std::vector<uint8_t> ReaperAdapter::packVst3ChunkEnvelope(
 }
 
 std::optional<ScenePreset> ReaperAdapter::parseToScene(const std::filesystem::path& path) {
+    std::error_code ec;
+    auto sz = std::filesystem::file_size(path, ec);
+    if (ec || sz == 0 || sz > kMaxPresetFileSize) return std::nullopt;
+
     std::ifstream file(path);
     if (!file.is_open()) return std::nullopt;
 
@@ -407,29 +413,46 @@ bool ReaperAdapter::exportFromScene(const ScenePreset& scene, const std::filesys
     out << "  DOCKED 0\n";
     out << "  BYPASS 0 0 0\n";
 
+    auto sanitize = [](std::string_view input) -> std::string {
+        std::string s;
+        s.reserve(input.size());
+        for (char c : input) {
+            if (c == '"' || c == '\r' || c == '\n') {
+                s.push_back(' ');
+            } else {
+                s.push_back(c);
+            }
+        }
+        return s;
+    };
+
     auto writeSlot = [&](const PluginSlotPreset& slot, bool hasPinmap, uint64_t inPins, uint64_t outPins) {
         std::string plugType = slot.type;
         if (plugType.empty()) {
             plugType = "VST3";
         }
 
-        std::string displayName = slot.name;
+        std::string displayName = sanitize(slot.name);
         if (displayName.starts_with("VST3: ")) displayName = displayName.substr(6);
         else if (displayName.starts_with("CLAP: ")) displayName = displayName.substr(6);
         else if (displayName.starts_with("BuiltIn: ")) displayName = displayName.substr(9);
 
+        std::string bundleFile = sanitize(slot.bundleFileName);
+        std::string cleanPath = sanitize(slot.path);
+        std::string cleanClapId = sanitize(slot.clapId);
+
         if (plugType == "CLAP") {
             out << "  <CLAP \"CLAP: " << displayName << "\" \""
-                << (slot.bundleFileName.empty() ? (displayName + ".clap") : slot.bundleFileName)
+                << (bundleFile.empty() ? (displayName + ".clap") : bundleFile)
                 << "\" 0 \"\" 0\n";
         } else if (plugType == "BuiltIn") {
             out << "  ; PRACCY_TYPE=BuiltIn\n";
             out << "  <VST \"BuiltIn: " << displayName << "\" \""
-                << (slot.bundleFileName.empty() ? (displayName + ".vst3") : slot.bundleFileName)
+                << (bundleFile.empty() ? (displayName + ".vst3") : bundleFile)
                 << "\" 0 \"\" 0\n";
         } else {
             out << "  <VST \"VST3: " << displayName << "\" \""
-                << (slot.bundleFileName.empty() ? (displayName + ".vst3") : slot.bundleFileName)
+                << (bundleFile.empty() ? (displayName + ".vst3") : bundleFile)
                 << "\" 0 \"\" 0\n";
         }
 
@@ -449,11 +472,11 @@ bool ReaperAdapter::exportFromScene(const ScenePreset& scene, const std::filesys
             out << "  PINMAP " << inPins << " " << outPins << "\n";
         }
         out << "  PRACCY_TYPE " << plugType << "\n";
-        if (!slot.path.empty()) {
-            out << "  PRACCY_PATH " << slot.path << "\n";
+        if (!cleanPath.empty()) {
+            out << "  PRACCY_PATH " << cleanPath << "\n";
         }
-        if (!slot.clapId.empty()) {
-            out << "  PRACCY_CLAP_ID " << slot.clapId << "\n";
+        if (!cleanClapId.empty()) {
+            out << "  PRACCY_CLAP_ID " << cleanClapId << "\n";
         }
         out << "  WAK 0 0\n";
     };
@@ -465,7 +488,7 @@ bool ReaperAdapter::exportFromScene(const ScenePreset& scene, const std::filesys
             // Branch A
             if (!node.branches.empty()) {
                 const auto& bA = node.branches[0];
-                out << "  ; PRACCY_BRANCH_A name=\"" << bA.name
+                out << "  ; PRACCY_BRANCH_A name=\"" << sanitize(bA.name)
                     << "\" gainDb=" << bA.gainDb
                     << " pan=" << bA.pan
                     << " muted=" << (bA.muted ? 1 : 0)
@@ -479,7 +502,7 @@ bool ReaperAdapter::exportFromScene(const ScenePreset& scene, const std::filesys
             // Branch B
             if (node.branches.size() > 1) {
                 const auto& bB = node.branches[1];
-                out << "  ; PRACCY_BRANCH_B name=\"" << bB.name
+                out << "  ; PRACCY_BRANCH_B name=\"" << sanitize(bB.name)
                     << "\" gainDb=" << bB.gainDb
                     << " pan=" << bB.pan
                     << " muted=" << (bB.muted ? 1 : 0)

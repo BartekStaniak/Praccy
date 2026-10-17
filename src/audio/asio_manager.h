@@ -49,9 +49,9 @@ public:
 
     [[nodiscard]] bool isLoaded() const noexcept { return m_driver != nullptr; }
     [[nodiscard]] bool isRunning() const noexcept { return m_isRunning.load(std::memory_order_relaxed); }
+    [[nodiscard]] double currentSampleRate() const noexcept { return m_atomicSampleRate.load(std::memory_order_relaxed); }
+    [[nodiscard]] int32_t currentBufferSize() const noexcept { return m_atomicBufferSize.load(std::memory_order_relaxed); }
     [[nodiscard]] const AsioDriverInfo& driverInfo() const noexcept { return m_info; }
-    [[nodiscard]] double currentSampleRate() const noexcept { return m_info.sampleRate; }
-    [[nodiscard]] int32_t currentBufferSize() const noexcept { return m_info.currentBufferSize; }
 
     bool setSampleRate(double sampleRate);
     bool setBufferSize(int32_t bufferSize);
@@ -59,7 +59,9 @@ public:
     bool checkHardwareChanges();
 
     void setAudioCallback(AudioCallbackFn callback) {
-        m_callback = std::move(callback);
+        if (!m_isRunning.load(std::memory_order_acquire)) {
+            m_callback = std::move(callback);
+        }
     }
 
     // Sample format conversion routines (public for real-time engine & unit tests)
@@ -91,6 +93,9 @@ private:
     ASIOCallbacks m_callbacks{};
     std::atomic<bool> m_isRunning{false};
     std::atomic<bool> m_resetRequested{false};
+    std::atomic<double> m_atomicSampleRate{48000.0};
+    std::atomic<int32_t> m_atomicBufferSize{256};
+    std::atomic<int32_t> m_pendingBufferSize{0};
 
     AudioCallbackFn m_callback;
 

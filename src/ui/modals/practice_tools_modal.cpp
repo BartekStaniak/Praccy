@@ -401,7 +401,7 @@ void PracticeToolsModal::renderBackingTrackTab() {
         ImGui::Spacing();
         ImGui::Spacing();
 
-        if (m_lastLoadedTrack != m_player.filePath()) {
+        if (m_lastLoadedTrack != m_player.filePath() || (m_waveform800.empty() && !m_player.filePath().empty())) {
             m_lastLoadedTrack = m_player.filePath();
             const auto& peaks = m_player.waveformPeaks800();
             if (!peaks.empty()) {
@@ -409,8 +409,6 @@ void PracticeToolsModal::renderBackingTrackTab() {
                 for (size_t i = 0; i < peaks.size(); ++i) {
                     m_waveform800[i] = WaveformPeak{peaks[i].first, peaks[i].second};
                 }
-            } else {
-                generateWaveform800(m_lastLoadedTrack);
             }
         }
 

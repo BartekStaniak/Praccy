@@ -56,6 +56,8 @@ public:
 
     [[nodiscard]] Steinberg::IPlugView* plugView() const noexcept { return m_plugView; }
 
+    void resetFault() noexcept override;
+
     Vst3PluginInstance();
 
     void onGuiBeginEdit(Steinberg::Vst::ParamID paramId) noexcept;

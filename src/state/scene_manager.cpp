@@ -9,6 +9,7 @@
 #include "../plugins/vst3_host.h"
 #include "../plugins/clap_host.h"
 #include "../plugins/plugin_window.h"
+#include "../plugins/async_plugin_loader.h"
 
 #include <fstream>
 #include <sstream>
@@ -272,7 +273,56 @@ void SceneManager::setSceneName(size_t index, const std::string& name) {
     }
 }
 
-std::unique_ptr<audio::PluginSlot> SceneManager::createSlotFromPreset(const PluginSlotPreset& p) {
+std::unique_ptr<audio::PluginSlot> SceneManager::createSlotFromPreset(const PluginSlotPreset& p, bool allowAsync) {
+    if (allowAsync && (p.type == "VST3" || p.path.find(".vst3") != std::string::npos ||
+                       p.type == "CLAP" || p.path.find(".clap") != std::string::npos)) {
+        auto placeholder = std::make_unique<audio::LoadingPluginPlaceholder>(
+            p.name.empty() ? "Loading Plugin" : p.name,
+            "Unknown",
+            p.type.empty() ? "VST3" : p.type,
+            p.path
+        );
+        auto slot = std::make_unique<audio::PluginSlot>(std::move(placeholder));
+        slot->setBypassed(p.bypassed);
+        slot->setDryWet(p.dryWet);
+        slot->setInputGainDb(p.inputGainDb);
+        slot->setOutputGainDb(p.outputGainDb);
+
+        // Copy macros
+        for (size_t m = 0; m < p.macros.size() && m < 4; ++m) {
+            slot->macros()[m] = audio::PluginSlot::Macro{
+                .label = p.macros[m].label,
+                .paramId = p.macros[m].paramId,
+                .bound = p.macros[m].bound,
+                .isSlotMix = p.macros[m].isSlotMix,
+                .isSlotTrim = p.macros[m].isSlotTrim,
+                .currentValue = p.macros[m].value,
+                .defaultValue = p.macros[m].value,
+                .minValue = 0.0f,
+                .maxValue = 1.0f
+            };
+        }
+        slot->setMacrosInitialized(true);
+
+        plugins::PluginType pType = (p.type == "CLAP" || p.path.find(".clap") != std::string::npos)
+                                    ? plugins::PluginType::CLAP
+                                    : plugins::PluginType::VST3;
+
+        plugins::AsyncPluginLoader::instance().enqueueLoad(
+            slot.get(),
+            p.path,
+            pType,
+            p.name,
+            "",
+            p.state,
+            48000.0,
+            256,
+            false // Option 1.A: do not auto-open GUI for scene load
+        );
+
+        return slot;
+    }
+
     std::unique_ptr<plugins::IPluginInstance> inst;
 
     if (p.path == "builtin://drive" || p.name == "Praccy Drive") {
@@ -403,15 +453,20 @@ bool SceneManager::canApplyInPlace(const ScenePreset& scene, audio::GraphEngine&
         auto* inner = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
         if (!inner) return false;
 
-        const bool isThirdParty = (dynamic_cast<plugins::Vst3PluginInstance*>(inner) != nullptr ||
-                                   dynamic_cast<plugins::ClapPluginInstance*>(inner) != nullptr ||
-                                   sp.type == "VST3" || sp.type == "CLAP");
-        if (isThirdParty) {
+        const bool innerIsThirdParty = (dynamic_cast<plugins::Vst3PluginInstance*>(inner) != nullptr ||
+                                        dynamic_cast<plugins::ClapPluginInstance*>(inner) != nullptr);
+        const bool spIsThirdParty = (sp.type == "VST3" || sp.type == "CLAP" ||
+                                     sp.path.find(".vst3") != std::string::npos ||
+                                     sp.path.find(".clap") != std::string::npos);
+        if (innerIsThirdParty != spIsThirdParty) {
+            return false;
+        }
+        if (innerIsThirdParty) {
             // F-02: Compare cached 64-bit FNV-1a state hash without calling inner->saveState() on live plugins.
             if (!sp.state.empty()) {
                 const uint64_t targetHash = plugins::IPluginInstance::computeStateHash(sp.state);
                 const uint64_t currentHash = inner->lastStateHash();
-                if (currentHash != 0ULL && currentHash != targetHash) {
+                if (currentHash != targetHash) {
                     return false;
                 }
             }
@@ -481,7 +536,7 @@ bool SceneManager::applyGraphSnapshotInPlace(const ScenePreset& scene, audio::Gr
     return true;
 }
 
-bool SceneManager::applyGraphSnapshot(const ScenePreset& scene, audio::GraphEngine& graph) {
+bool SceneManager::applyGraphSnapshot(const ScenePreset& scene, audio::GraphEngine& graph, bool allowAsync) {
     if (canApplyInPlace(scene, graph)) {
         return applyGraphSnapshotInPlace(scene, graph);
     }
@@ -492,7 +547,7 @@ bool SceneManager::applyGraphSnapshot(const ScenePreset& scene, audio::GraphEngi
 
     for (const auto& np : scene.nodes) {
         if (np.kind == NodePreset::Kind::Plugin) {
-            auto slot = createSlotFromPreset(np.slot);
+            auto slot = createSlotFromPreset(np.slot, allowAsync);
             if (slot) {
                 slot->prepare(graph.sampleRate(), graph.maxBlockSize());
                 newNodes.push_back(std::move(slot));
@@ -511,7 +566,7 @@ bool SceneManager::applyGraphSnapshot(const ScenePreset& scene, audio::GraphEngi
                 branch->setPhaseInvert(bp.phaseInvert);
 
                 for (const auto& sp : bp.slots) {
-                    auto slot = createSlotFromPreset(sp);
+                    auto slot = createSlotFromPreset(sp, allowAsync);
                     if (slot) {
                         slot->prepare(graph.sampleRate(), graph.maxBlockSize());
                         branch->addSlot(std::move(slot));
@@ -535,11 +590,11 @@ void SceneManager::captureCurrentScene(int sceneIndex, audio::GraphEngine& graph
     saveToFile();
 }
 
-bool SceneManager::applyScene(int sceneIndex, audio::GraphEngine& graph) {
+bool SceneManager::applyScene(int sceneIndex, audio::GraphEngine& graph, bool allowAsync) {
     if (sceneIndex < 0 || sceneIndex >= static_cast<int>(m_scenes.size())) return false;
 
     m_activeSceneIndex = sceneIndex;
-    bool ok = applyGraphSnapshot(m_scenes[sceneIndex], graph);
+    bool ok = applyGraphSnapshot(m_scenes[sceneIndex], graph, allowAsync);
     m_statusMessage = "Loaded preset: " + m_scenes[sceneIndex].name;
     return ok;
 }
@@ -568,13 +623,13 @@ void SceneManager::savePresetChain(const std::string& name, audio::GraphEngine& 
     saveToFile();
 }
 
-bool SceneManager::loadPresetChain(const std::string& name, audio::GraphEngine& graph) {
+bool SceneManager::loadPresetChain(const std::string& name, audio::GraphEngine& graph, bool allowAsync) {
     auto it = std::find_if(m_userPresets.begin(), m_userPresets.end(), [&](const ScenePreset& p) {
         return p.name == name;
     });
     if (it == m_userPresets.end()) return false;
 
-    bool ok = applyGraphSnapshot(*it, graph);
+    bool ok = applyGraphSnapshot(*it, graph, allowAsync);
     m_statusMessage = "Loaded preset: " + name;
     return ok;
 }
@@ -846,9 +901,9 @@ static void serializePreset(std::ostream& os, const ScenePreset& p, const std::s
             }
             if (!node.slot.paramValues.empty()) {
                 os << "node_" << n << "_params=";
-                for (size_t p = 0; p < node.slot.paramValues.size(); ++p) {
-                    if (p > 0) os << ";";
-                    os << node.slot.paramValues[p].paramId << ":" << node.slot.paramValues[p].value;
+                for (size_t pvIdx = 0; pvIdx < node.slot.paramValues.size(); ++pvIdx) {
+                    if (pvIdx > 0) os << ";";
+                    os << node.slot.paramValues[pvIdx].paramId << ":" << node.slot.paramValues[pvIdx].value;
                 }
                 os << "\n";
             }
@@ -894,9 +949,9 @@ static void serializePreset(std::ostream& os, const ScenePreset& p, const std::s
                     }
                     if (!sl.paramValues.empty()) {
                         os << "node_" << n << "_b_" << b << "_s_" << s << "_params=";
-                        for (size_t p = 0; p < sl.paramValues.size(); ++p) {
-                            if (p > 0) os << ";";
-                            os << sl.paramValues[p].paramId << ":" << sl.paramValues[p].value;
+                        for (size_t pvIdx = 0; pvIdx < sl.paramValues.size(); ++pvIdx) {
+                            if (pvIdx > 0) os << ";";
+                            os << sl.paramValues[pvIdx].paramId << ":" << sl.paramValues[pvIdx].value;
                         }
                         os << "\n";
                     }

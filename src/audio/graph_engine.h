@@ -5,6 +5,7 @@
 #include "dsp_utils.h"
 #include "input_config.h"
 #include "param_automation.h"
+#include "../midi/midi_types.h"
 #include <vector>
 #include <memory>
 #include <string>
@@ -54,14 +55,26 @@ public:
     void setBypassed(bool bypassed) noexcept override;
     [[nodiscard]] bool isBypassed() const noexcept override;
     [[nodiscard]] bool isFaulted() const noexcept override {
-        return m_innerNode ? m_innerNode->isFaulted() : false;
+        AudioNode* inner = m_rtInnerNode.load(std::memory_order_relaxed);
+        return inner ? inner->isFaulted() : false;
+    }
+    [[nodiscard]] bool isMissing() const noexcept override {
+        AudioNode* inner = m_rtInnerNode.load(std::memory_order_relaxed);
+        return inner ? inner->isMissing() : false;
+    }
+    [[nodiscard]] bool isLoading() const noexcept override {
+        AudioNode* inner = m_rtInnerNode.load(std::memory_order_relaxed);
+        return inner ? inner->isLoading() : false;
     }
 
+    void replaceInnerNode(std::unique_ptr<AudioNode> newInner, std::unique_ptr<AudioNode>& outOld) noexcept;
+
     [[nodiscard]] uint32_t latencySamples() const noexcept override {
-        if (isBypassed() || !m_innerNode || m_innerNode->isFaulted() || m_innerNode->isBypassed()) {
+        AudioNode* inner = m_rtInnerNode.load(std::memory_order_relaxed);
+        if (isBypassed() || !inner || inner->isFaulted() || inner->isBypassed()) {
             return 0;
         }
-        return m_innerNode->latencySamples();
+        return inner->latencySamples();
     }
 
     // Parameter automation registration (Wait-free, Lock-free)
@@ -81,7 +94,10 @@ public:
         return m_automationRegister;
     }
 
-    [[nodiscard]] AudioNode* innerNode() const noexcept { return m_innerNode.get(); }
+    [[nodiscard]] AudioNode* innerNode() const noexcept {
+        AudioNode* node = m_rtInnerNode.load(std::memory_order_relaxed);
+        return node ? node : m_innerNode.get();
+    }
     [[nodiscard]] LevelMeter& meter() noexcept { return m_meter; }
 
     struct Macro {
@@ -103,6 +119,8 @@ public:
 
 private:
     std::unique_ptr<AudioNode> m_innerNode;
+    std::atomic<AudioNode*> m_rtInnerNode{nullptr};
+    std::atomic<plugins::IPluginInstance*> m_rtPluginPtr{nullptr};
     plugins::IPluginInstance* m_pluginPtr{nullptr};
     std::atomic<float> m_dryWet{1.0f};      // 1.0 = 100% wet
     std::atomic<float> m_inputGainDb{0.0f};  // 0 dB
@@ -567,6 +585,18 @@ public:
     void reset();
     void setAudioRunning(bool running) noexcept;
 
+    template <typename Fn>
+    void executeWithAudioFence(Fn&& fn) {
+        const bool wasRunning = m_isAudioRunning.load(std::memory_order_acquire);
+        if (wasRunning) {
+            setAudioRunning(false);
+        }
+        std::forward<Fn>(fn)();
+        if (wasRunning) {
+            setAudioRunning(true);
+        }
+    }
+
     // UI-thread mutations (Push to SPSC command queue, update UI shadow list)
     void addSerialNode(std::unique_ptr<AudioNode> node);
     void insertSerialNode(size_t index, std::unique_ptr<AudioNode> node);
@@ -592,9 +622,12 @@ public:
     [[nodiscard]] size_t numNodes() const noexcept;
     [[nodiscard]] AudioNode* getNode(size_t index) noexcept;
 
-    // Wait-free, lock-free parameter dispatch (0 mutex locks on MIDI/Audio threads)
+    // Wait-free, lock-free parameter and binding dispatch (0 mutex locks on MIDI/Audio threads)
     bool dispatchParameterThreadSafe(int slotIdx, int branchIdx, int branchSlotIdx,
                                      uint32_t paramId, float normalizedValue) noexcept;
+    bool dispatchBindingThreadSafe(praccy::midi::BindingTargetType type,
+                                   int slotIdx, int branchIdx, int branchSlotIdx,
+                                   uint32_t paramId, float value) noexcept;
 
     void setInputGainDb(float db) noexcept { m_inputGainDb.store(db, std::memory_order_relaxed); }
     [[nodiscard]] float inputGainDb() const noexcept { return m_inputGainDb.load(std::memory_order_relaxed); }

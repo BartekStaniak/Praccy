@@ -502,7 +502,7 @@ void SettingsModal::renderPluginsTab() {
     } else {
         for (size_t i = 0; i < paths.size(); ++i) {
             ImGui::PushID(static_cast<int>(i));
-            const bool isSystemDefault = (i < 6);
+            const bool isSystemDefault = m_scanner.isSystemDefaultPath(paths[i]);
             ImGui::AlignTextToFramePadding();
             ImGui::BulletText("%s", paths[i].c_str());
             ImGui::SameLine(std::max(280.0f, ImGui::GetContentRegionAvail().x - (isSystemDefault ? 90.0f : 150.0f)));

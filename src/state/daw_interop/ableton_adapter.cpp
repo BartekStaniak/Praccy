@@ -271,6 +271,10 @@ static BranchPreset parseAbletonBranch(const std::shared_ptr<utils::XmlNode>& br
 }
 
 std::optional<ScenePreset> AbletonAdapter::parseToScene(const std::filesystem::path& path) {
+    std::error_code ec;
+    auto sz = std::filesystem::file_size(path, ec);
+    if (ec || sz == 0 || sz > kMaxPresetFileSize) return std::nullopt;
+
     std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) return std::nullopt;
 

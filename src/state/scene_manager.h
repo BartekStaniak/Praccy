@@ -108,10 +108,10 @@ public:
     bool saveToFile(const std::string& filePath = "") const;
 
     void captureCurrentScene(int sceneIndex, audio::GraphEngine& graph);
-    bool applyScene(int sceneIndex, audio::GraphEngine& graph);
+    bool applyScene(int sceneIndex, audio::GraphEngine& graph, bool allowAsync = false);
 
     void savePresetChain(const std::string& name, audio::GraphEngine& graph);
-    bool loadPresetChain(const std::string& name, audio::GraphEngine& graph);
+    bool loadPresetChain(const std::string& name, audio::GraphEngine& graph, bool allowAsync = false);
     [[nodiscard]] std::vector<std::string> savedPresetNames() const;
     [[nodiscard]] const ScenePreset* findUserPreset(const std::string& name) const;
     [[nodiscard]] std::string presetCategory(const std::string& name) const;
@@ -127,13 +127,13 @@ public:
 
     [[nodiscard]] const std::string& lastStatusMessage() const noexcept { return m_statusMessage; }
 
-    static std::unique_ptr<audio::PluginSlot> createSlotFromPreset(const PluginSlotPreset& p);
+    static std::unique_ptr<audio::PluginSlot> createSlotFromPreset(const PluginSlotPreset& p, bool allowAsync = false);
 
     // Graph snapshot serialization & crossfaded application
     static ScenePreset captureGraphSnapshot(audio::GraphEngine& graph,
                                             const std::string& name = "Snapshot",
                                             bool captureBinaryState = true);
-    static bool applyGraphSnapshot(const ScenePreset& preset, audio::GraphEngine& graph);
+    static bool applyGraphSnapshot(const ScenePreset& preset, audio::GraphEngine& graph, bool allowAsync = false);
     static bool canApplyInPlace(const ScenePreset& preset, audio::GraphEngine& graph);
     static bool applyGraphSnapshotInPlace(const ScenePreset& preset, audio::GraphEngine& graph);
 

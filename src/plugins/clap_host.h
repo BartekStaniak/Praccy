@@ -107,6 +107,7 @@ public:
     void resetFault() noexcept override;
     void handleMainThreadCallbacks() noexcept override;
     void fireTimer(clap_id timerId);
+    void rescanParamValues() noexcept;
 
 private:
     static const void* clapHostGetExtension(const clap_host* host, const char* extensionId);

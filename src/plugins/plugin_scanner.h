@@ -60,6 +60,7 @@ public:
     void addCustomSearchPath(const std::string& path);
     void removeCustomSearchPath(size_t index);
     [[nodiscard]] std::vector<std::string> searchPaths() const;
+    [[nodiscard]] bool isSystemDefaultPath(const std::string& path) const;
 
     [[nodiscard]] std::vector<PluginDescriptor> scannedPlugins() const;
     [[nodiscard]] size_t numPlugins() const;

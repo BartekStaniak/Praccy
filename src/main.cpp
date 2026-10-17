@@ -427,7 +427,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         if (dawAdapter) {
             praccy::state::UniversalDawInteropManager::instance().importAndApply(p, graph, scenes, scanner);
         } else if (scenes.loadFromFile(p.string())) {
-            scenes.applyScene(0, graph);
+            scenes.applyScene(0, graph, true /* allowAsync */);
         }
     });
 
@@ -442,7 +442,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         if (dawAdapter) {
             praccy::state::UniversalDawInteropManager::instance().importAndApply(p, graph, scenes, scanner);
         } else if (std::filesystem::exists(p) && scenes.loadFromFile(p.string())) {
-            scenes.applyScene(0, graph);
+            scenes.applyScene(0, graph, true /* allowAsync */);
         } else {
             rackView.loadPresetChain(p.stem().string());
         }
@@ -574,7 +574,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         } else if (binding.targetType == praccy::midi::BindingTargetType::MasterVolume) {
             graph.setMasterVolumeDb(-36.0f + (normVal * 42.0f));
         } else {
-            graph.dispatchParameterThreadSafe(
+            graph.dispatchBindingThreadSafe(
+                binding.targetType,
                 binding.targetSlotIndex,
                 binding.targetBranchIndex,
                 binding.targetBranchSlotIndex,
@@ -592,7 +593,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 } else if (b.targetType == praccy::midi::BindingTargetType::MasterVolume) {
                     graph.setMasterVolumeDb(-36.0f + (mappedVal * 42.0f));
                 } else {
-                    graph.dispatchParameterThreadSafe(
+                    graph.dispatchBindingThreadSafe(
+                        b.targetType,
                         b.targetSlotIndex,
                         b.targetBranchIndex,
                         b.targetBranchSlotIndex,
@@ -607,7 +609,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             } else if (b.targetType == praccy::midi::BindingTargetType::MasterVolume) {
                 graph.setMasterVolumeDb(-36.0f + (mappedVal * 42.0f));
             } else {
-                graph.dispatchParameterThreadSafe(
+                graph.dispatchBindingThreadSafe(
+                    b.targetType,
                     b.targetSlotIndex,
                     b.targetBranchIndex,
                     b.targetBranchSlotIndex,
@@ -663,7 +666,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         // Drain deferred MIDI scene switches on the main UI thread (safe for HWND teardown & disk I/O)
         const int reqScene = pendingMidiSceneIndex.exchange(-1, std::memory_order_acquire);
         if (reqScene >= 0) {
-            scenes.applyScene(static_cast<size_t>(reqScene), graph);
+            rackView.recallScene(static_cast<size_t>(reqScene));
         }
 
         // Throttle rendering when window is minimized to keep background CPU/GPU at zero

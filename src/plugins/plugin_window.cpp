@@ -62,8 +62,13 @@ bool PluginWindowManager::openPluginWindow(IPluginInstance* plugin) {
     }
 
     std::wstring wTitle;
-    for (char c : plugin->name()) {
-        wTitle.push_back(static_cast<wchar_t>(c));
+    const std::string& pName = plugin->name();
+    if (!pName.empty()) {
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, pName.c_str(), -1, nullptr, 0);
+        if (wlen > 0) {
+            wTitle.resize(wlen - 1);
+            MultiByteToWideChar(CP_UTF8, 0, pName.c_str(), -1, wTitle.data(), wlen);
+        }
     }
     wTitle += L" - Praccy";
 
@@ -99,6 +104,7 @@ bool PluginWindowManager::openPluginWindow(IPluginInstance* plugin) {
         if (FAILED(DwmSetWindowAttribute(hwnd, 20, &useDark, sizeof(useDark)))) {
             DwmSetWindowAttribute(hwnd, 19, &useDark, sizeof(useDark));
         }
+        SetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND, reinterpret_cast<LONG_PTR>(m_bgBrush));
     }
 
     if (!hwnd) {

@@ -15,6 +15,22 @@ PluginSlot::PluginSlot(std::unique_ptr<AudioNode> innerNode)
         m_pluginPtr = dynamic_cast<plugins::IPluginInstance*>(m_innerNode.get());
         refreshCachedParameterRanges();
     }
+    m_rtInnerNode.store(m_innerNode.get(), std::memory_order_release);
+    m_rtPluginPtr.store(m_pluginPtr, std::memory_order_release);
+}
+
+void PluginSlot::replaceInnerNode(std::unique_ptr<AudioNode> newInner, std::unique_ptr<AudioNode>& outOld) noexcept {
+    AudioNode* nextNode = newInner.get();
+    auto* nextPlugin = dynamic_cast<plugins::IPluginInstance*>(nextNode);
+
+    m_rtPluginPtr.store(nextPlugin, std::memory_order_release);
+    m_rtInnerNode.store(nextNode, std::memory_order_release);
+
+    m_pluginPtr = nextPlugin;
+    refreshCachedParameterRanges();
+
+    outOld = std::move(m_innerNode);
+    m_innerNode = std::move(newInner);
 }
 
 void PluginSlot::refreshCachedParameterRanges() noexcept {
@@ -49,8 +65,9 @@ void PluginSlot::setParameterNormalized(uint32_t paramId, float normalizedValue)
 }
 
 void PluginSlot::prepare(double sampleRate, uint32_t maxBlockSize) {
-    if (m_innerNode) {
-        m_innerNode->prepare(sampleRate, maxBlockSize);
+    AudioNode* inner = m_rtInnerNode.load(std::memory_order_relaxed);
+    if (inner) {
+        inner->prepare(sampleRate, maxBlockSize);
         refreshCachedParameterRanges();
     }
     m_dryBuffer.resize(2, maxBlockSize);
@@ -61,8 +78,9 @@ void PluginSlot::prepare(double sampleRate, uint32_t maxBlockSize) {
 }
 
 void PluginSlot::reset() {
-    if (m_innerNode) {
-        m_innerNode->reset();
+    AudioNode* inner = m_rtInnerNode.load(std::memory_order_relaxed);
+    if (inner) {
+        inner->reset();
     }
     m_automationRegister.reset();
     m_meter.reset();
@@ -70,6 +88,8 @@ void PluginSlot::reset() {
 
 const std::string& PluginSlot::name() const noexcept {
     static const std::string emptyName = "Empty Slot";
+    AudioNode* inner = m_rtInnerNode.load(std::memory_order_relaxed);
+    if (inner) return inner->name();
     return m_innerNode ? m_innerNode->name() : emptyName;
 }
 
@@ -84,15 +104,17 @@ bool PluginSlot::isBypassed() const noexcept {
 
 void PluginSlot::process(AudioProcessContext& ctx) {
     const uint32_t numSamples = ctx.numSamples;
-    if (!m_innerNode || numSamples == 0) {
+    AudioNode* inner = m_rtInnerNode.load(std::memory_order_acquire);
+    if (!inner || numSamples == 0) {
         ctx.output.copyFrom(ctx.input);
         return;
     }
 
     // 1. Drain pending parameter automation wait-free at block boundary
+    plugins::IPluginInstance* plug = m_rtPluginPtr.load(std::memory_order_relaxed);
     m_automationRegister.drainDirty([&](uint32_t paramId, float value) {
-        if (m_pluginPtr) {
-            m_pluginPtr->setParameterFromAudioThread(paramId, value);
+        if (plug) {
+            plug->setParameterFromAudioThread(paramId, value);
         }
     });
 
@@ -100,7 +122,7 @@ void PluginSlot::process(AudioProcessContext& ctx) {
     const bool transitioning = m_bypassRamp.isTransitioning();
 
     // If fully bypassed, faulted, or not transitioning, pure pass-through
-    if ((currentlyBypassed && !transitioning) || m_innerNode->isFaulted()) {
+    if ((currentlyBypassed && !transitioning) || inner->isFaulted()) {
         ctx.output.copyFrom(ctx.input);
         m_meter.process(ctx.output.channel(0), ctx.output.numChannels() > 1 ? ctx.output.channel(1) : nullptr, numSamples, ctx.sampleRate);
         return;
@@ -128,7 +150,7 @@ void PluginSlot::process(AudioProcessContext& ctx) {
     innerCtx.output = procView;
     innerCtx.sampleRate = ctx.sampleRate;
     innerCtx.numSamples = numSamples;
-    m_innerNode->process(innerCtx);
+    inner->process(innerCtx);
 
     // Scrub NaN/Inf and clamp runaway spikes from third-party plugins
     for (uint32_t ch = 0; ch < procView.numChannels(); ++ch) {
@@ -136,7 +158,7 @@ void PluginSlot::process(AudioProcessContext& ctx) {
     }
 
     // If plugin faulted during execution, safely bypass with dry signal
-    if (m_innerNode->isFaulted()) {
+    if (inner->isFaulted()) {
         ctx.output.copyFrom(dryView);
         m_meter.process(ctx.output.channel(0), ctx.output.numChannels() > 1 ? ctx.output.channel(1) : nullptr, numSamples, ctx.sampleRate);
         return;
@@ -1598,6 +1620,90 @@ bool GraphEngine::dispatchParameterThreadSafe(int slotIdx, int branchIdx, int br
 
     slot->setParameterNormalized(paramId, normalizedValue);
     return true;
+}
+
+bool GraphEngine::dispatchBindingThreadSafe(praccy::midi::BindingTargetType type,
+                                            int slotIdx, int branchIdx, int branchSlotIdx,
+                                            uint32_t paramId, float value) noexcept {
+    const size_t nodeCount = m_rtNumNodes.load(std::memory_order_acquire);
+    if (slotIdx < 0 || static_cast<size_t>(slotIdx) >= nodeCount || static_cast<size_t>(slotIdx) >= MAX_GRAPH_NODES) {
+        return false;
+    }
+
+    AudioNode* node = m_rtNodes[static_cast<size_t>(slotIdx)].load(std::memory_order_acquire);
+    if (!node) {
+        return false;
+    }
+
+    // Branch-level controls (Mute, Solo, Gain, Pan)
+    if (branchIdx >= 0 && branchSlotIdx < 0) {
+        if (node->type() != NodeType::ParallelSplitMerge) {
+            return false;
+        }
+        auto* block = static_cast<ParallelSplitMergeBlock*>(node);
+        ParallelBranch* branch = block->getBranchLockFree(static_cast<size_t>(branchIdx));
+        if (!branch) return false;
+
+        switch (type) {
+            case praccy::midi::BindingTargetType::BranchMute:
+                branch->setMuted(value > 0.5f);
+                return true;
+            case praccy::midi::BindingTargetType::BranchSolo:
+                branch->setSolo(value > 0.5f);
+                return true;
+            case praccy::midi::BindingTargetType::BranchGain:
+                branch->setGainDb(-36.0f + (value * 42.0f));
+                return true;
+            case praccy::midi::BindingTargetType::BranchPan:
+                branch->setPan((value * 2.0f) - 1.0f);
+                return true;
+            default:
+                break;
+        }
+    }
+
+    PluginSlot* slot = nullptr;
+    if (branchIdx >= 0) {
+        if (node->type() != NodeType::ParallelSplitMerge) {
+            return false;
+        }
+        auto* block = static_cast<ParallelSplitMergeBlock*>(node);
+        ParallelBranch* branch = block->getBranchLockFree(static_cast<size_t>(branchIdx));
+        if (!branch || branchSlotIdx < 0) {
+            return false;
+        }
+        slot = branch->getSlotLockFree(static_cast<size_t>(branchSlotIdx));
+    } else {
+        if (node->type() != NodeType::Plugin) {
+            return false;
+        }
+        slot = static_cast<PluginSlot*>(node);
+    }
+
+    if (!slot) {
+        return false;
+    }
+
+    switch (type) {
+        case praccy::midi::BindingTargetType::SlotBypass:
+            slot->setBypassed(value > 0.5f);
+            return true;
+        case praccy::midi::BindingTargetType::SlotDryWet:
+            slot->setDryWet(value);
+            return true;
+        case praccy::midi::BindingTargetType::SlotInputGain:
+            slot->setInputGainDb(-24.0f + (value * 36.0f));
+            return true;
+        case praccy::midi::BindingTargetType::SlotOutputGain:
+            slot->setOutputGainDb(-24.0f + (value * 36.0f));
+            return true;
+        case praccy::midi::BindingTargetType::PluginParameter:
+            slot->setParameterNormalized(paramId, value);
+            return true;
+        default:
+            break;
+    }
+    return false;
 }
 
 void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& hardwareOut) {

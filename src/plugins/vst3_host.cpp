@@ -727,6 +727,33 @@ void Vst3PluginInstance::reset() {
     resumeAudio();
 }
 
+void Vst3PluginInstance::resetFault() noexcept {
+    suspendAndFenceAudio();
+    std::pair<Steinberg::Vst::ParamID, double> dummy;
+    while (m_paramQueue.try_dequeue(dummy)) {}
+    m_audioThreadParamCount = 0;
+    m_inputParamChanges.clear();
+    m_impl->processContext.projectTimeSamples = 0;
+    if (m_processor) {
+        safeCallPlugin([&]() {
+            m_processor->setProcessing(false);
+        });
+    }
+    if (m_component) {
+        safeCallPlugin([&]() {
+            m_component->setActive(false);
+            m_component->setActive(true);
+        });
+    }
+    if (m_processor) {
+        safeCallPlugin([&]() {
+            m_processor->setProcessing(true);
+        });
+    }
+    IPluginInstance::resetFault();
+    resumeAudio();
+}
+
 size_t Vst3PluginInstance::numParameters() const noexcept {
     std::lock_guard<std::mutex> lock(m_paramCacheMutex);
     return m_paramDescs.size();

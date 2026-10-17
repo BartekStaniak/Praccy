@@ -136,6 +136,7 @@ bool extractZipArchiveCore(mz_zip_archive& zip,
     }
 
     uint64_t totalUncompressed = 0;
+    uint64_t actualTotalUncompressed = 0;
 
     for (mz_uint i = 0; i < numFiles; ++i) {
         mz_zip_archive_file_stat stat;
@@ -226,6 +227,13 @@ bool extractZipArchiveCore(mz_zip_archive& zip,
         if (uncompSize > guards.maxSingleFileSize) {
             mz_free(pData);
             outError = "Extracted file exceeds maxSingleFileSize limit: " + rawName;
+            return false;
+        }
+
+        actualTotalUncompressed += uncompSize;
+        if (actualTotalUncompressed > guards.maxArchiveTotalSize) {
+            mz_free(pData);
+            outError = "Extracted archive total uncompressed size exceeds safe limits (potential decompression bomb, exceeds 128MB limit): " + rawName;
             return false;
         }
 
@@ -359,15 +367,30 @@ bool ArchiveUtils::gzipDecompress(const std::vector<uint8_t>& gzData, std::strin
     size_t deflateLen = gzData.size() - 8 - offset;
     const uint8_t* deflateData = gzData.data() + offset;
 
-    const size_t maxAllowedUncomp = std::min(kMaxDecompressedXmlBytes, deflateLen * kMaxCompressionRatio);
-    if (maxAllowedUncomp == 0) return false;
+    uint32_t isize = 0;
+    if (gzData.size() >= 4) {
+        const size_t end = gzData.size();
+        isize = static_cast<uint32_t>(gzData[end - 4]) |
+               (static_cast<uint32_t>(gzData[end - 3]) << 8) |
+               (static_cast<uint32_t>(gzData[end - 2]) << 16) |
+               (static_cast<uint32_t>(gzData[end - 1]) << 24);
+    }
 
-    std::vector<uint8_t> outBuffer(maxAllowedUncomp);
+    size_t outCapacity = 0;
+    if (isize > 0 && isize <= kMaxDecompressedXmlBytes) {
+        outCapacity = isize;
+    } else {
+        outCapacity = std::min(kMaxDecompressedXmlBytes, std::max<size_t>(deflateLen * kMaxCompressionRatio, 64 * 1024));
+    }
+
+    if (outCapacity == 0 || outCapacity > kMaxDecompressedXmlBytes) return false;
+
+    std::vector<uint8_t> outBuffer(outCapacity);
     tinfl_decompressor decomp;
     tinfl_init(&decomp);
 
     size_t inBytes = deflateLen;
-    size_t outBytes = maxAllowedUncomp;
+    size_t outBytes = outCapacity;
     tinfl_status status = tinfl_decompress(
         &decomp,
         reinterpret_cast<const mz_uint8*>(deflateData),
@@ -386,7 +409,8 @@ bool ArchiveUtils::gzipDecompress(const std::vector<uint8_t>& gzData, std::strin
         return false;
     }
 
-    if (deflateLen > 0 && (outBytes / deflateLen) > kMaxCompressionRatio) {
+    // Only reject on compression ratio if uncompressed size exceeds 10 MB, preventing false-positive rejection on small repetitive Ableton .adg XMLs
+    if (outBytes > 10 * 1024 * 1024 && deflateLen > 0 && (outBytes / deflateLen) > kMaxCompressionRatio) {
         return false;
     }
 

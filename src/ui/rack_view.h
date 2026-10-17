@@ -74,6 +74,7 @@ public:
 
     void applyAudioSettings(double sampleRate, uint32_t bufferSize);
 
+    void recallScene(size_t index);
     bool loadPresetChain(const std::string& name);
     const std::string& activePreset() const noexcept { return m_auditionedPreset; }
     [[nodiscard]] const std::vector<std::string>& favoritePresets() const noexcept { return m_favoritePresets; }

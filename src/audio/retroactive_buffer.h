@@ -41,6 +41,7 @@ public:
      * @param durationMinutes Recording window duration (1, 2, 5, or 10)
      */
     void prepare(double sampleRate, int durationMinutes) {
+        m_isPreparing.store(true, std::memory_order_release);
         if (durationMinutes <= 0) durationMinutes = 2;
         if (sampleRate <= 0.0) sampleRate = 48000.0;
 
@@ -60,12 +61,14 @@ public:
         m_totalFramesWritten.store(0, std::memory_order_relaxed);
         m_captureActive.store(false, std::memory_order_relaxed);
         m_audioWritingMain.store(false, std::memory_order_relaxed);
+        m_isPreparing.store(false, std::memory_order_release);
     }
 
     /**
      * @brief Clears buffer contents and resets write head.
      */
     void reset() noexcept {
+        m_isPreparing.store(true, std::memory_order_release);
         std::fill(m_bufferL.begin(), m_bufferL.end(), 0.0f);
         std::fill(m_bufferR.begin(), m_bufferR.end(), 0.0f);
         std::fill(m_spilloverL.begin(), m_spilloverL.end(), 0.0f);
@@ -75,6 +78,7 @@ public:
         m_totalFramesWritten.store(0, std::memory_order_relaxed);
         m_captureActive.store(false, std::memory_order_relaxed);
         m_audioWritingMain.store(false, std::memory_order_relaxed);
+        m_isPreparing.store(false, std::memory_order_release);
     }
 
     /**
@@ -82,7 +86,7 @@ public:
      * Guaranteed 0 dynamic allocations and 0 mutex locks on the audio callback.
      */
     inline void push(const float* left, const float* right, size_t numSamples) noexcept {
-        if (!left || numSamples == 0 || m_capacityFrames == 0) return;
+        if (!left || numSamples == 0 || m_capacityFrames == 0 || m_isPreparing.load(std::memory_order_relaxed)) return;
         const float* srcR = right ? right : left;
 
         // Wait-free Dekker handshake with captureSlice(): if an export is reading m_bufferL/R,
@@ -183,8 +187,13 @@ public:
             return false;
         }
 
-        if (outStagingL.size() < available) outStagingL.resize(available);
-        if (outStagingR.size() < available) outStagingR.resize(available);
+        try {
+            if (outStagingL.size() < available) outStagingL.resize(available);
+            if (outStagingR.size() < available) outStagingR.resize(available);
+        } catch (const std::bad_alloc&) {
+            outFramesCaptured = 0;
+            return false;
+        }
 
         return captureSlice(outStagingL.data(), outStagingR.data(), available, outFramesCaptured);
     }
@@ -283,6 +292,7 @@ private:
     alignas(64) std::atomic<size_t> m_totalFramesWritten{0};
     alignas(64) mutable std::atomic<bool> m_captureActive{false};
     alignas(64) std::atomic<bool> m_audioWritingMain{false};
+    alignas(64) std::atomic<bool> m_isPreparing{false};
 };
 
 } // namespace praccy::audio

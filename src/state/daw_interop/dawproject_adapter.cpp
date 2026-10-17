@@ -8,6 +8,7 @@
 #include <chrono>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 
 namespace praccy::state {
 
@@ -28,14 +29,15 @@ bool DawprojectAdapter::canHandle(const std::filesystem::path& path) const {
 }
 
 std::optional<ScenePreset> DawprojectAdapter::parseToScene(const std::filesystem::path& path) {
-    if (!std::filesystem::exists(path)) return std::nullopt;
+    std::error_code ec;
+    auto sz = std::filesystem::file_size(path, ec);
+    if (ec || sz == 0 || sz > kMaxPresetFileSize) return std::nullopt;
 
     // Generate safe unique temporary directory
     auto now = std::chrono::steady_clock::now().time_since_epoch().count();
     auto tempDir = std::filesystem::temp_directory_path() / ("dawproj_in_" + std::to_string(now));
     TempDirGuard guard{tempDir};
 
-    std::error_code ec;
     std::filesystem::create_directories(tempDir, ec);
     if (ec) return std::nullopt;
 
@@ -82,15 +84,20 @@ std::optional<ScenePreset> DawprojectAdapter::parseToScene(const std::filesystem
     if (transportNode) {
         std::string bpmStr = transportNode->attribute("tempo");
         if (!bpmStr.empty()) {
-            scene.tempoBpm = std::strtof(bpmStr.c_str(), nullptr);
+            float bpm = std::strtof(bpmStr.c_str(), nullptr);
+            if (std::isfinite(bpm)) {
+                scene.tempoBpm = std::clamp(bpm, 20.0f, 999.0f);
+            }
         }
         std::string numStr = transportNode->attribute("timeSignatureNumerator");
         if (!numStr.empty()) {
-            scene.timeSigNumerator = static_cast<uint8_t>(std::strtoul(numStr.c_str(), nullptr, 10));
+            unsigned long num = std::strtoul(numStr.c_str(), nullptr, 10);
+            scene.timeSigNumerator = static_cast<uint8_t>(std::clamp<unsigned long>(num, 1, 32));
         }
         std::string denStr = transportNode->attribute("timeSignatureDenominator");
         if (!denStr.empty()) {
-            scene.timeSigDenominator = static_cast<uint8_t>(std::strtoul(denStr.c_str(), nullptr, 10));
+            unsigned long den = std::strtoul(denStr.c_str(), nullptr, 10);
+            scene.timeSigDenominator = static_cast<uint8_t>(std::clamp<unsigned long>(den, 1, 32));
         }
     }
 
@@ -123,7 +130,11 @@ std::optional<ScenePreset> DawprojectAdapter::parseToScene(const std::filesystem
 
         auto idNode = plugNode->firstChild("identifier");
         if (idNode && !idNode->text.empty()) {
-            slot.classGuid = utils::GuidUtils::normalizeToCanonicalGuid(idNode->text, utils::DawGuidFormat::DawprojectUuid);
+            if (slot.type == "CLAP") {
+                slot.clapId = idNode->text;
+            } else {
+                slot.classGuid = utils::GuidUtils::normalizeToCanonicalGuid(idNode->text, utils::DawGuidFormat::DawprojectUuid);
+            }
         }
 
         // State file path: e.g. plugins/<uuid>/state.bin or attribute
@@ -155,9 +166,12 @@ std::optional<ScenePreset> DawprojectAdapter::parseToScene(const std::filesystem
                         }
                     }
                     if (isSubpath && std::filesystem::exists(canTarget)) {
-                        std::ifstream sf(canTarget, std::ios::binary);
-                        if (sf.is_open()) {
-                            slot.state.assign((std::istreambuf_iterator<char>(sf)), std::istreambuf_iterator<char>());
+                        auto stateSz = std::filesystem::file_size(canTarget, ec1);
+                        if (!ec1 && stateSz > 0 && stateSz <= kMaxPresetFileSize) {
+                            std::ifstream sf(canTarget, std::ios::binary);
+                            if (sf.is_open()) {
+                                slot.state.assign((std::istreambuf_iterator<char>(sf)), std::istreambuf_iterator<char>());
+                            }
                         }
                     }
                 }
@@ -243,21 +257,26 @@ bool DawprojectAdapter::exportFromScene(const ScenePreset& scene, const std::fil
 
     int plugIdx = 0;
     auto writePluginXml = [&](const PluginSlotPreset& slot) {
-        std::string classUuidStr = utils::GuidUtils::toDawprojectUuidString(slot.classGuid);
-        if (classUuidStr.empty()) {
-            char buf[64];
-            std::snprintf(buf, sizeof(buf), "00000000-0000-0000-0000-%012d", plugIdx + 1);
-            classUuidStr = buf;
+        std::string identifierStr;
+        if (slot.type == "CLAP") {
+            identifierStr = slot.clapId.empty() ? ("clap." + slot.name) : slot.clapId;
+        } else {
+            identifierStr = utils::GuidUtils::toDawprojectUuidString(slot.classGuid);
+            if (identifierStr.empty()) {
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), "00000000-0000-0000-0000-%012d", plugIdx + 1);
+                identifierStr = buf;
+            }
         }
 
         const int currentIdx = ++plugIdx;
-        std::string instanceId = "slot_" + std::to_string(currentIdx) + "_" + classUuidStr;
+        std::string instanceId = "slot_" + std::to_string(currentIdx);
         std::string stateDirRel = "plugins/" + instanceId;
 
         px << "          <plugin id=\"" << instanceId << "\" name=\""
            << utils::XmlParser::encodeEntities(slot.name) << "\" deviceRole=\"audioEffect\">\n";
         px << "            <pluginFormat>" << (slot.type == "CLAP" ? "clap" : "vst3") << "</pluginFormat>\n";
-        px << "            <identifier>" << classUuidStr << "</identifier>\n";
+        px << "            <identifier>" << utils::XmlParser::encodeEntities(identifierStr) << "</identifier>\n";
 
         if (!slot.state.empty()) {
             auto slotPlugDir = tempDir / stateDirRel;

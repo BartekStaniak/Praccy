@@ -58,6 +58,7 @@ void ThumbnailManager::shutdown() {
 }
 
 void ThumbnailManager::clearCache() {
+    flushRetiredResources();
     for (auto& [key, thumb] : m_cache) {
         if (thumb.srv) {
             thumb.srv->Release();
@@ -66,6 +67,15 @@ void ThumbnailManager::clearCache() {
     }
     m_cache.clear();
     m_pendingCaptures.clear();
+}
+
+void ThumbnailManager::flushRetiredResources() noexcept {
+    for (auto* srv : m_retiredSrvs) {
+        if (srv) {
+            srv->Release();
+        }
+    }
+    m_retiredSrvs.clear();
 }
 
 std::filesystem::path ThumbnailManager::getThumbnailCacheDir() {
@@ -176,10 +186,10 @@ bool ThumbnailManager::uploadRgbaTexture(const std::string& key, int width, int 
 
     if (FAILED(hr) || !pSRV) return false;
 
-    // Release old texture if exists
+    // Defer release of old texture if exists
     auto it = m_cache.find(key);
     if (it != m_cache.end() && it->second.srv) {
-        it->second.srv->Release();
+        m_retiredSrvs.push_back(it->second.srv);
     }
 
     m_cache[key] = Thumbnail{pSRV, width, height};
@@ -296,6 +306,7 @@ void ThumbnailManager::update() {
             captureWindow(cap.pluginName, cap.hwnd);
         }
     }
+    flushRetiredResources();
 }
 
 bool ThumbnailManager::captureWindow(const std::string& pluginName, HWND hwnd) {
@@ -341,14 +352,13 @@ bool ThumbnailManager::captureWindow(const std::string& pluginName, HWND hwnd) {
     }
 
     Gdiplus::Bitmap fullBmp(hbm, nullptr);
-
-    // Clean up GDI objects immediately
-    SelectObject(hdcMem, oldBm);
-    DeleteObject(hbm);
-    DeleteDC(hdcMem);
-    ReleaseDC(nullptr, hdcScreen);
-
-    if (fullBmp.GetLastStatus() != Gdiplus::Ok) return false;
+    if (fullBmp.GetLastStatus() != Gdiplus::Ok) {
+        SelectObject(hdcMem, oldBm);
+        DeleteObject(hbm);
+        DeleteDC(hdcMem);
+        ReleaseDC(nullptr, hdcScreen);
+        return false;
+    }
 
     // Downscale smoothly to max width 480 (preserving aspect ratio)
     int targetW = width;
@@ -364,6 +374,12 @@ bool ThumbnailManager::captureWindow(const std::string& pluginName, HWND hwnd) {
         g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
         g.DrawImage(&fullBmp, 0, 0, targetW, targetH);
     }
+
+    // Clean up GDI objects only AFTER GDI+ DrawImage completes
+    SelectObject(hdcMem, oldBm);
+    DeleteObject(hbm);
+    DeleteDC(hdcMem);
+    ReleaseDC(nullptr, hdcScreen);
 
     // Extract RGBA buffer
     Gdiplus::Rect gRect(0, 0, targetW, targetH);

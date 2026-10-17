@@ -29,6 +29,16 @@ void QuickLooper::prepare(double sampleRate, uint32_t maxSeconds, uint32_t maxBl
     (void)maxBlockSize;
 
     const size_t maxFrames = static_cast<size_t>(sampleRate * static_cast<double>(maxSeconds));
+    while (m_stateLock.test_and_set(std::memory_order_acquire)) {
+#if defined(_M_X64) || defined(__x86_64__)
+        _mm_pause();
+#endif
+    }
+    struct StateUnlockGuard {
+        std::atomic_flag& flag;
+        ~StateUnlockGuard() { flag.clear(std::memory_order_release); }
+    } unlocker{m_stateLock};
+
     m_sampleRate.store(sampleRate, std::memory_order_relaxed);
     m_maxFrames.store(maxFrames, std::memory_order_relaxed);
     try {
@@ -177,7 +187,9 @@ void QuickLooper::executeCommand(LooperCommand cmd) noexcept {
                 case LooperState::Playing: {
                     // Switch to Overdubbing: if an undone layer is active, stage its mask for lazy per-block commit
                     if (m_undoLayerActive) {
-                        m_pendingCommitBlockMask = m_overdubbedBlockMask;
+                        for (size_t i = 0; i < m_pendingCommitBlockMask.size() && i < m_overdubbedBlockMask.size(); ++i) {
+                            m_pendingCommitBlockMask[i] |= m_overdubbedBlockMask[i];
+                        }
                         m_undoLayerActive = false;
                     } else {
                         std::fill(m_pendingCommitBlockMask.begin(), m_pendingCommitBlockMask.end(), 0ULL);
@@ -353,9 +365,6 @@ void QuickLooper::process(const audio::AudioBufferView& in, audio::AudioBufferVi
     } stateGuard(m_stateLock);
 
     if (!stateGuard.acquired) {
-        if (out.numChannels() > 0 && in.numChannels() > 0 && out.channel(0) != in.channel(0)) {
-            out.copyFrom(in);
-        }
         return;
     }
     drainCommands();

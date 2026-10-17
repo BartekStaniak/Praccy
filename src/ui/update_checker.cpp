@@ -114,6 +114,10 @@ static std::string httpGet(const std::string& url) {
     HINTERNET hInternet = InternetOpenA("Praccy-App/1.0", INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
     if (!hInternet) return {};
 
+    DWORD timeoutMs = 10000;
+    InternetSetOptionA(hInternet, INTERNET_OPTION_CONNECT_TIMEOUT, &timeoutMs, sizeof(timeoutMs));
+    InternetSetOptionA(hInternet, INTERNET_OPTION_RECEIVE_TIMEOUT, &timeoutMs, sizeof(timeoutMs));
+
     DWORD flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_SECURE | INTERNET_FLAG_NO_CACHE_WRITE;
     HINTERNET hUrl = InternetOpenUrlA(hInternet, url.c_str(),
         "User-Agent: Praccy-App/1.0\r\nAccept: application/vnd.github.v3+json\r\n", -1, flags, 0);
@@ -122,10 +126,24 @@ static std::string httpGet(const std::string& url) {
         return {};
     }
 
+    DWORD statusCode = 0;
+    DWORD statusSize = sizeof(statusCode);
+    if (!HttpQueryInfoA(hUrl, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &statusCode, &statusSize, nullptr) || statusCode != 200) {
+        InternetCloseHandle(hUrl);
+        InternetCloseHandle(hInternet);
+        return {};
+    }
+
+    constexpr size_t kMaxResponseBytes = 2 * 1024 * 1024;
     std::string response;
     char buffer[4096];
     DWORD bytesRead = 0;
     while (InternetReadFile(hUrl, buffer, sizeof(buffer), &bytesRead) && bytesRead > 0) {
+        if (response.size() + bytesRead > kMaxResponseBytes) {
+            InternetCloseHandle(hUrl);
+            InternetCloseHandle(hInternet);
+            return {};
+        }
         response.append(buffer, bytesRead);
     }
 
@@ -169,8 +187,8 @@ void UpdateChecker::runCheck(bool includeBeta, std::stop_token st) {
     result.isBeta = includeBeta;
 
     // Helper lambda to parse release asset from a release JSON snippet
-    auto parseReleaseAsset = [&](const std::string& relJson, UpdateInfo& target) {
-        size_t assetPos = relJson.find("\"assets\":");
+    auto parseReleaseAsset = [&](const std::string& relJson, UpdateInfo& target, size_t startOffset = 0) {
+        size_t assetPos = relJson.find("\"assets\":", startOffset);
         if (assetPos != std::string::npos) {
             size_t zipPos = relJson.find(".zip\"", assetPos);
             if (zipPos != std::string::npos) {
@@ -192,75 +210,51 @@ void UpdateChecker::runCheck(bool includeBeta, std::stop_token st) {
         }
     };
 
-    if (includeBeta) {
-        // Query latest commit on 'dev' branch
-        std::string json = httpGet("https://api.github.com/repos/BartekStaniak/Praccy/commits/dev");
-        if (st.stop_requested()) {
-            return;
-        }
-        if (json.empty()) {
-            result.status = UpdateStatus::Error;
-            result.errorMessage = "Unable to connect to GitHub. Check your network connection.";
-        } else {
-            std::string sha = extractJsonField(json, "sha");
-            std::string message = extractJsonField(json, "message");
-            std::string date = extractJsonField(json, "date");
+    std::string apiUrl = includeBeta ?
+        "https://api.github.com/repos/BartekStaniak/Praccy/releases" :
+        "https://api.github.com/repos/BartekStaniak/Praccy/releases/latest";
 
-            if (sha.empty()) {
-                result.status = UpdateStatus::Error;
-                result.errorMessage = "Could not parse GitHub API dev response.";
-            } else {
-                std::string shortSha = sha.substr(0, std::min<size_t>(7, sha.length()));
-                result.latestVersion = "dev (" + shortSha + ")";
-                auto newline = message.find('\n');
-                result.releaseTitle = (newline != std::string::npos) ? message.substr(0, newline) : message;
-                result.publishedDate = date;
-                result.downloadUrl = "https://github.com/BartekStaniak/Praccy/tree/dev";
-
-                // Check if any release asset is available (e.g. latest release package)
-                if (!st.stop_requested()) {
-                    std::string allReleases = httpGet("https://api.github.com/repos/BartekStaniak/Praccy/releases");
-                    if (!allReleases.empty()) {
-                        parseReleaseAsset(allReleases, result);
-                    }
-                }
-
-                result.status = UpdateStatus::UpdateAvailable;
+    std::string json = httpGet(apiUrl);
+    if (st.stop_requested()) {
+        return;
+    }
+    if (json.empty()) {
+        result.status = UpdateStatus::Error;
+        result.errorMessage = "Unable to connect to GitHub. Check your network connection.";
+    } else {
+        size_t entryStart = 0;
+        if (includeBeta) {
+            size_t firstObj = json.find('{');
+            if (firstObj != std::string::npos) {
+                entryStart = firstObj;
             }
         }
-    } else {
-        // Query latest official release
-        std::string json = httpGet("https://api.github.com/repos/BartekStaniak/Praccy/releases/latest");
-        if (st.stop_requested()) {
-            return;
-        }
-        if (json.empty()) {
+
+        std::string tag = extractJsonField(json, "tag_name", entryStart);
+        std::string name = extractJsonField(json, "name", entryStart);
+        std::string htmlUrl = extractJsonField(json, "html_url", entryStart);
+        std::string publishedAt = extractJsonField(json, "published_at", entryStart);
+        std::string body = extractJsonField(json, "body", entryStart);
+
+        if (tag.empty()) {
             result.status = UpdateStatus::Error;
-            result.errorMessage = "Unable to connect to GitHub. Check your network connection.";
+            result.errorMessage = "Could not parse GitHub release information.";
         } else {
-            std::string tag = extractJsonField(json, "tag_name");
-            std::string name = extractJsonField(json, "name");
-            std::string htmlUrl = extractJsonField(json, "html_url");
-            std::string publishedAt = extractJsonField(json, "published_at");
-            std::string body = extractJsonField(json, "body");
+            result.latestVersion = tag;
+            result.releaseTitle = name.empty() ? tag : name;
+            result.downloadUrl = htmlUrl.empty() ? "https://github.com/BartekStaniak/Praccy/releases" : htmlUrl;
+            result.publishedDate = publishedAt;
+            result.releaseNotes = body;
 
-            if (tag.empty()) {
-                result.status = UpdateStatus::Error;
-                result.errorMessage = "Could not parse GitHub release information.";
+            parseReleaseAsset(json, result, entryStart);
+
+            std::string cleanTag = (!tag.empty() && (tag[0] == 'v' || tag[0] == 'V')) ? tag.substr(1) : tag;
+            std::string cleanCurrent = (!result.currentVersion.empty() && (result.currentVersion[0] == 'v' || result.currentVersion[0] == 'V')) ? result.currentVersion.substr(1) : result.currentVersion;
+
+            if (cleanTag != cleanCurrent) {
+                result.status = UpdateStatus::UpdateAvailable;
             } else {
-                result.latestVersion = tag;
-                result.releaseTitle = name.empty() ? tag : name;
-                result.downloadUrl = htmlUrl.empty() ? "https://github.com/BartekStaniak/Praccy/releases" : htmlUrl;
-                result.publishedDate = publishedAt;
-                result.releaseNotes = body;
-
-                parseReleaseAsset(json, result);
-
-                if (tag != result.currentVersion) {
-                    result.status = UpdateStatus::UpdateAvailable;
-                } else {
-                    result.status = UpdateStatus::UpToDate;
-                }
+                result.status = UpdateStatus::UpToDate;
             }
         }
     }
@@ -344,6 +338,10 @@ void UpdateChecker::runDownload(std::stop_token st) {
         return;
     }
 
+    DWORD timeoutMs = 15000;
+    InternetSetOptionA(hInternet, INTERNET_OPTION_CONNECT_TIMEOUT, &timeoutMs, sizeof(timeoutMs));
+    InternetSetOptionA(hInternet, INTERNET_OPTION_RECEIVE_TIMEOUT, &timeoutMs, sizeof(timeoutMs));
+
     DWORD flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_SECURE | INTERNET_FLAG_NO_CACHE_WRITE;
     HINTERNET hUrl = InternetOpenUrlA(hInternet, downloadUrl.c_str(),
         "User-Agent: Praccy-App/1.0\r\nAccept: application/octet-stream\r\n", -1, flags, 0);
@@ -388,6 +386,12 @@ void UpdateChecker::runDownload(std::stop_token st) {
             break;
         }
         outFile.write(buffer, bytesRead);
+        if (!outFile.good()) {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_info.status = UpdateStatus::Error;
+            m_info.errorMessage = "Disk write failure while downloading update package.";
+            break;
+        }
         totalRead += bytesRead;
 
         float progress = (expectedSize > 0) ? (static_cast<float>(totalRead) / static_cast<float>(expectedSize)) : 0.5f;
@@ -410,10 +414,16 @@ void UpdateChecker::runDownload(std::stop_token st) {
         return;
     }
 
+    if (!outFile.good() || m_info.status == UpdateStatus::Error) {
+        std::filesystem::remove(zipPath, ec);
+        return;
+    }
+
     if (totalRead <= 1024) {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_info.status = UpdateStatus::Error;
         m_info.errorMessage = "Downloaded file is corrupted or incomplete.";
+        std::filesystem::remove(zipPath, ec);
         return;
     }
 
@@ -494,15 +504,21 @@ void UpdateChecker::runDownload(std::stop_token st) {
         for (int i = 0; i < 8; ++i) {
             std::snprintf(hexDigest + i * 8, 9, "%08x", H[i]);
         }
-        if (!expectedSha256.empty()) {
-            std::string expLower = expectedSha256;
-            for (char& ch : expLower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            if (expLower != hexDigest) {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                m_info.status = UpdateStatus::Error;
-                m_info.errorMessage = "SHA-256 verification failed for downloaded update package.";
-                return;
-            }
+        if (expectedSha256.empty()) {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_info.status = UpdateStatus::Error;
+            m_info.errorMessage = "Missing SHA-256 digest for release asset.";
+            std::filesystem::remove(zipPath, ec);
+            return;
+        }
+        std::string expLower = expectedSha256;
+        for (char& ch : expLower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        if (expLower != hexDigest) {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_info.status = UpdateStatus::Error;
+            m_info.errorMessage = "SHA-256 verification failed for downloaded update package.";
+            std::filesystem::remove(zipPath, ec);
+            return;
         }
     }
 

@@ -113,8 +113,10 @@ void ExportDawChainModal::render(state::SceneManager& sceneMgr, audio::GraphEngi
             else if (m_targetFormatIdx == 2) ext = ".dawproject";
             else if (m_targetFormatIdx == 3) ext = ".vstpreset";
 
-            std::filesystem::path outPath = std::filesystem::path(m_exportDirectory) / (m_exportFilename + ext);
-            state::ScenePreset scene = sceneMgr.captureGraphSnapshot(graph, m_exportFilename);
+            auto cleanFilename = std::filesystem::path(m_exportFilename).filename();
+            if (cleanFilename.empty()) cleanFilename = "ExportedRig";
+            std::filesystem::path outPath = (std::filesystem::path(m_exportDirectory) / cleanFilename).replace_extension(ext);
+            state::ScenePreset scene = sceneMgr.captureGraphSnapshot(graph, cleanFilename.stem().string());
 
             std::string statusMsg;
             if (state::UniversalDawInteropManager::instance().exportScene(scene, outPath, &statusMsg)) {

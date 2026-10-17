@@ -10,8 +10,10 @@
 #include <mutex>
 #include <string>
 #include <malloc.h>
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
 #include <xmmintrin.h>
 #include <pmmintrin.h>
+#endif
 
 namespace praccy::plugins {
 
@@ -227,7 +229,9 @@ inline bool safeCallPluginAudio(Func&& f, DWORD* outExceptionCode = nullptr) {
     bool ok = safeCallPlugin(std::forward<Func>(f), outExceptionCode);
     if (!ok) {
         // Restore standard audio MXCSR control word after fault
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
         _mm_setcsr(0x1F80 | 0x8000 | 0x0040); // Standard masks + FTZ + DAZ
+#endif
     }
     return ok;
 }

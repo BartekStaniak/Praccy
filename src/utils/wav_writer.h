@@ -12,6 +12,7 @@
 #include <deque>
 #include <mutex>
 #include <condition_variable>
+#include <limits>
 
 namespace praccy::utils {
 
@@ -49,6 +50,9 @@ struct RiffWaveHeader24Bit {
 inline bool writeWav24Bit(const std::string& filePath, const float* left, const float* right,
                           size_t numSamples, uint32_t sampleRate) {
     if (!left || numSamples == 0 || sampleRate == 0) {
+        return false;
+    }
+    if (numSamples > (std::numeric_limits<uint32_t>::max() - 36u) / 6u) {
         return false;
     }
 

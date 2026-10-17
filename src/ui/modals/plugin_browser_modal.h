@@ -79,6 +79,7 @@ private:
     bool m_needsFocus{false};
     bool m_scrollSelectionIntoView{false};
     bool m_tabHandledThisFrame{false};
+    bool m_filterDirty{false};
 
     PaletteScope m_currentScope{PaletteScope::All};
     char m_searchQuery[128]{0};

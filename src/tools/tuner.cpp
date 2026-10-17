@@ -228,6 +228,11 @@ void InstrumentTuner::pushSamples(const float* left, const float* right, uint32_
 void InstrumentTuner::process(const float* monoInput, uint32_t numSamples) {
     if (!m_enabled.load(std::memory_order_relaxed) || !monoInput || numSamples == 0) return;
 
+    if (m_workerRunning.load(std::memory_order_relaxed)) {
+        pushSamples(monoInput, numSamples);
+        return;
+    }
+
 #if defined(_M_X64) || defined(__x86_64__)
     _mm_setcsr(_mm_getcsr() | 0x8040);
 #endif
@@ -408,6 +413,7 @@ void InstrumentTuner::detectPitchYin() {
 void InstrumentTuner::publishResult(bool hasPitch, float freq, int note, float cents) {
     uint32_t seq = m_resultSeq.load(std::memory_order_relaxed);
     m_resultSeq.store(seq + 1, std::memory_order_release);
+    std::atomic_thread_fence(std::memory_order_release);
 
     m_detectedFreq.store(freq, std::memory_order_relaxed);
     m_detectedMidiNote.store(note, std::memory_order_relaxed);
@@ -438,10 +444,12 @@ TunerResult InstrumentTuner::currentResult() const {
     do {
         seq1 = m_resultSeq.load(std::memory_order_acquire);
         if (seq1 & 1) {
+            seq2 = seq1 + 1;
             std::this_thread::yield();
             continue;
         }
 
+        std::atomic_thread_fence(std::memory_order_acquire);
         hasPitch = m_hasPitch.load(std::memory_order_relaxed);
         freq = m_detectedFreq.load(std::memory_order_relaxed);
         note = m_detectedMidiNote.load(std::memory_order_relaxed);
@@ -449,6 +457,15 @@ TunerResult InstrumentTuner::currentResult() const {
 
         seq2 = m_resultSeq.load(std::memory_order_acquire);
     } while (seq1 != seq2 && ++retryCount < 10);
+
+    if (seq1 != seq2 || (seq1 & 1)) {
+        result.confidence = false;
+        result.noteName = "--";
+        result.frequencyHz = 0.0f;
+        result.centDeviation = 0.0f;
+        result.matchedStringIndex = -1;
+        return result;
+    }
 
     result.confidence = hasPitch;
     if (!result.confidence) {

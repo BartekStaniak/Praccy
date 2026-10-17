@@ -18,14 +18,20 @@ void AudioPlayer::prepare(double sampleRate) {
     if (!std::isfinite(sampleRate) || sampleRate <= 0.0) {
         sampleRate = 48000.0;
     }
-    m_sampleRate.store(sampleRate, std::memory_order_release);
-    m_activeSampleRate.store(sampleRate, std::memory_order_relaxed);
+    double oldSr = m_sampleRate.exchange(sampleRate, std::memory_order_seq_cst);
+    m_activeSampleRate.store(sampleRate, std::memory_order_seq_cst);
+    if (m_isLoaded.load(std::memory_order_acquire) && std::abs(oldSr - sampleRate) > 1.0) {
+        std::string path = filePath();
+        if (!path.empty()) {
+            loadWavFile(path);
+        }
+    }
 }
 
 void AudioPlayer::retireBuffer(AudioTrackBuffer* oldBuf) {
     if (!oldBuf) return;
 
-    while (m_audioReadingBuffer.load(std::memory_order_acquire) == oldBuf) {
+    while (m_audioReadingBuffer.load(std::memory_order_seq_cst) == oldBuf) {
         std::this_thread::yield();
     }
     delete oldBuf;
@@ -175,7 +181,7 @@ bool AudioPlayer::executeLoad(const std::string& filePath, std::stop_token stopT
     m_activeSampleRate.store(safeHostSr, std::memory_order_release);
 
     // Atomic pointer swap
-    AudioTrackBuffer* oldBuf = m_activeBuffer.exchange(newTrack.release(), std::memory_order_acq_rel);
+    AudioTrackBuffer* oldBuf = m_activeBuffer.exchange(newTrack.release(), std::memory_order_seq_cst);
     m_playhead.store(0, std::memory_order_relaxed);
     m_isLoaded.store(true, std::memory_order_release);
     m_loadProgress.store(1.0f, std::memory_order_release);
@@ -192,7 +198,7 @@ void AudioPlayer::unload() {
         m_workerThread.join();
     }
     m_activeNumFrames.store(0, std::memory_order_release);
-    AudioTrackBuffer* oldBuf = m_activeBuffer.exchange(nullptr, std::memory_order_acq_rel);
+    AudioTrackBuffer* oldBuf = m_activeBuffer.exchange(nullptr, std::memory_order_seq_cst);
     {
         std::lock_guard<std::mutex> lock(m_metadataMutex);
         m_cachedFilePath.clear();

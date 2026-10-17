@@ -269,10 +269,26 @@ void ClapPluginInstance::handleMainThreadCallbacks() noexcept {
     }
 }
 
+void ClapPluginInstance::rescanParamValues() noexcept {
+    if (!m_paramsExt || !m_plugin) return;
+    std::lock_guard<std::mutex> lock(m_paramCacheMutex);
+    const uint32_t paramCount = m_paramsExt->count(m_plugin);
+    for (uint32_t i = 0; i < paramCount; ++i) {
+        clap_param_info info{};
+        if (m_paramsExt->get_info(m_plugin, i, &info)) {
+            double val = info.default_value;
+            if (m_paramsExt->get_value(m_plugin, info.id, &val)) {
+                m_paramCache[info.id] = static_cast<float>(val);
+            }
+        }
+    }
+}
+
 void CLAP_ABI ClapPluginInstance::clapHostParamsRescan(const clap_host_t* host, clap_param_rescan_flags flags) {
     if (!host || !host->host_data) return;
     auto* self = static_cast<ClapPluginInstance*>(host->host_data);
     if (flags & (CLAP_PARAM_RESCAN_VALUES | CLAP_PARAM_RESCAN_ALL)) {
+        self->rescanParamValues();
         self->notifyGuiParamEdited(0xFFFFFFFFu, true);
     }
 }
@@ -635,6 +651,8 @@ void ClapPluginInstance::process(audio::AudioProcessContext& ctx) {
         if (!m_isProcessing.load(std::memory_order_relaxed)) {
             if (m_plugin->start_processing(m_plugin)) {
                 m_isProcessing.store(true, std::memory_order_release);
+            } else {
+                return;
             }
         }
         m_plugin->process(m_plugin, &processData);

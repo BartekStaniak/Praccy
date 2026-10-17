@@ -6,6 +6,7 @@
 #include "../../plugins/builtin_dsp.h"
 #include "../../plugins/vst3_host.h"
 #include "../../plugins/clap_host.h"
+#include "../../plugins/async_plugin_loader.h"
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <algorithm>
@@ -193,7 +194,7 @@ void PluginBrowserModal::setScope(PaletteScope scope) {
 }
 
 void PluginBrowserModal::cycleScope() {
-    uint8_t next = (static_cast<uint8_t>(m_currentScope) + 1) % 3;
+    uint8_t next = static_cast<uint8_t>((static_cast<uint8_t>(m_currentScope) + 1) % 3);
     setScope(static_cast<PaletteScope>(next));
 }
 
@@ -224,14 +225,15 @@ void PluginBrowserModal::toggleFavorite(const std::string& pluginName) {
 
     m_scanner.setFavorites(m_favoritePlugins);
 
-    updateFilteredList();
+    m_filterDirty = true;
 }
 
 void PluginBrowserModal::toggleFavoriteForSelected() {
     if (m_selectedIndex >= 0 && m_selectedIndex < static_cast<int>(m_filteredItems.size())) {
         const auto* desc = m_filteredItems[m_selectedIndex].descriptor;
         if (desc) {
-            toggleFavorite(desc->name);
+            const std::string name = desc->name;
+            toggleFavorite(name);
         }
     }
 }
@@ -427,12 +429,10 @@ void PluginBrowserModal::instantiateSelectedPlugin() {
     const auto* desc = m_filteredItems[m_selectedIndex].descriptor;
     if (!desc) return;
 
-    std::unique_ptr<audio::AudioNode> innerNode;
-    if (desc->type == plugins::PluginType::VST3) {
-        innerNode = plugins::Vst3PluginInstance::loadFromFile(desc->path);
-    } else if (desc->type == plugins::PluginType::CLAP) {
-        innerNode = plugins::ClapPluginInstance::loadFromFile(desc->path);
-    } else {
+    std::string pluginName = desc->name;
+
+    if (desc->type == plugins::PluginType::BuiltIn) {
+        std::unique_ptr<audio::AudioNode> innerNode;
         if (desc->path == "builtin://drive" || desc->name.find("Drive") != std::string::npos || desc->name.find("Overdrive") != std::string::npos) {
             innerNode = std::make_unique<plugins::OverdriveEffect>();
         } else if (desc->path == "builtin://amp" || desc->name.find("Amp") != std::string::npos) {
@@ -442,26 +442,56 @@ void PluginBrowserModal::instantiateSelectedPlugin() {
         } else {
             innerNode = std::make_unique<plugins::OverdriveEffect>();
         }
-    }
 
-    if (!innerNode) {
-        close();
-        return;
-    }
+        auto slot = std::make_unique<audio::PluginSlot>(std::move(innerNode));
 
-    auto slot = std::make_unique<audio::PluginSlot>(std::move(innerNode));
-    std::string pluginName = desc->name;
-
-    if (m_targetBranchIndex != -1 && m_targetBlockIndex != -1) {
-        auto* block = dynamic_cast<audio::ParallelSplitMergeBlock*>(m_graph.getNode(m_targetBlockIndex));
-        if (block) {
-            auto* branch = block->getBranch(m_targetBranchIndex);
-            if (branch) {
-                branch->addSlot(std::move(slot));
+        if (m_targetBranchIndex != -1 && m_targetBlockIndex != -1) {
+            auto* block = dynamic_cast<audio::ParallelSplitMergeBlock*>(m_graph.getNode(m_targetBlockIndex));
+            if (block) {
+                auto* branch = block->getBranch(m_targetBranchIndex);
+                if (branch) {
+                    branch->addSlot(std::move(slot));
+                }
             }
+        } else {
+            m_graph.addSerialNode(std::move(slot));
         }
     } else {
-        m_graph.addSerialNode(std::move(slot));
+        // VST3 or CLAP: Create Loading placeholder & queue background load
+        auto placeholder = std::make_unique<audio::LoadingPluginPlaceholder>(
+            desc->name,
+            desc->vendor,
+            desc->typeString(),
+            desc->path,
+            desc->category
+        );
+        auto slot = std::make_unique<audio::PluginSlot>(std::move(placeholder));
+        audio::PluginSlot* slotPtr = slot.get();
+
+        if (m_targetBranchIndex != -1 && m_targetBlockIndex != -1) {
+            auto* block = dynamic_cast<audio::ParallelSplitMergeBlock*>(m_graph.getNode(m_targetBlockIndex));
+            if (block) {
+                auto* branch = block->getBranch(m_targetBranchIndex);
+                if (branch) {
+                    branch->addSlot(std::move(slot));
+                }
+            }
+        } else {
+            m_graph.addSerialNode(std::move(slot));
+        }
+
+        // Option 2.A: Automatically open GUI when background loading completes
+        plugins::AsyncPluginLoader::instance().enqueueLoad(
+            slotPtr,
+            desc->path,
+            desc->type,
+            desc->name,
+            desc->vendor,
+            {},
+            m_graph.sampleRate(),
+            m_graph.maxBlockSize(),
+            true // openGuiWhenDone = true
+        );
     }
 
     recordPluginUsage(*desc);
@@ -480,6 +510,9 @@ void PluginBrowserModal::renderPluginRow(int index, float rowH) {
     const auto& item = m_filteredItems[index];
     const auto* desc = item.descriptor;
     if (!desc) return;
+    const std::string pluginName = desc->name;
+    const std::string pluginVendor = desc->vendor;
+    const plugins::PluginType pluginType = desc->type;
 
     const bool isSelected = (index == m_selectedIndex);
     ImGui::PushID(index);
@@ -516,17 +549,17 @@ void PluginBrowserModal::renderPluginRow(int index, float rowH) {
     char starId[32];
     std::snprintf(starId, sizeof(starId), "##Star_%d", index);
     if (renderCenteredStarButton(starId, ImVec2(starSz, starSz), item.isFavorite)) {
-        toggleFavorite(desc->name);
+        toggleFavorite(pluginName);
     }
     curX += starSz + 8.0f;
 
     // 2. Format Badge (centered in rowH)
     const char* badgeStr = "DSP";
     ImU32 badgeText = tokens.text.badgeInternal;
-    if (desc->type == plugins::PluginType::VST3) {
+    if (pluginType == plugins::PluginType::VST3) {
         badgeStr = "VST3";
         badgeText = tokens.text.badgeVst3;
-    } else if (desc->type == plugins::PluginType::CLAP) {
+    } else if (pluginType == plugins::PluginType::CLAP) {
         badgeStr = "CLAP";
         badgeText = tokens.text.badgeClap;
     }
@@ -539,18 +572,18 @@ void PluginBrowserModal::renderPluginRow(int index, float rowH) {
     // 3. Clean Plugin Title (suffix clutter stripped)
     float textY = rowPos.y + (rowH - fontH) * 0.5f;
     ImGui::SetCursorScreenPos(ImVec2(curX, textY));
-    std::string displayName = cleanPluginName(desc->name);
+    std::string displayName = cleanPluginName(pluginName);
     ImVec4 titleCol = isSelected ? tokens.text.accent.vec4 : tokens.text.primary.vec4;
     ImGui::TextColored(titleCol, "%s", displayName.c_str());
 
     // 4. Vendor / Developer
-    if (!desc->vendor.empty()) {
+    if (!pluginVendor.empty()) {
         ImGui::SameLine(0, 10.0f);
-        ImGui::TextColored(tokens.text.secondary.vec4, "%s", desc->vendor.c_str());
+        ImGui::TextColored(tokens.text.secondary.vec4, "%s", pluginVendor.c_str());
     }
 
     // 5. Intelligent Type/Category Capsule on the far right
-    std::string catName = m_scanner.getPluginCategory(desc->name, desc->vendor);
+    std::string catName = m_scanner.getPluginCategory(pluginName, pluginVendor);
     bool pillHovered = false;
     if (!catName.empty()) {
         ImVec2 catSz = ImGui::CalcTextSize(catName.c_str());
@@ -573,7 +606,7 @@ void PluginBrowserModal::renderPluginRow(int index, float rowH) {
                             pillHovered ? tokens.text.primary : tokens.text.muted, badgeH);
 
             if (ImGui::BeginPopupContextItem(catBtnId, ImGuiPopupFlags_MouseButtonRight)) {
-                ImGui::TextDisabled("Category for %s:", desc->name.c_str());
+                ImGui::TextDisabled("Category for %s:", pluginName.c_str());
                 ImGui::Separator();
                 const char* kCategories[] = {
                     "Amp Emulation",
@@ -590,14 +623,14 @@ void PluginBrowserModal::renderPluginRow(int index, float rowH) {
                 for (const char* c : kCategories) {
                     bool isCur = (catName == c);
                     if (ImGui::MenuItem(c, nullptr, isCur)) {
-                        m_scanner.setCustomCategory(desc->name, c);
-                        updateFilteredList();
+                        m_scanner.setCustomCategory(pluginName, c);
+                        m_filterDirty = true;
                     }
                 }
                 ImGui::Separator();
                 if (ImGui::MenuItem("Reset to Auto-detected")) {
-                    m_scanner.resetCustomCategory(desc->name);
-                    updateFilteredList();
+                    m_scanner.resetCustomCategory(pluginName);
+                    m_filterDirty = true;
                 }
                 ImGui::EndPopup();
             }
@@ -771,9 +804,12 @@ void PluginBrowserModal::render() {
         );
         ImGui::PopStyleVar();
 
-        if (std::strcmp(m_searchQuery, m_lastSearchQuery) != 0) {
+        if (m_filterDirty || std::strcmp(m_searchQuery, m_lastSearchQuery) != 0) {
             std::snprintf(m_lastSearchQuery, sizeof(m_lastSearchQuery), "%s", m_searchQuery);
-            m_selectedIndex = 0;
+            if (!m_filterDirty) {
+                m_selectedIndex = 0;
+            }
+            m_filterDirty = false;
             updateFilteredList();
         }
 
@@ -804,7 +840,7 @@ void PluginBrowserModal::render() {
             ImGui::TextColored(tokens.text.muted.vec4, "No matching audio plugins found.");
         } else {
             if (m_scrollSelectionIntoView) {
-                float targetScrollY = m_selectedIndex * rowH - (listHeight - rowH) * 0.5f;
+                float targetScrollY = static_cast<float>(m_selectedIndex) * rowH - (listHeight - rowH) * 0.5f;
                 if (targetScrollY < 0.0f) targetScrollY = 0.0f;
                 ImGui::SetScrollY(targetScrollY);
                 m_scrollSelectionIntoView = false;

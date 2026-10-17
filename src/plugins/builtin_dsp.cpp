@@ -211,9 +211,9 @@ bool TubeAmpEffect::loadState(const std::vector<uint8_t>& state) {
 StereoDelayEffect::StereoDelayEffect() = default;
 
 void StereoDelayEffect::prepare(double sampleRate, uint32_t /*maxBlockSize*/) {
-    m_sampleRate = sampleRate;
-    // Max 2.0 seconds delay
-    const size_t maxDelaySamples = static_cast<size_t>(sampleRate * 2.0);
+    m_sampleRate = (sampleRate >= 8000.0) ? sampleRate : 48000.0;
+    // Max 2.0 seconds delay + 2 samples safety margin
+    const size_t maxDelaySamples = static_cast<size_t>(m_sampleRate * 2.0) + 2;
     m_delayBufferL.assign(maxDelaySamples, 0.0f);
     m_delayBufferR.assign(maxDelaySamples, 0.0f);
     reset();
@@ -260,10 +260,18 @@ void StereoDelayEffect::process(audio::AudioProcessContext& ctx) {
 
     const uint32_t numSamples = ctx.numSamples;
     const uint32_t bufSize = static_cast<uint32_t>(m_delayBufferL.size());
+    if (bufSize < 2) {
+        ctx.output.copyFrom(ctx.input);
+        return;
+    }
+
     const float timeMs = m_timeMs.load(std::memory_order_relaxed);
     const uint32_t delaySamplesL = static_cast<uint32_t>((timeMs / 1000.0f) * static_cast<float>(m_sampleRate));
     // Ping-pong delay: right channel slightly offset (3/4 time)
     const uint32_t delaySamplesR = (delaySamplesL * 3u) / 4u;
+
+    const uint32_t safeDelayL = std::clamp(delaySamplesL, 1u, bufSize - 1u);
+    const uint32_t safeDelayR = std::clamp(delaySamplesR, 1u, bufSize - 1u);
 
     const float fb = m_feedback.load(std::memory_order_relaxed);
     const float mix = m_mix.load(std::memory_order_relaxed);
@@ -274,8 +282,8 @@ void StereoDelayEffect::process(audio::AudioProcessContext& ctx) {
     float* outR = ctx.output.numChannels() > 1 ? ctx.output.channel(1) : outL;
 
     for (uint32_t s = 0; s < numSamples; ++s) {
-        const uint32_t readPosL = (m_writePos + bufSize - (delaySamplesL % bufSize)) % bufSize;
-        const uint32_t readPosR = (m_writePos + bufSize - (delaySamplesR % bufSize)) % bufSize;
+        const uint32_t readPosL = (m_writePos + bufSize - safeDelayL) % bufSize;
+        const uint32_t readPosR = (m_writePos + bufSize - safeDelayR) % bufSize;
 
         const float delayedL = m_delayBufferL[readPosL];
         const float delayedR = m_delayBufferR[readPosR];
