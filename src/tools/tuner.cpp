@@ -157,6 +157,11 @@ InstrumentTuner::InstrumentTuner(uint32_t bufferSize)
       m_differenceBuffer(bufferSize / 2, 0.0f),
       m_cumulativeDiffBuffer(bufferSize / 2, 0.0f),
       m_linearWindow(bufferSize, 0.0f) {
+    const uint32_t initCount = static_cast<uint32_t>(std::min(m_config.stringMidiNotes.size(), MAX_TUNER_STRINGS));
+    for (uint32_t i = 0; i < initCount; ++i) {
+        m_atomicStringNotes[i].store(m_config.stringMidiNotes[i], std::memory_order_relaxed);
+    }
+    m_atomicStringCount.store(initCount, std::memory_order_release);
     start();
 }
 
@@ -480,17 +485,17 @@ TunerResult InstrumentTuner::currentResult() const {
     float bestCentsDiff = 9999.0f;
     float bestTargetFreq = 0.0f;
 
-    {
-        std::lock_guard<std::mutex> lock(m_configMutex);
-        for (size_t i = 0; i < m_config.stringMidiNotes.size(); ++i) {
-            int strMidi = m_config.stringMidiNotes[i];
-            float strTargetFreq = safeA4 * std::pow(2.0f, (static_cast<float>(strMidi) - 69.0f) / 12.0f);
-            float centsDiff = 1200.0f * std::log2(freq / strTargetFreq);
-            if (std::abs(centsDiff) < std::abs(bestCentsDiff)) {
-                bestCentsDiff = centsDiff;
-                bestStringIdx = static_cast<int>(i);
-                bestTargetFreq = strTargetFreq;
-            }
+    // Acquire pairs with setConfig release store; zero mutex locks on UI thread
+    const uint32_t strCount = std::min<uint32_t>(m_atomicStringCount.load(std::memory_order_acquire),
+                                                 static_cast<uint32_t>(MAX_TUNER_STRINGS));
+    for (uint32_t i = 0; i < strCount; ++i) {
+        const int strMidi = m_atomicStringNotes[i].load(std::memory_order_relaxed);
+        const float strTargetFreq = safeA4 * std::pow(2.0f, (static_cast<float>(strMidi) - 69.0f) / 12.0f);
+        const float centsDiff = 1200.0f * std::log2(freq / strTargetFreq);
+        if (std::abs(centsDiff) < std::abs(bestCentsDiff)) {
+            bestCentsDiff = centsDiff;
+            bestStringIdx = static_cast<int>(i);
+            bestTargetFreq = strTargetFreq;
         }
     }
 

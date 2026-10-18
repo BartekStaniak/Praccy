@@ -195,6 +195,7 @@ void PluginSlot::process(AudioProcessContext& ctx) {
     innerCtx.sampleRate = ctx.sampleRate;
     innerCtx.numSamples = numSamples;
     inner->process(innerCtx);
+    DspUtils::ScopedDenormalGuard::reassert();
 
     // Scrub NaN/Inf and clamp runaway spikes from third-party plugins
     for (uint32_t ch = 0; ch < procView.numChannels(); ++ch) {
@@ -1809,6 +1810,7 @@ void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& ha
 }
 
 void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& hardwareOut, const AudioProcessContext& transportCtx) {
+    DspUtils::ScopedDenormalGuard denormalGuard;
     const uint32_t numSamples = hardwareIn.numSamples();
     if (numSamples == 0) return;
 
@@ -2243,8 +2245,9 @@ void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& ha
 
     hardwareOut.copyFrom(mainView);
 
-    // Store outgoing audio tail for smooth in-place crossfading on tone / preset switches
-    if (numSamples > 0 && numSamples <= m_outgoingTailBuffer.maxSamples()) {
+    // Store outgoing audio tail for smooth in-place crossfading on tone / preset switches.
+    // Do not overwrite the latched outgoing tail while an in-place crossfade is actively ramping.
+    if (!m_inplaceCrossfadeRamp.isTransitioning() && numSamples > 0 && numSamples <= m_outgoingTailBuffer.maxSamples()) {
         auto tailView = m_outgoingTailBuffer.view(numSamples);
         tailView.copyFrom(mainView);
     }

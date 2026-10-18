@@ -263,6 +263,13 @@ public:
         {
             std::lock_guard<std::mutex> lock(m_configMutex);
             m_config = cfg;
+            m_config.clampStringCount();
+            const uint32_t cnt = static_cast<uint32_t>(std::min(m_config.stringMidiNotes.size(), MAX_TUNER_STRINGS));
+            for (uint32_t i = 0; i < cnt; ++i) {
+                m_atomicStringNotes[i].store(m_config.stringMidiNotes[i], std::memory_order_relaxed);
+            }
+            // Release publishes updated string note table to wait-free UI readers
+            m_atomicStringCount.store(cnt, std::memory_order_release);
         }
         m_a4Reference.store(cfg.a4ReferenceHz, std::memory_order_relaxed);
     }
@@ -287,6 +294,9 @@ private:
     std::atomic<float> m_a4Reference{440.0f};
     mutable std::mutex m_configMutex;
     TunerConfig m_config;
+    static constexpr size_t MAX_TUNER_STRINGS = 12;
+    std::array<std::atomic<int>, MAX_TUNER_STRINGS> m_atomicStringNotes{};
+    std::atomic<uint32_t> m_atomicStringCount{6};
 
     // Lock-free ingestion ring buffer
     AudioRingBuffer m_ringBuffer;

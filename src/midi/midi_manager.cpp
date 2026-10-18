@@ -84,11 +84,15 @@ void MidiManager::closeDevice() {
 }
 
 void MidiManager::drainLearnedPodFromMidiThread() {
-    if (m_hasPendingLearnedPod.exchange(false, std::memory_order_acq_rel)) {
+    uint32_t r = m_learnedReadIdx.load(std::memory_order_relaxed);
+    const uint32_t w = m_learnedWriteIdx.load(std::memory_order_acquire);
+    while (r != w) {
         PodCcBinding pod{};
-        m_learnedPodForUiSync.load(pod);
+        m_learnedPodQueue[r % LEARN_QUEUE_CAPACITY].load(pod);
         m_bindings.push_back(pod.toMidiBinding());
+        ++r;
     }
+    m_learnedReadIdx.store(r, std::memory_order_release);
 }
 
 void MidiManager::addBinding(const MidiBinding& binding) {
@@ -212,7 +216,7 @@ void MidiManager::removeBinding(const std::string& id) {
 
 void MidiManager::clearBindings() {
     std::lock_guard<std::mutex> lock(m_bindingsMutex);
-    m_hasPendingLearnedPod.store(false, std::memory_order_relaxed);
+    m_learnedReadIdx.store(m_learnedWriteIdx.load(std::memory_order_acquire), std::memory_order_release);
     m_bindings.clear();
     acquireSeqlockWrite();
     m_atomicNonCcCount.store(0, std::memory_order_relaxed);
@@ -307,7 +311,7 @@ FlatCcBinding MidiManager::getCcBinding(uint8_t channel, uint8_t cc) const noexc
             return out;
         }
     }
-    m_atomicCcTable[channel][cc].load(out);
+    out.clear();
     return out;
 }
 
@@ -445,35 +449,41 @@ void MidiManager::handleMidiMessage(uint8_t status, uint8_t d1, uint8_t d2) {
             learnedPod.triggerType = type;
             learnedPod.triggerNumber = (type == MidiMessageType::ProgramChange) ? msg.programNumber() : d1;
 
-            if (type == MidiMessageType::ControlChange && learnedPod.triggerNumber < NUM_CC_NUMBERS) {
-                const uint8_t ch = (channel <= 16) ? channel : 0;
-                const uint8_t cc = learnedPod.triggerNumber;
-                acquireSeqlockWrite();
-                auto& slot = m_ccTable[ch][cc];
-                slot.active = true;
-                slot.paramId = (learnedPod.paramId != 0)
-                    ? learnedPod.paramId
-                    : static_cast<uint32_t>(learnedPod.targetSlotIndex >= 0 ? learnedPod.targetSlotIndex : 0);
-                slot.minVal = 0.0f;
-                slot.maxVal = 1.0f;
-                slot.binding = learnedPod;
-                if (slot.count < MAX_BINDINGS_PER_CC) {
-                    slot.bindings[slot.count++] = learnedPod;
-                }
-                m_atomicCcTable[ch][cc].store(slot);
-                releaseSeqlockWrite();
-            } else {
-                acquireSeqlockWrite();
-                const uint32_t idx = m_atomicNonCcCount.load(std::memory_order_relaxed);
-                if (idx < MAX_NON_CC_BINDINGS) {
-                    m_atomicNonCcBindings[idx].store(learnedPod);
-                    m_atomicNonCcCount.store(idx + 1, std::memory_order_release);
+            // Wait-free try-lock update of atomic fast-path tables on real-time MIDI thread
+            if (!m_seqlockWriteFlag.test_and_set(std::memory_order_acquire)) {
+                m_ccTableSeq.fetch_add(1, std::memory_order_acq_rel);
+                if (type == MidiMessageType::ControlChange && learnedPod.triggerNumber < NUM_CC_NUMBERS) {
+                    const uint8_t ch = (channel <= 16) ? channel : 0;
+                    const uint8_t cc = learnedPod.triggerNumber;
+                    FlatCcBinding slot{};
+                    m_atomicCcTable[ch][cc].load(slot);
+                    slot.active = true;
+                    slot.paramId = (learnedPod.paramId != 0)
+                        ? learnedPod.paramId
+                        : static_cast<uint32_t>(learnedPod.targetSlotIndex >= 0 ? learnedPod.targetSlotIndex : 0);
+                    slot.minVal = 0.0f;
+                    slot.maxVal = 1.0f;
+                    slot.binding = learnedPod;
+                    if (slot.count < MAX_BINDINGS_PER_CC) {
+                        slot.bindings[slot.count++] = learnedPod;
+                    }
+                    m_atomicCcTable[ch][cc].store(slot);
+                } else {
+                    const uint32_t idx = m_atomicNonCcCount.load(std::memory_order_relaxed);
+                    if (idx < MAX_NON_CC_BINDINGS) {
+                        m_atomicNonCcBindings[idx].store(learnedPod);
+                        m_atomicNonCcCount.store(idx + 1, std::memory_order_release);
+                    }
                 }
                 releaseSeqlockWrite();
             }
 
-            m_learnedPodForUiSync.store(learnedPod);
-            m_hasPendingLearnedPod.store(true, std::memory_order_release);
+            const uint32_t w = m_learnedWriteIdx.load(std::memory_order_relaxed);
+            const uint32_t r = m_learnedReadIdx.load(std::memory_order_acquire);
+            if (w - r < LEARN_QUEUE_CAPACITY) {
+                m_learnedPodQueue[w % LEARN_QUEUE_CAPACITY].store(learnedPod);
+                m_learnedWriteIdx.store(w + 1, std::memory_order_release);
+            }
             return;
         }
     }

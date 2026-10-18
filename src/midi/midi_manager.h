@@ -142,9 +142,11 @@ private:
     mutable std::atomic_flag m_seqlockWriteFlag = ATOMIC_FLAG_INIT;
     mutable std::mutex m_learnMutex;
     MidiBinding m_pendingLearnBinding;
+    static constexpr size_t LEARN_QUEUE_CAPACITY = 16;
     AtomicPodSlot m_pendingLearnPod{};
-    AtomicPodSlot m_learnedPodForUiSync{};
-    std::atomic<bool> m_hasPendingLearnedPod{false};
+    std::array<AtomicPodSlot, LEARN_QUEUE_CAPACITY> m_learnedPodQueue{};
+    std::atomic<uint32_t> m_learnedWriteIdx{0};
+    std::atomic<uint32_t> m_learnedReadIdx{0};
 
     std::atomic<uint32_t> m_lastRawMessage{0};
     std::atomic<uint64_t> m_lastMessageTimestamp{0};

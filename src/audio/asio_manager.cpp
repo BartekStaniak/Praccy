@@ -532,10 +532,7 @@ void AsioManager::processAudio(int32_t doubleBufferIndex) {
 
     thread_local ThreadLocalMmcssGuard mmcssGuard;
 
-#if defined(_M_X64) || defined(__x86_64__)
-    // Denormal Prevention: FTZ (Flush-to-Zero) & DAZ (Denormals-Are-Zero)
-    _mm_setcsr(_mm_getcsr() | 0x8040);
-#endif
+    DspUtils::ScopedDenormalGuard denormalGuard;
 
     const uint32_t maxBuf = static_cast<uint32_t>(m_inputFloatBuffer.maxSamples());
     const int32_t reqSize = m_atomicBufferSize.load(std::memory_order_relaxed);

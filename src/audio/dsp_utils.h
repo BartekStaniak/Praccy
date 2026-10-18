@@ -6,6 +6,10 @@
 #include <algorithm>
 #include <numbers>
 #include <atomic>
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+#include <xmmintrin.h>
+#include <pmmintrin.h>
+#endif
 
 namespace praccy::audio {
 
@@ -83,7 +87,48 @@ public:
     }
 
     /**
-     * @brief Scrub IEEE-754 NaN/Inf values and hard-clamp runaway plugin gain spikes (+18 dBFS)
+     * @brief RAII guard that enables SSE FTZ (Flush-To-Zero) and DAZ (Denormals-Are-Zero)
+     * for the duration of a real-time audio scope and restores the prior MXCSR state on exit.
+     */
+    struct ScopedDenormalGuard {
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+        unsigned int prevMxcsr{0};
+        ScopedDenormalGuard() noexcept : prevMxcsr(_mm_getcsr()) {
+            _mm_setcsr(prevMxcsr | 0x8040u);
+        }
+        ~ScopedDenormalGuard() noexcept {
+            _mm_setcsr(prevMxcsr);
+        }
+        static inline void reassert() noexcept {
+            _mm_setcsr(_mm_getcsr() | 0x8040u);
+        }
+#else
+        ScopedDenormalGuard() noexcept = default;
+        ~ScopedDenormalGuard() noexcept = default;
+        static inline void reassert() noexcept {}
+#endif
+        ScopedDenormalGuard(const ScopedDenormalGuard&) = delete;
+        ScopedDenormalGuard& operator=(const ScopedDenormalGuard&) = delete;
+    };
+
+    /**
+     * @brief Scrubs a single IEEE-754 float: flushes NaN, Inf, and subnormals to 0.0f
+     * and hard-clamps to [-hardClamp, +hardClamp].
+     */
+    [[nodiscard]] static inline float sanitizeSample(float x, float hardClamp = 8.0f) noexcept {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &x, sizeof(uint32_t));
+        const uint32_t expBits = bits & 0x7F800000u;
+        if (expBits == 0x7F800000u || expBits == 0u) {
+            return 0.0f;
+        }
+        if (x > hardClamp) return hardClamp;
+        if (x < -hardClamp) return -hardClamp;
+        return x;
+    }
+
+    /**
+     * @brief Scrub IEEE-754 NaN/Inf/subnormal values and hard-clamp runaway plugin gain spikes (+18 dBFS)
      * before they can poison downstream IIR filters, delay feedback loops, or hardware outputs.
      */
     static inline bool sanitizeChannel(float* data, uint32_t numSamples, float hardClamp = 8.0f) noexcept {
@@ -92,9 +137,12 @@ public:
         for (uint32_t s = 0; s < numSamples; ++s) {
             uint32_t bits = 0;
             std::memcpy(&bits, &data[s], sizeof(uint32_t));
-            if ((bits & 0x7F800000u) == 0x7F800000u) {
+            const uint32_t expBits = bits & 0x7F800000u;
+            if (expBits == 0x7F800000u) {
                 data[s] = 0.0f;
                 faulted = true;
+            } else if (expBits == 0u) {
+                data[s] = 0.0f;
             } else if (data[s] > hardClamp) {
                 data[s] = hardClamp;
             } else if (data[s] < -hardClamp) {
@@ -113,57 +161,80 @@ class EqualPowerRamp {
 public:
     EqualPowerRamp() = default;
 
+    EqualPowerRamp(const EqualPowerRamp& other) noexcept {
+        m_totalSamples.store(other.m_totalSamples.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        m_currentSample.store(other.m_currentSample.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        m_active.store(other.m_active.load(std::memory_order_acquire), std::memory_order_relaxed);
+        m_targetState.store(other.m_targetState.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    }
+
+    EqualPowerRamp& operator=(const EqualPowerRamp& other) noexcept {
+        if (this != &other) {
+            m_totalSamples.store(other.m_totalSamples.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            m_currentSample.store(other.m_currentSample.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            m_targetState.store(other.m_targetState.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            m_active.store(other.m_active.load(std::memory_order_acquire), std::memory_order_release);
+        }
+        return *this;
+    }
+
     void reset(uint32_t rampSamples) noexcept {
-        m_totalSamples = std::max(1u, rampSamples);
-        m_currentSample = 0;
-        m_active = false;
-        m_targetState = false;
+        m_totalSamples.store(std::max(1u, rampSamples), std::memory_order_relaxed);
+        m_currentSample.store(0, std::memory_order_relaxed);
+        m_targetState.store(false, std::memory_order_relaxed);
+        // Release ensures reset state is visible to audio thread before active flag clears
+        m_active.store(false, std::memory_order_release);
     }
 
     void startTransition(bool activating) noexcept {
-        m_targetState = activating;
-        m_currentSample = 0;
-        m_active = true;
+        m_targetState.store(activating, std::memory_order_relaxed);
+        m_currentSample.store(0, std::memory_order_relaxed);
+        // Release publishes targetState and currentSample=0 before audio thread observes m_active=true
+        m_active.store(true, std::memory_order_release);
     }
 
-    [[nodiscard]] bool isTransitioning() const noexcept { return m_active; }
-    [[nodiscard]] bool targetState() const noexcept { return m_targetState; }
+    // Acquire pairs with startTransition/reset release stores
+    [[nodiscard]] bool isTransitioning() const noexcept { return m_active.load(std::memory_order_acquire); }
+    [[nodiscard]] bool targetState() const noexcept { return m_targetState.load(std::memory_order_acquire); }
 
     /**
-     * @brief Advances one sample and returns (gainOld, gainNew).
+     * @brief Advances one sample on the real-time audio thread and returns (gainOld, gainNew).
      */
     inline void getNextGains(float& gainOld, float& gainNew) noexcept {
-        if (!m_active) {
-            gainOld = m_targetState ? 0.0f : 1.0f;
-            gainNew = m_targetState ? 1.0f : 0.0f;
+        // Acquire synchronizes with startTransition release store from UI/MIDI thread
+        if (!m_active.load(std::memory_order_acquire)) {
+            const bool tgt = m_targetState.load(std::memory_order_relaxed);
+            gainOld = tgt ? 0.0f : 1.0f;
+            gainNew = tgt ? 1.0f : 0.0f;
             return;
         }
 
-        const float progress = static_cast<float>(m_currentSample) / static_cast<float>(m_totalSamples);
+        const uint32_t total = std::max(1u, m_totalSamples.load(std::memory_order_relaxed));
+        const uint32_t cur = m_currentSample.fetch_add(1, std::memory_order_relaxed);
+        const bool tgt = m_targetState.load(std::memory_order_relaxed);
+
+        const float progress = std::min(1.0f, static_cast<float>(cur) / static_cast<float>(total));
         const float s = DspUtils::fastSinQuarterPi(progress);
         const float c = DspUtils::fastSinQuarterPi(1.0f - progress);
 
-        if (m_targetState) {
-            // Fading in new, fading out old
+        if (tgt) {
             gainOld = c;
             gainNew = s;
         } else {
-            // Fading out new, fading in old (bypassing)
             gainOld = s;
             gainNew = c;
         }
 
-        m_currentSample++;
-        if (m_currentSample >= m_totalSamples) {
-            m_active = false;
+        if (cur + 1 >= total) {
+            m_active.store(false, std::memory_order_release);
         }
     }
 
 private:
-    uint32_t m_totalSamples{480}; // Default 10ms @ 48kHz
-    uint32_t m_currentSample{0};
-    bool m_active{false};
-    bool m_targetState{false};
+    std::atomic<uint32_t> m_totalSamples{480}; // Default 10ms @ 48kHz
+    std::atomic<uint32_t> m_currentSample{0};
+    std::atomic<bool> m_active{false};
+    std::atomic<bool> m_targetState{false};
 };
 
 /**

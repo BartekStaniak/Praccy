@@ -72,7 +72,7 @@ void OverdriveEffect::process(audio::AudioProcessContext& ctx) {
             state += alpha * (clipped - state);
             out[s] = state * level;
         }
-        m_filterState[ch % 2] = state;
+        m_filterState[ch % 2] = audio::DspUtils::sanitizeSample(state, 16.0f);
     }
 }
 
@@ -178,6 +178,8 @@ void TubeAmpEffect::process(audio::AudioProcessContext& ctx) {
             cab += cabAlpha * (toned - cab);
             out[s] = cab * master;
         }
+        bassLp = audio::DspUtils::sanitizeSample(bassLp, 16.0f);
+        cab    = audio::DspUtils::sanitizeSample(cab, 16.0f);
     }
 }
 
@@ -288,8 +290,8 @@ void StereoDelayEffect::process(audio::AudioProcessContext& ctx) {
         const float delayedL = m_delayBufferL[readPosL];
         const float delayedR = m_delayBufferR[readPosR];
 
-        m_delayBufferL[m_writePos] = inL[s] + (delayedR * fb); // Cross-feedback ping-pong
-        m_delayBufferR[m_writePos] = inR[s] + (delayedL * fb);
+        m_delayBufferL[m_writePos] = audio::DspUtils::sanitizeSample(inL[s] + (delayedR * fb), 8.0f); // Cross-feedback ping-pong
+        m_delayBufferR[m_writePos] = audio::DspUtils::sanitizeSample(inR[s] + (delayedL * fb), 8.0f);
 
         outL[s] = (inL[s] * (1.0f - mix)) + (delayedL * mix);
         outR[s] = (inR[s] * (1.0f - mix)) + (delayedR * mix);

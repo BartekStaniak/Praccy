@@ -375,17 +375,8 @@ void QuickLooper::process(const audio::AudioBufferView& in, audio::AudioBufferVi
     struct StateLockGuard {
         std::atomic_flag& lock;
         bool acquired{false};
-        explicit StateLockGuard(std::atomic_flag& l) noexcept : lock(l) {
-            for (int spin = 0; spin < 100; ++spin) {
-                if (!lock.test_and_set(std::memory_order_acquire)) {
-                    acquired = true;
-                    break;
-                }
-#if defined(_M_X64) || defined(__x86_64__)
-                _mm_pause();
-#endif
-            }
-        }
+        explicit StateLockGuard(std::atomic_flag& l) noexcept
+            : lock(l), acquired(!lock.test_and_set(std::memory_order_acquire)) {}
         ~StateLockGuard() noexcept {
             if (acquired) {
                 lock.clear(std::memory_order_release);
