@@ -44,7 +44,7 @@ public:
     void stopLearnAndBind(uint8_t channel, uint8_t cc, uint32_t paramId, float minVal = 0.0f, float maxVal = 1.0f);
     void stopLearnAndBind(uint32_t paramId = 1000);
 
-    [[nodiscard]] const FlatCcBinding& getCcBinding(uint8_t channel, uint8_t cc) const noexcept;
+    [[nodiscard]] FlatCcBinding getCcBinding(uint8_t channel, uint8_t cc) const noexcept;
 
     void startLearning(BindingTargetType target, int slot = -1, int branch = -1, int scene = -1, int branchSlot = -1, uint32_t paramId = 0);
     void cancelLearning();
@@ -115,6 +115,8 @@ private:
     static void CALLBACK midiInProc(HMIDIIN hMidiIn, UINT wMsg, DWORD_PTR dwInstance, DWORD_PTR dwParam1, DWORD_PTR dwParam2);
     void rebuildCcTable();
     void drainLearnedPodFromMidiThread();
+    void acquireSeqlockWrite() noexcept;
+    void releaseSeqlockWrite() noexcept;
 
     AtomicCcSlot m_atomicCcTable[NUM_MIDI_CHANNELS][NUM_CC_NUMBERS]{};
     std::array<AtomicPodSlot, MAX_NON_CC_BINDINGS> m_atomicNonCcBindings{};
@@ -130,6 +132,7 @@ private:
 
     std::atomic<bool> m_learning{false};
     std::atomic<uint32_t> m_ccTableSeq{0};
+    mutable std::atomic_flag m_seqlockWriteFlag = ATOMIC_FLAG_INIT;
     mutable std::mutex m_learnMutex;
     MidiBinding m_pendingLearnBinding;
     AtomicPodSlot m_pendingLearnPod{};

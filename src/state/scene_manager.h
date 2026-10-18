@@ -127,7 +127,11 @@ public:
 
     [[nodiscard]] const std::string& lastStatusMessage() const noexcept { return m_statusMessage; }
 
-    static std::unique_ptr<audio::PluginSlot> createSlotFromPreset(const PluginSlotPreset& p, bool allowAsync = false);
+    static std::unique_ptr<audio::PluginSlot> createSlotFromPreset(
+        const PluginSlotPreset& p,
+        bool allowAsync = false,
+        double sampleRate = 48000.0,
+        uint32_t maxBlockSize = 256);
 
     // Graph snapshot serialization & crossfaded application
     static ScenePreset captureGraphSnapshot(audio::GraphEngine& graph,

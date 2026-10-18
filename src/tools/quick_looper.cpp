@@ -29,73 +29,102 @@ void QuickLooper::prepare(double sampleRate, uint32_t maxSeconds, uint32_t maxBl
     (void)maxBlockSize;
 
     const size_t maxFrames = static_cast<size_t>(sampleRate * static_cast<double>(maxSeconds));
-    while (m_stateLock.test_and_set(std::memory_order_acquire)) {
-#if defined(_M_X64) || defined(__x86_64__)
-        _mm_pause();
-#endif
-    }
-    struct StateUnlockGuard {
-        std::atomic_flag& flag;
-        ~StateUnlockGuard() { flag.clear(std::memory_order_release); }
-    } unlocker{m_stateLock};
 
-    m_sampleRate.store(sampleRate, std::memory_order_relaxed);
-    m_maxFrames.store(maxFrames, std::memory_order_relaxed);
+    // Allocate 46 MB of stereo loop & undo buffers OUTSIDE m_stateLock so the real-time audio thread
+    // never experiences priority-inversion dropouts waiting on OS heap allocation / page faults.
+    std::vector<float> newLoopL;
+    std::vector<float> newLoopR;
+    std::vector<float> newUndoL;
+    std::vector<float> newUndoR;
+    std::vector<uint64_t> newOverdubMask;
+    std::vector<uint64_t> newPendingMask;
+    bool allocOk = true;
     try {
-        m_loopBufferL.assign(maxFrames, 0.0f);
-        m_loopBufferR.assign(maxFrames, 0.0f);
-        m_undoBufferL.assign(maxFrames, 0.0f);
-        m_undoBufferR.assign(maxFrames, 0.0f);
+        newLoopL.assign(maxFrames, 0.0f);
+        newLoopR.assign(maxFrames, 0.0f);
+        newUndoL.assign(maxFrames, 0.0f);
+        newUndoR.assign(maxFrames, 0.0f);
         const size_t numBlocks = (maxFrames + kUndoBlockSize - 1) / kUndoBlockSize;
         const size_t maskWords = (numBlocks + 63) / 64;
-        m_overdubbedBlockMask.assign(maskWords, 0ULL);
-        m_pendingCommitBlockMask.assign(maskWords, 0ULL);
-        m_undoLayerActive = false;
+        newOverdubMask.assign(maskWords, 0ULL);
+        newPendingMask.assign(maskWords, 0ULL);
     } catch (const std::bad_alloc&) {
-        m_maxFrames.store(0, std::memory_order_relaxed);
-        m_loopBufferL.clear();
-        m_loopBufferR.clear();
-        m_undoBufferL.clear();
-        m_undoBufferR.clear();
-        m_overdubbedBlockMask.clear();
-        m_pendingCommitBlockMask.clear();
+        allocOk = false;
+    }
+
+    {
+        while (m_stateLock.test_and_set(std::memory_order_acquire)) {
+#if defined(_M_X64) || defined(__x86_64__)
+            _mm_pause();
+#endif
+        }
+        struct StateUnlockGuard {
+            std::atomic_flag& flag;
+            ~StateUnlockGuard() { flag.clear(std::memory_order_release); }
+        } unlocker{m_stateLock};
+
+        m_sampleRate.store(sampleRate, std::memory_order_relaxed);
+        if (allocOk) {
+            m_maxFrames.store(maxFrames, std::memory_order_relaxed);
+            m_loopBufferL.swap(newLoopL);
+            m_loopBufferR.swap(newLoopR);
+            m_undoBufferL.swap(newUndoL);
+            m_undoBufferR.swap(newUndoR);
+            m_overdubbedBlockMask.swap(newOverdubMask);
+            m_pendingCommitBlockMask.swap(newPendingMask);
+        } else {
+            m_maxFrames.store(0, std::memory_order_relaxed);
+            m_loopBufferL.clear();
+            m_loopBufferR.clear();
+            m_undoBufferL.clear();
+            m_undoBufferR.clear();
+            m_overdubbedBlockMask.clear();
+            m_pendingCommitBlockMask.clear();
+        }
         m_undoLayerActive = false;
+
+        m_cmdWriteHead.store(0, std::memory_order_relaxed);
+        m_cmdReadHead.store(0, std::memory_order_relaxed);
+        for (auto& slot : m_cmdQueue) {
+            slot.store(LooperCommand::None, std::memory_order_relaxed);
+        }
+        m_pendingCommand.store(LooperCommand::None, std::memory_order_relaxed);
+        m_lastProcessEpoch.store(0, std::memory_order_relaxed);
+        m_lastProcessTimeNs.store(0, std::memory_order_relaxed);
+        m_audioThreadId.store(std::thread::id{}, std::memory_order_relaxed);
+        executeCommand(LooperCommand::Clear);
     }
-    m_cmdWriteHead.store(0, std::memory_order_relaxed);
-    m_cmdReadHead.store(0, std::memory_order_relaxed);
-    for (auto& slot : m_cmdQueue) {
-        slot.store(LooperCommand::None, std::memory_order_relaxed);
-    }
-    m_pendingCommand.store(LooperCommand::None, std::memory_order_relaxed);
-    m_lastProcessEpoch.store(0, std::memory_order_relaxed);
-    m_lastProcessTimeNs.store(0, std::memory_order_relaxed);
-    m_audioThreadId.store(std::thread::id{}, std::memory_order_relaxed);
-    clear();
 }
 
 void QuickLooper::enqueueCommand(LooperCommand cmd) noexcept {
-    size_t idx = m_cmdWriteHead.fetch_add(1, std::memory_order_relaxed);
-    m_cmdQueue[idx % kCmdQueueCapacity].store(cmd, std::memory_order_release);
-}
-
-bool QuickLooper::popCommand(LooperCommand& outCmd) noexcept {
-    size_t read = m_cmdReadHead.load(std::memory_order_relaxed);
-    size_t write = m_cmdWriteHead.load(std::memory_order_acquire);
-    if (read >= write) {
-        return false;
-    }
-    for (int spin = 0; spin < 50; ++spin) {
-        LooperCommand c = m_cmdQueue[read % kCmdQueueCapacity].exchange(LooperCommand::None, std::memory_order_acq_rel);
-        if (c != LooperCommand::None) {
-            outCmd = c;
-            m_cmdReadHead.store(read + 1, std::memory_order_release);
-            return true;
-        }
+    while (m_cmdProducerLock.test_and_set(std::memory_order_acquire)) {
 #if defined(_M_X64) || defined(__x86_64__)
         _mm_pause();
 #endif
     }
+    const size_t w = m_cmdWriteHead.load(std::memory_order_relaxed);
+    const size_t r = m_cmdReadHead.load(std::memory_order_acquire);
+    if (w - r < kCmdQueueCapacity) {
+        // Store payload BEFORE publishing write head so consumer never observes an empty slot
+        m_cmdQueue[w & (kCmdQueueCapacity - 1)].store(cmd, std::memory_order_release);
+        m_cmdWriteHead.store(w + 1, std::memory_order_release);
+    }
+    m_cmdProducerLock.clear(std::memory_order_release);
+}
+
+bool QuickLooper::popCommand(LooperCommand& outCmd) noexcept {
+    const size_t read = m_cmdReadHead.load(std::memory_order_relaxed);
+    const size_t write = m_cmdWriteHead.load(std::memory_order_acquire);
+    if (read >= write) {
+        return false;
+    }
+    const LooperCommand c = m_cmdQueue[read & (kCmdQueueCapacity - 1)].exchange(
+        LooperCommand::None, std::memory_order_acq_rel);
     m_cmdReadHead.store(read + 1, std::memory_order_release);
+    if (c != LooperCommand::None) {
+        outCmd = c;
+        return true;
+    }
     return false;
 }
 

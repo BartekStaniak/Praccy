@@ -71,6 +71,8 @@ struct ClapEventBuffer {
 class ClapPluginInstance : public IPluginInstance {
 public:
     static std::unique_ptr<ClapPluginInstance> loadFromFile(const std::string& path, uint32_t pluginIndex = 0);
+    static void setMainThreadId(DWORD tid) noexcept;
+    [[nodiscard]] static DWORD mainThreadId() noexcept;
 
     ~ClapPluginInstance() override;
 
@@ -101,7 +103,7 @@ public:
     [[nodiscard]] std::vector<uint8_t> saveState() const override;
     bool loadState(const std::vector<uint8_t>& state) override;
 
-    ClapPluginInstance() = default;
+    ClapPluginInstance();
 
     void onPluginOutputEvent(const clap_event_header_t* event) noexcept;
     void resetFault() noexcept override;
@@ -180,6 +182,7 @@ private:
     std::atomic<bool> m_callbackRequested{false};
     std::atomic<bool> m_restartRequested{false};
     std::unordered_map<clap_id, UINT_PTR> m_activeTimers;
+    std::shared_ptr<std::atomic<ClapPluginInstance*>> m_timerLifetimeToken;
 
     moodycamel::ReaderWriterQueue<std::pair<clap_id, double>> m_paramQueue{128};
     mutable moodycamel::ReaderWriterQueue<std::pair<clap_id, double>> m_guiOutParamQueue{128};

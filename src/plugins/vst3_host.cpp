@@ -34,6 +34,21 @@ struct AsyncGuiOpenReq {
     std::function<void(bool)> callback;
 };
 
+struct SyncHostTaskReq {
+    std::function<void()> fn;
+    HANDLE ackEvent{nullptr};
+    std::atomic<int> refCount{2};
+
+    void release() {
+        if (refCount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            if (ackEvent) {
+                CloseHandle(ackEvent);
+            }
+            delete this;
+        }
+    }
+};
+
 using InitDllProc = bool (PLUGIN_API *)();
 using ExitDllProc = bool (PLUGIN_API *)();
 using GetFactoryProc = Steinberg::IPluginFactory* (PLUGIN_API *)();
@@ -226,7 +241,7 @@ Vst3PluginInstance::Vst3PluginInstance() : m_impl(std::make_unique<Impl>()) {
 }
 
 void Vst3PluginInstance::suspendAndFenceAudio() noexcept {
-    m_suspendProcessing.store(true, std::memory_order_release);
+    m_suspendProcessing.store(true, std::memory_order_seq_cst);
     if (GetCurrentThreadId() != m_audioThreadId.load(std::memory_order_relaxed)) {
         while (m_activeProcessCallbacks.load(std::memory_order_acquire) != 0) {
 #if defined(_M_X64) || defined(__x86_64__)
@@ -238,6 +253,61 @@ void Vst3PluginInstance::suspendAndFenceAudio() noexcept {
 
 void Vst3PluginInstance::resumeAudio() noexcept {
     m_suspendProcessing.store(false, std::memory_order_release);
+}
+
+void Vst3PluginInstance::enqueueParamForAudio(Steinberg::Vst::ParamID paramId, double normVal) noexcept {
+    const DWORD hostTid = m_hostThreadId.load(std::memory_order_acquire);
+    if (hostTid != 0 && GetCurrentThreadId() == hostTid) {
+        m_guiHostParamQueue.try_enqueue({paramId, normVal});
+    } else {
+        std::lock_guard<std::mutex> lock(m_uiParamQueueMutex);
+        m_uiParamQueue.try_enqueue({paramId, normVal});
+    }
+}
+
+void Vst3PluginInstance::drainAllParamQueues() noexcept {
+    std::pair<Steinberg::Vst::ParamID, double> dummy;
+    while (m_uiParamQueue.try_dequeue(dummy)) {}
+    while (m_guiHostParamQueue.try_dequeue(dummy)) {}
+}
+
+void Vst3PluginInstance::invokeOnHostThread(const std::function<void()>& fn, DWORD timeoutMs) const {
+    if (!fn) return;
+    const DWORD tid = m_hostThreadId.load(std::memory_order_acquire);
+    if (tid == 0 || GetCurrentThreadId() == tid) {
+        fn();
+        return;
+    }
+
+    HANDLE ack = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!ack) {
+        fn();
+        return;
+    }
+
+    auto* req = new SyncHostTaskReq{fn, ack, 2};
+    if (!PostThreadMessageW(tid, WM_USER + 105, reinterpret_cast<WPARAM>(req), 0)) {
+        req->release();
+        req->release();
+        fn();
+        return;
+    }
+
+    while (true) {
+        DWORD waitRes = MsgWaitForMultipleObjectsEx(1, &ack, timeoutMs, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        if (waitRes == WAIT_OBJECT_0) {
+            break;
+        } else if (waitRes == WAIT_OBJECT_0 + 1) {
+            MSG m;
+            while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
+                TranslateMessage(&m);
+                DispatchMessageW(&m);
+            }
+        } else {
+            break;
+        }
+    }
+    req->release();
 }
 
 void Vst3PluginInstance::onGuiBeginEdit(Steinberg::Vst::ParamID paramId) noexcept {
@@ -260,8 +330,8 @@ void Vst3PluginInstance::onGuiPerformEdit(Steinberg::Vst::ParamID paramId, Stein
         }
     }
 
-    // Forward GUI parameter edit to audio processor queue
-    m_paramQueue.try_enqueue({paramId, static_cast<double>(normVal)});
+    // Forward GUI parameter edit to dedicated SPSC audio processor queue
+    enqueueParamForAudio(paramId, static_cast<double>(normVal));
     notifyGuiParamEdited(static_cast<uint32_t>(paramId), false);
 }
 
@@ -306,7 +376,7 @@ void Vst3PluginInstance::onGuiRestartComponent(Steinberg::int32 flags) noexcept 
                 const float fVal = static_cast<float>(normVal);
                 m_paramCache[desc.id] = fVal;
                 desc.currentValue = fVal;
-                m_paramQueue.try_enqueue({desc.id, normVal});
+                enqueueParamForAudio(desc.id, normVal);
             }
         }
         setGuiEditingActive(false);
@@ -447,6 +517,7 @@ std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::
         bool ok = inst->initHostInternal(path);
         p->set_value(ok);
         if (!ok) {
+            inst->m_hostThreadId.store(0, std::memory_order_release);
             inst->teardownHostInternal();
             CoUninitialize();
             return;
@@ -465,6 +536,7 @@ std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::
                 inst->closeGuiInternal();
                 if (ack) SetEvent(ack);
             } else if (msg.message == WM_USER + 103) { // QUIT
+                inst->m_hostThreadId.store(0, std::memory_order_release);
                 inst->closeGuiInternal();
                 PostQuitMessage(0);
             } else if (msg.message == WM_USER + 104) { // OPEN_GUI_ASYNC
@@ -473,6 +545,17 @@ std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::
                     bool guiOk = inst->openGuiInternal(req->parentHwnd);
                     inst->m_asyncGuiResults.try_enqueue({ req->parentHwnd, guiOk, std::move(req->callback) });
                     delete req;
+                }
+            } else if (msg.message == WM_USER + 105) { // SYNC_HOST_TASK
+                auto* req = reinterpret_cast<SyncHostTaskReq*>(msg.wParam);
+                if (req) {
+                    if (req->fn) {
+                        req->fn();
+                    }
+                    if (req->ackEvent) {
+                        SetEvent(req->ackEvent);
+                    }
+                    req->release();
                 }
             }
             TranslateMessage(&msg);
@@ -727,14 +810,13 @@ void Vst3PluginInstance::process(audio::AudioProcessContext& ctx) {
         return;
     }
 
-    m_activeProcessCallbacks.fetch_add(1, std::memory_order_acq_rel);
+    m_activeProcessCallbacks.fetch_add(1, std::memory_order_seq_cst);
     struct ActiveCallbackGuard {
         std::atomic<uint32_t>& counter;
         ~ActiveCallbackGuard() noexcept {
             counter.fetch_sub(1, std::memory_order_release);
         }
     } callbackGuard{m_activeProcessCallbacks};
-
     if (m_suspendProcessing.load(std::memory_order_acquire) ||
         m_faulted.load(std::memory_order_relaxed)) {
         ctx.output.copyFrom(ctx.input);
@@ -744,9 +826,13 @@ void Vst3PluginInstance::process(audio::AudioProcessContext& ctx) {
     m_audioThreadId.store(GetCurrentThreadId(), std::memory_order_relaxed);
 
     m_inputParamChanges.clear();
-    // 1. Drain UI thread parameter changes (SPSC)
+    // 1a. Drain UI thread parameter changes (SPSC)
     std::pair<Steinberg::Vst::ParamID, double> paramChange;
-    while (m_paramQueue.try_dequeue(paramChange)) {
+    while (m_uiParamQueue.try_dequeue(paramChange)) {
+        m_inputParamChanges.addParameterChange(paramChange.first, paramChange.second);
+    }
+    // 1b. Drain GUI STA host thread parameter changes (SPSC)
+    while (m_guiHostParamQueue.try_dequeue(paramChange)) {
         m_inputParamChanges.addParameterChange(paramChange.first, paramChange.second);
     }
     // 2. Drain audio-thread parameter automation
@@ -818,8 +904,7 @@ void Vst3PluginInstance::process(audio::AudioProcessContext& ctx) {
 
 void Vst3PluginInstance::reset() {
     suspendAndFenceAudio();
-    std::pair<Steinberg::Vst::ParamID, double> dummy;
-    while (m_paramQueue.try_dequeue(dummy)) {}
+    drainAllParamQueues();
     m_audioThreadParamCount = 0;
     m_inputParamChanges.clear();
     m_impl->processContext.projectTimeSamples = 0;
@@ -832,8 +917,7 @@ void Vst3PluginInstance::reset() {
 
 void Vst3PluginInstance::resetFault() noexcept {
     suspendAndFenceAudio();
-    std::pair<Steinberg::Vst::ParamID, double> dummy;
-    while (m_paramQueue.try_dequeue(dummy)) {}
+    drainAllParamQueues();
     m_audioThreadParamCount = 0;
     m_inputParamChanges.clear();
     m_impl->processContext.projectTimeSamples = 0;
@@ -892,15 +976,18 @@ void Vst3PluginInstance::setParameterValue(uint32_t paramId, float value) {
     }
 
     // Queue parameter change into real-time buffer for audio-thread process()
-    m_paramQueue.try_enqueue({static_cast<Steinberg::Vst::ParamID>(paramId), static_cast<double>(normVal)});
+    enqueueParamForAudio(static_cast<Steinberg::Vst::ParamID>(paramId), static_cast<double>(normVal));
 
-    // Only invoke IEditController on GUI/message thread, NEVER from the high-priority ASIO audio thread!
+    // Only invoke IEditController on GUI/STA host thread, NEVER from the high-priority ASIO audio thread!
     if (m_controller && GetCurrentThreadId() != m_audioThreadId.load(std::memory_order_relaxed)) {
-        m_suppressHandlerCallbacks.store(true, std::memory_order_relaxed);
-        safeCallPlugin([&]() {
-            m_controller->setParamNormalized(paramId, normVal);
+        invokeOnHostThread([this, paramId, normVal]() {
+            if (!m_controller) return;
+            m_suppressHandlerCallbacks.store(true, std::memory_order_relaxed);
+            safeCallPlugin([&]() {
+                m_controller->setParamNormalized(paramId, normVal);
+            });
+            m_suppressHandlerCallbacks.store(false, std::memory_order_relaxed);
         });
-        m_suppressHandlerCallbacks.store(false, std::memory_order_relaxed);
     }
 }
 
@@ -909,7 +996,7 @@ void Vst3PluginInstance::setParameterFromAudioThread(uint32_t paramId, float val
     const float normVal = std::clamp(value, 0.0f, 1.0f);
     const auto vid = static_cast<Steinberg::Vst::ParamID>(paramId);
     const double dval = static_cast<double>(normVal);
-    // Real-time audio thread automation: write directly into audio-thread array (never touch m_paramQueue)
+    // Real-time audio thread automation: write directly into audio-thread array (never touch SPSC queues)
     for (size_t i = 0; i < m_audioThreadParamCount; ++i) {
         if (m_audioThreadParamEvents[i].id == vid) {
             m_audioThreadParamEvents[i].value = dval;
@@ -1044,17 +1131,24 @@ void Vst3PluginInstance::getPreferredSize(int& width, int& height) const {
     }
 
     if (m_plugView) {
-        Steinberg::ViewRect rect{};
-        if (m_plugView->getSize(&rect) == Steinberg::kResultOk) {
-            int w = rect.right - rect.left;
-            int h = rect.bottom - rect.top;
-            if (w > 100 && h > 100) {
-                m_preferredWidth = w;
-                m_preferredHeight = h;
-                width = w;
-                height = h;
-                return;
+        invokeOnHostThread([this, &width, &height]() {
+            if (!m_plugView) return;
+            Steinberg::ViewRect rect{};
+            if (m_plugView->getSize(&rect) == Steinberg::kResultOk) {
+                int w = rect.right - rect.left;
+                int h = rect.bottom - rect.top;
+                if (w > 100 && h > 100) {
+                    m_preferredWidth = w;
+                    m_preferredHeight = h;
+                    width = w;
+                    height = h;
+                }
             }
+        });
+        if (m_preferredWidth > 0 && m_preferredHeight > 0) {
+            width = m_preferredWidth;
+            height = m_preferredHeight;
+            return;
         }
     }
 
@@ -1063,10 +1157,18 @@ void Vst3PluginInstance::getPreferredSize(int& width, int& height) const {
 }
 
 void Vst3PluginInstance::onGuiResize(int width, int height) {
+    if (m_impl && m_impl->plugFrame.inResize.load(std::memory_order_acquire)) {
+        return;
+    }
     if (m_plugView && width > 64 && height > 64 && !m_faulted.load(std::memory_order_relaxed)) {
-        safeCallPluginGui([&]() {
-            Steinberg::ViewRect rect{0, 0, width, height};
-            m_plugView->onSize(&rect);
+        invokeOnHostThread([this, width, height]() {
+            if (!m_plugView || m_faulted.load(std::memory_order_relaxed)) return;
+            safeCallPluginGui([&]() {
+                Steinberg::ViewRect rect{0, 0, width, height};
+                m_plugView->onSize(&rect);
+            });
+            m_preferredWidth = width;
+            m_preferredHeight = height;
         });
     }
 }
@@ -1116,11 +1218,14 @@ void Vst3PluginInstance::closeGui() {
 std::vector<uint8_t> Vst3PluginInstance::saveState() const {
     if (!m_component || m_faulted.load(std::memory_order_relaxed)) return {};
     std::vector<uint8_t> result;
-    safeCallPlugin([&]() {
-        PraccyMemoryStream stream;
-        if (m_component->getState(&stream) == Steinberg::kResultOk) {
-            result = std::vector<uint8_t>(stream.buffer.begin(), stream.buffer.end());
-        }
+    invokeOnHostThread([this, &result]() {
+        if (!m_component || m_faulted.load(std::memory_order_relaxed)) return;
+        safeCallPlugin([&]() {
+            PraccyMemoryStream stream;
+            if (m_component->getState(&stream) == Steinberg::kResultOk) {
+                result = std::vector<uint8_t>(stream.buffer.begin(), stream.buffer.end());
+            }
+        });
     });
     if (!result.empty()) {
         updateStateHash(result);
@@ -1134,35 +1239,36 @@ bool Vst3PluginInstance::loadState(const std::vector<uint8_t>& state) {
     suspendAndFenceAudio();
 
     // Drain any stale pending parameter changes while audio thread is fenced
-    std::pair<Steinberg::Vst::ParamID, double> dummy;
-    while (m_paramQueue.try_dequeue(dummy)) {}
+    drainAllParamQueues();
     m_audioThreadParamCount = 0;
     m_inputParamChanges.clear();
 
     bool success = false;
-    m_suppressHandlerCallbacks.store(true, std::memory_order_relaxed);
-    safeCallPlugin([&]() {
-        PraccyMemoryStream stream(state);
-        if (m_component->setState(&stream) == Steinberg::kResultOk) {
-            if (m_controller) {
-                stream.seek(0, Steinberg::IBStream::kIBSeekSet, nullptr);
-                m_controller->setComponentState(&stream);
+    invokeOnHostThread([this, &state, &success]() {
+        m_suppressHandlerCallbacks.store(true, std::memory_order_relaxed);
+        safeCallPlugin([&]() {
+            PraccyMemoryStream stream(state);
+            if (m_component->setState(&stream) == Steinberg::kResultOk) {
+                if (m_controller) {
+                    stream.seek(0, Steinberg::IBStream::kIBSeekSet, nullptr);
+                    m_controller->setComponentState(&stream);
+                }
+                success = true;
             }
-            success = true;
+        });
+        m_suppressHandlerCallbacks.store(false, std::memory_order_relaxed);
+
+        if (success && m_controller) {
+            std::lock_guard<std::mutex> lock(m_paramCacheMutex);
+            for (auto& desc : m_paramDescs) {
+                const double normVal = m_controller->getParamNormalized(desc.id);
+                const float fVal = static_cast<float>(normVal);
+                m_paramCache[desc.id] = fVal;
+                desc.currentValue = fVal;
+                enqueueParamForAudio(desc.id, normVal);
+            }
         }
     });
-    m_suppressHandlerCallbacks.store(false, std::memory_order_relaxed);
-
-    if (success && m_controller) {
-        std::lock_guard<std::mutex> lock(m_paramCacheMutex);
-        for (auto& desc : m_paramDescs) {
-            const double normVal = m_controller->getParamNormalized(desc.id);
-            const float fVal = static_cast<float>(normVal);
-            m_paramCache[desc.id] = fVal;
-            desc.currentValue = fVal;
-            m_paramQueue.try_enqueue({desc.id, normVal});
-        }
-    }
     resumeAudio();
 
     if (success) {

@@ -23,6 +23,13 @@ void PluginSlot::replaceInnerNode(std::unique_ptr<AudioNode> newInner, std::uniq
     AudioNode* nextNode = newInner.get();
     auto* nextPlugin = dynamic_cast<plugins::IPluginInstance*>(nextNode);
 
+    // Fence in-flight PluginSlot::process() execution so (m_rtPluginPtr, m_rtInnerNode) never tear
+    // and outOld is guaranteed quiescent before returning to caller.
+    m_slotSuspendDepth.fetch_add(1, std::memory_order_seq_cst);
+    while (m_slotActiveCallbacks.load(std::memory_order_acquire) != 0) {
+        std::this_thread::yield();
+    }
+
     m_rtPluginPtr.store(nextPlugin, std::memory_order_release);
     m_rtInnerNode.store(nextNode, std::memory_order_release);
 
@@ -31,17 +38,24 @@ void PluginSlot::replaceInnerNode(std::unique_ptr<AudioNode> newInner, std::uniq
 
     outOld = std::move(m_innerNode);
     m_innerNode = std::move(newInner);
+
+    m_slotSuspendDepth.fetch_sub(1, std::memory_order_release);
 }
 
 void PluginSlot::refreshCachedParameterRanges() noexcept {
+    // Zero m_numParamRanges first with seq_cst barrier so concurrent MIDI readers in
+    // setParameterNormalized() never read partially overwritten m_paramRanges entries.
+    m_numParamRanges.store(0, std::memory_order_seq_cst);
+
     if (!m_pluginPtr) {
-        m_numParamRanges.store(0, std::memory_order_release);
         return;
     }
     const size_t total = std::min(m_pluginPtr->numParameters(), MAX_CACHED_PARAM_RANGES);
     for (size_t i = 0; i < total; ++i) {
         auto desc = m_pluginPtr->getParameterDesc(i);
-        m_paramRanges[i] = CachedParamRange{desc.id, desc.minValue, desc.maxValue};
+        m_paramRanges[i].id.store(desc.id, std::memory_order_relaxed);
+        m_paramRanges[i].minVal.store(desc.minValue, std::memory_order_relaxed);
+        m_paramRanges[i].maxVal.store(desc.maxValue, std::memory_order_release);
     }
     m_numParamRanges.store(total, std::memory_order_release);
 }
@@ -52,9 +66,9 @@ void PluginSlot::setParameterNormalized(uint32_t paramId, float normalizedValue)
 
     const size_t count = m_numParamRanges.load(std::memory_order_acquire);
     for (size_t i = 0; i < count; ++i) {
-        if (m_paramRanges[i].id == paramId) {
-            const float minV = m_paramRanges[i].minVal;
-            const float maxV = m_paramRanges[i].maxVal;
+        if (m_paramRanges[i].id.load(std::memory_order_relaxed) == paramId) {
+            const float minV = m_paramRanges[i].minVal.load(std::memory_order_relaxed);
+            const float maxV = m_paramRanges[i].maxVal.load(std::memory_order_acquire);
             if (maxV > minV) {
                 scaledVal = minV + clampedNorm * (maxV - minV);
             }
@@ -65,6 +79,12 @@ void PluginSlot::setParameterNormalized(uint32_t paramId, float normalizedValue)
 }
 
 void PluginSlot::prepare(double sampleRate, uint32_t maxBlockSize) {
+    m_slotSuspendDepth.fetch_add(1, std::memory_order_seq_cst);
+    while (m_slotActiveCallbacks.load(std::memory_order_acquire) != 0) {
+        std::this_thread::yield();
+    }
+    m_sampleRate = sampleRate;
+    m_maxBlockSize = maxBlockSize;
     AudioNode* inner = m_rtInnerNode.load(std::memory_order_relaxed);
     if (inner) {
         inner->prepare(sampleRate, maxBlockSize);
@@ -75,20 +95,26 @@ void PluginSlot::prepare(double sampleRate, uint32_t maxBlockSize) {
     m_inputScaledBuffer.resize(2, maxBlockSize);
     // 10ms smooth ramp at current sample rate
     m_bypassRamp.reset(static_cast<uint32_t>(sampleRate * 0.010));
+    m_slotSuspendDepth.fetch_sub(1, std::memory_order_release);
 }
 
 void PluginSlot::reset() {
+    m_slotSuspendDepth.fetch_add(1, std::memory_order_seq_cst);
+    while (m_slotActiveCallbacks.load(std::memory_order_acquire) != 0) {
+        std::this_thread::yield();
+    }
     AudioNode* inner = m_rtInnerNode.load(std::memory_order_relaxed);
     if (inner) {
         inner->reset();
     }
     m_automationRegister.reset();
     m_meter.reset();
+    m_slotSuspendDepth.fetch_sub(1, std::memory_order_release);
 }
 
 const std::string& PluginSlot::name() const noexcept {
     static const std::string emptyName = "Empty Slot";
-    AudioNode* inner = m_rtInnerNode.load(std::memory_order_relaxed);
+    AudioNode* inner = m_rtInnerNode.load(std::memory_order_acquire);
     if (inner) return inner->name();
     return m_innerNode ? m_innerNode->name() : emptyName;
 }
@@ -104,14 +130,32 @@ bool PluginSlot::isBypassed() const noexcept {
 
 void PluginSlot::process(AudioProcessContext& ctx) {
     const uint32_t numSamples = ctx.numSamples;
+    if (numSamples == 0 || m_slotSuspendDepth.load(std::memory_order_acquire) != 0) {
+        ctx.output.copyFrom(ctx.input);
+        return;
+    }
+
+    m_slotActiveCallbacks.fetch_add(1, std::memory_order_seq_cst);
+    struct SlotActiveGuard {
+        std::atomic<uint32_t>& counter;
+        ~SlotActiveGuard() noexcept {
+            counter.fetch_sub(1, std::memory_order_release);
+        }
+    } slotGuard{m_slotActiveCallbacks};
+
+    if (m_slotSuspendDepth.load(std::memory_order_seq_cst) != 0) {
+        ctx.output.copyFrom(ctx.input);
+        return;
+    }
+
     AudioNode* inner = m_rtInnerNode.load(std::memory_order_acquire);
-    if (!inner || numSamples == 0) {
+    if (!inner) {
         ctx.output.copyFrom(ctx.input);
         return;
     }
 
     // 1. Drain pending parameter automation wait-free at block boundary
-    plugins::IPluginInstance* plug = m_rtPluginPtr.load(std::memory_order_relaxed);
+    plugins::IPluginInstance* plug = m_rtPluginPtr.load(std::memory_order_acquire);
     m_automationRegister.drainDirty([&](uint32_t paramId, float value) {
         if (plug) {
             plug->setParameterFromAudioThread(paramId, value);
@@ -209,6 +253,10 @@ ParallelBranch::ParallelBranch(std::string name)
 }
 
 ParallelBranch::~ParallelBranch() {
+    m_branchSuspendDepth.fetch_add(1, std::memory_order_seq_cst);
+    while (m_branchActiveCallbacks.load(std::memory_order_acquire) != 0) {
+        std::this_thread::yield();
+    }
     m_isAudioRunning.store(false, std::memory_order_release);
 
     // 1. Drain any remaining items from command queue
@@ -231,6 +279,7 @@ ParallelBranch::~ParallelBranch() {
         s.reset();
     }
     m_deferredReclaim.clear();
+    m_branchSuspendDepth.fetch_sub(1, std::memory_order_release);
 }
 
 void ParallelBranch::syncRtSlotsLocked() noexcept {
@@ -261,6 +310,10 @@ void ParallelBranch::addSlotToUiShadow(PluginSlot* slot) {
 }
 
 void ParallelBranch::prepare(double sampleRate, uint32_t maxBlockSize) {
+    m_branchSuspendDepth.fetch_add(1, std::memory_order_seq_cst);
+    while (m_branchActiveCallbacks.load(std::memory_order_acquire) != 0) {
+        std::this_thread::yield();
+    }
     m_isAudioRunning.store(false, std::memory_order_release);
     m_sampleRate = sampleRate;
     m_maxBlockSize = maxBlockSize;
@@ -281,28 +334,19 @@ void ParallelBranch::prepare(double sampleRate, uint32_t maxBlockSize) {
     m_branchLatency.store(0, std::memory_order_relaxed);
 
     // Drain any pending commands before preparing
-    SlotCommand cmd;
-    while (m_commandQueue.try_dequeue(cmd)) {
-        if (cmd.type == SlotCommandType::Add && cmd.slot) {
-            m_activeSlots.push_back(std::move(cmd.slot));
-        } else if (cmd.type == SlotCommandType::Insert && cmd.slot) {
-            size_t idx = std::min(cmd.index, m_activeSlots.size());
-            m_activeSlots.insert(m_activeSlots.begin() + idx, std::move(cmd.slot));
-        } else if (cmd.type == SlotCommandType::Reorder) {
-            if (cmd.index < m_activeSlots.size() && cmd.targetIndex < m_activeSlots.size() && cmd.index != cmd.targetIndex) {
-                auto s = std::move(m_activeSlots[cmd.index]);
-                m_activeSlots.erase(m_activeSlots.begin() + cmd.index);
-                m_activeSlots.insert(m_activeSlots.begin() + cmd.targetIndex, std::move(s));
-            }
-        }
-    }
+    drainSlotCommandsIntoActive();
 
     for (auto& slot : m_activeSlots) {
         if (slot) slot->prepare(sampleRate, maxBlockSize);
     }
+    m_branchSuspendDepth.fetch_sub(1, std::memory_order_release);
 }
 
 void ParallelBranch::reset() {
+    m_branchSuspendDepth.fetch_add(1, std::memory_order_seq_cst);
+    while (m_branchActiveCallbacks.load(std::memory_order_acquire) != 0) {
+        std::this_thread::yield();
+    }
     m_isAudioRunning.store(false, std::memory_order_release);
     std::fill(m_delayBufferL.begin(), m_delayBufferL.end(), 0.0f);
     std::fill(m_delayBufferR.begin(), m_delayBufferR.end(), 0.0f);
@@ -318,6 +362,7 @@ void ParallelBranch::reset() {
     for (auto& slot : m_activeSlots) {
         if (slot) slot->reset();
     }
+    m_branchSuspendDepth.fetch_sub(1, std::memory_order_release);
 }
 
 void ParallelBranch::setTargetDelay(uint32_t target) noexcept {
@@ -415,36 +460,20 @@ std::unique_ptr<PluginSlot> ParallelBranch::takeSlot(size_t index) {
     if (m_isAudioRunning.load(std::memory_order_acquire)) {
         return nullptr;
     }
+    m_branchSuspendDepth.fetch_add(1, std::memory_order_seq_cst);
+    while (m_branchActiveCallbacks.load(std::memory_order_acquire) != 0) {
+        std::this_thread::yield();
+    }
+    struct BranchFenceGuard {
+        std::atomic<uint32_t>& depth;
+        ~BranchFenceGuard() noexcept { depth.fetch_sub(1, std::memory_order_release); }
+    } fenceGuard{m_branchSuspendDepth};
+
     collectReclaimedSlots();
     std::lock_guard<std::mutex> lock(m_slotMutex);
 
     // 1. If command queue has unconsumed commands, drain them into active slots
-    SlotCommand cmd;
-    while (m_commandQueue.try_dequeue(cmd)) {
-        if (cmd.type == SlotCommandType::Add && cmd.slot) {
-            m_activeSlots.push_back(std::move(cmd.slot));
-        } else if (cmd.type == SlotCommandType::Insert && cmd.slot) {
-            size_t idx = std::min(cmd.index, m_activeSlots.size());
-            m_activeSlots.insert(m_activeSlots.begin() + idx, std::move(cmd.slot));
-        } else if (cmd.type == SlotCommandType::Reorder) {
-            if (cmd.index < m_activeSlots.size() && cmd.targetIndex < m_activeSlots.size() && cmd.index != cmd.targetIndex) {
-                auto s = std::move(m_activeSlots[cmd.index]);
-                m_activeSlots.erase(m_activeSlots.begin() + cmd.index);
-                m_activeSlots.insert(m_activeSlots.begin() + cmd.targetIndex, std::move(s));
-            }
-        } else if (cmd.type == SlotCommandType::Remove) {
-            auto it = m_activeSlots.end();
-            if (cmd.targetSlot != nullptr) {
-                it = std::find_if(m_activeSlots.begin(), m_activeSlots.end(),
-                    [&](const auto& s) { return s.get() == cmd.targetSlot; });
-            } else if (cmd.index < m_activeSlots.size()) {
-                it = m_activeSlots.begin() + cmd.index;
-            }
-            if (it != m_activeSlots.end()) {
-                m_activeSlots.erase(it);
-            }
-        }
-    }
+    drainSlotCommandsIntoActive();
 
     // 2. Identify target slot from UI shadow
     PluginSlot* targetPtr = nullptr;
@@ -579,9 +608,24 @@ void ParallelBranch::drainSlotCommandsIntoActive() noexcept {
 }
 
 void ParallelBranch::process(AudioProcessContext& ctx) {
-    m_isAudioRunning.store(true, std::memory_order_release);
     const uint32_t numSamples = ctx.numSamples;
-    if (numSamples == 0) return;
+    if (numSamples == 0 || m_branchSuspendDepth.load(std::memory_order_acquire) != 0) {
+        return;
+    }
+
+    m_branchActiveCallbacks.fetch_add(1, std::memory_order_seq_cst);
+    struct BranchActiveGuard {
+        std::atomic<uint32_t>& counter;
+        ~BranchActiveGuard() noexcept {
+            counter.fetch_sub(1, std::memory_order_release);
+        }
+    } branchGuard{m_branchActiveCallbacks};
+
+    if (m_branchSuspendDepth.load(std::memory_order_seq_cst) != 0) {
+        return;
+    }
+
+    m_isAudioRunning.store(true, std::memory_order_release);
 
     // 1. Drain pending commands from UI thread (Wait-Free, 0 locks)
     drainSlotCommandsIntoActive();
@@ -676,6 +720,10 @@ ParallelSplitMergeBlock::ParallelSplitMergeBlock(std::string name)
 }
 
 ParallelSplitMergeBlock::~ParallelSplitMergeBlock() {
+    m_blockSuspendDepth.fetch_add(1, std::memory_order_seq_cst);
+    while (m_blockActiveCallbacks.load(std::memory_order_acquire) != 0) {
+        std::this_thread::yield();
+    }
     m_isAudioRunning.store(false, std::memory_order_release);
     BranchCommand cmd;
     while (m_branchCmdQueue.try_dequeue(cmd)) {
@@ -692,6 +740,7 @@ ParallelSplitMergeBlock::~ParallelSplitMergeBlock() {
         b.reset();
     }
     m_deferredReclaimBranches.clear();
+    m_blockSuspendDepth.fetch_sub(1, std::memory_order_release);
 }
 
 void ParallelSplitMergeBlock::syncRtBranchesLocked() noexcept {
@@ -714,6 +763,10 @@ void ParallelSplitMergeBlock::setAudioRunning(bool running) noexcept {
 }
 
 void ParallelSplitMergeBlock::prepare(double sampleRate, uint32_t maxBlockSize) {
+    m_blockSuspendDepth.fetch_add(1, std::memory_order_seq_cst);
+    while (m_blockActiveCallbacks.load(std::memory_order_acquire) != 0) {
+        std::this_thread::yield();
+    }
     m_isAudioRunning.store(false, std::memory_order_release);
     m_sampleRate = sampleRate;
     m_maxBlockSize = maxBlockSize;
@@ -723,15 +776,21 @@ void ParallelSplitMergeBlock::prepare(double sampleRate, uint32_t maxBlockSize) 
     for (auto& branch : m_activeBranches) {
         if (branch) branch->prepare(sampleRate, maxBlockSize);
     }
+    m_blockSuspendDepth.fetch_sub(1, std::memory_order_release);
 }
 
 void ParallelSplitMergeBlock::reset() {
+    m_blockSuspendDepth.fetch_add(1, std::memory_order_seq_cst);
+    while (m_blockActiveCallbacks.load(std::memory_order_acquire) != 0) {
+        std::this_thread::yield();
+    }
     m_isAudioRunning.store(false, std::memory_order_release);
     drainCommandQueueIntoActive();
     for (auto& branch : m_activeBranches) {
         if (branch) branch->reset();
     }
     m_blockLatency.store(0, std::memory_order_relaxed);
+    m_blockSuspendDepth.fetch_sub(1, std::memory_order_release);
 }
 
 uint32_t ParallelSplitMergeBlock::latencySamples() const noexcept {
@@ -769,7 +828,12 @@ ParallelBranch* ParallelSplitMergeBlock::addBranch(const std::string& branchName
     }
 
     if (!m_isAudioRunning.load(std::memory_order_acquire)) {
+        m_blockSuspendDepth.fetch_add(1, std::memory_order_seq_cst);
+        while (m_blockActiveCallbacks.load(std::memory_order_acquire) != 0) {
+            std::this_thread::yield();
+        }
         drainCommandQueueIntoActive();
+        m_blockSuspendDepth.fetch_sub(1, std::memory_order_release);
     }
     return rawPtr;
 }
@@ -789,7 +853,12 @@ void ParallelSplitMergeBlock::removeBranch(size_t index) {
     m_branchCmdQueue.try_enqueue(std::move(cmd));
 
     if (!m_isAudioRunning.load(std::memory_order_acquire)) {
+        m_blockSuspendDepth.fetch_add(1, std::memory_order_seq_cst);
+        while (m_blockActiveCallbacks.load(std::memory_order_acquire) != 0) {
+            std::this_thread::yield();
+        }
         drainCommandQueueIntoActive();
+        m_blockSuspendDepth.fetch_sub(1, std::memory_order_release);
     }
 }
 
@@ -872,6 +941,25 @@ void ParallelSplitMergeBlock::drainCommandQueueIntoActive() {
 }
 
 void ParallelSplitMergeBlock::process(AudioProcessContext& ctx) {
+    const uint32_t numSamples = ctx.numSamples;
+    if (numSamples == 0 || m_blockSuspendDepth.load(std::memory_order_acquire) != 0) {
+        ctx.output.copyFrom(ctx.input);
+        return;
+    }
+
+    m_blockActiveCallbacks.fetch_add(1, std::memory_order_seq_cst);
+    struct BlockActiveGuard {
+        std::atomic<uint32_t>& counter;
+        ~BlockActiveGuard() noexcept {
+            counter.fetch_sub(1, std::memory_order_release);
+        }
+    } blockGuard{m_blockActiveCallbacks};
+
+    if (m_blockSuspendDepth.load(std::memory_order_seq_cst) != 0) {
+        ctx.output.copyFrom(ctx.input);
+        return;
+    }
+
     m_isAudioRunning.store(true, std::memory_order_release);
     drainCommandQueueIntoActive();
 
@@ -889,8 +977,7 @@ void ParallelSplitMergeBlock::process(AudioProcessContext& ctx) {
         m_deferredReclaimBranches.resize(writeIdx);
     }
 
-    const uint32_t numSamples = ctx.numSamples;
-    if (m_activeBranches.empty() || numSamples == 0) {
+    if (m_activeBranches.empty()) {
         ctx.output.copyFrom(ctx.input);
         return;
     }
@@ -1027,6 +1114,7 @@ GraphEngine::GraphEngine() {
 }
 
 GraphEngine::~GraphEngine() {
+    ScopedAudioFence fence(this);
     m_isAudioRunning.store(false, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(m_uiMutex);
@@ -1271,6 +1359,7 @@ void GraphEngine::drainCommandQueueIntoActive() {
 }
 
 void GraphEngine::prepare(double sampleRate, uint32_t maxBlockSize) {
+    ScopedAudioFence fence(this);
     m_isAudioRunning.store(false, std::memory_order_release);
     m_cancelSceneCrossfade.store(false, std::memory_order_relaxed);
     m_sampleRate = sampleRate;
@@ -1302,6 +1391,7 @@ void GraphEngine::prepare(double sampleRate, uint32_t maxBlockSize) {
 }
 
 void GraphEngine::reset() {
+    ScopedAudioFence fence(this);
     m_isAudioRunning.store(false, std::memory_order_release);
     m_cancelSceneCrossfade.store(false, std::memory_order_relaxed);
     m_hasProcessedAudio = false;
@@ -1385,6 +1475,7 @@ std::unique_ptr<AudioNode> GraphEngine::takeSerialNode(size_t index) {
     if (m_isAudioRunning.load(std::memory_order_acquire)) {
         return nullptr;
     }
+    ScopedAudioFence fence(this);
     processReclamation();
     std::lock_guard<std::mutex> lock(m_uiMutex);
 
@@ -1445,7 +1536,9 @@ void GraphEngine::splitSerialNodeIntoParallel(size_t index) {
     std::lock_guard<std::mutex> lock(m_uiMutex);
     if (index >= m_uiNodes.size()) return;
 
-    if (!m_isAudioRunning.load(std::memory_order_acquire)) {
+    const bool audioStopped = !m_isAudioRunning.load(std::memory_order_acquire);
+    if (audioStopped) {
+        ScopedAudioFence fence(this);
         drainCommandQueueIntoActive();
     }
 
@@ -1471,6 +1564,7 @@ void GraphEngine::splitSerialNodeIntoParallel(size_t index) {
     m_commandQueue.try_enqueue(std::move(cmd));
 
     if (!m_isAudioRunning.load(std::memory_order_acquire)) {
+        ScopedAudioFence fence(this);
         drainCommandQueueIntoActive();
     }
 }
@@ -1481,6 +1575,7 @@ void GraphEngine::dissolveParallelBlock(size_t blockIndex, int branchToKeep) {
     if (blockIndex >= m_uiNodes.size()) return;
 
     if (!m_isAudioRunning.load(std::memory_order_acquire)) {
+        ScopedAudioFence fence(this);
         drainCommandQueueIntoActive();
     }
 
@@ -1502,6 +1597,7 @@ void GraphEngine::dissolveParallelBlock(size_t blockIndex, int branchToKeep) {
     m_commandQueue.try_enqueue(std::move(cmd));
 
     if (!m_isAudioRunning.load(std::memory_order_acquire)) {
+        ScopedAudioFence fence(this);
         drainCommandQueueIntoActive();
     }
 }
@@ -1512,15 +1608,14 @@ void GraphEngine::clearNodes() {
     m_uiNodes.clear();
     syncRtNodesLocked();
     m_cancelSceneCrossfade.store(true, std::memory_order_release);
-    if (!m_isAudioRunning.load(std::memory_order_acquire)) {
-        m_sceneCrossfadeRamp.reset(1);
-        m_isSceneCrossfading.store(false, std::memory_order_release);
-    }
 
     GraphCommand cmd = GraphCommand::makeClear();
     m_commandQueue.try_enqueue(std::move(cmd));
 
     if (!m_isAudioRunning.load(std::memory_order_acquire)) {
+        ScopedAudioFence fence(this);
+        m_sceneCrossfadeRamp.reset(1);
+        m_isSceneCrossfading.store(false, std::memory_order_release);
         drainCommandQueueIntoActive();
     }
 }
@@ -1714,9 +1809,29 @@ void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& ha
 }
 
 void GraphEngine::process(const AudioBufferView& hardwareIn, AudioBufferView& hardwareOut, const AudioProcessContext& transportCtx) {
-    m_isAudioRunning.store(true, std::memory_order_release);
     const uint32_t numSamples = hardwareIn.numSamples();
     if (numSamples == 0) return;
+
+    // Two-way Dekker fence with executeWithAudioFence() / ScopedAudioFence
+    if (m_suspendDepth.load(std::memory_order_acquire) != 0) {
+        hardwareOut.copyFrom(hardwareIn);
+        return;
+    }
+
+    m_activeCallbacks.fetch_add(1, std::memory_order_seq_cst);
+    struct ActiveCallbackGuard {
+        std::atomic<uint32_t>& counter;
+        ~ActiveCallbackGuard() noexcept {
+            counter.fetch_sub(1, std::memory_order_release);
+        }
+    } callbackGuard{m_activeCallbacks};
+
+    if (m_suspendDepth.load(std::memory_order_seq_cst) != 0) {
+        hardwareOut.copyFrom(hardwareIn);
+        return;
+    }
+
+    m_isAudioRunning.store(true, std::memory_order_release);
 
     if (m_cancelSceneCrossfade.exchange(false, std::memory_order_acq_rel)) {
         m_sceneCrossfadeRamp.reset(1);

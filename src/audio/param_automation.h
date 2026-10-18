@@ -19,8 +19,8 @@ namespace praccy::audio {
  * Implements a flat table of 1024 atomic floats indexed by parameter ID, backed by
  * an atomic 64-bit dirty mask array (16 x uint64_t words). UI and MIDI threads write
  * parameter updates wait-free. Arbitrary 32-bit parameter IDs (>= 1024) are handled
- * wait-free via a 512-slot lock-free bounded-CAS overflow hash table with clean-slot
- * reclamation so high parameter IDs never permanently exhaust table capacity.
+ * wait-free via a 512-slot lock-free bounded-CAS overflow hash table with write-in-progress
+ * fencing and clean-slot reclamation so high parameter IDs never race or exhaust capacity.
  */
 class ParamAutomationRegister {
 public:
@@ -60,6 +60,7 @@ public:
         }
         for (size_t w = 0; w < OVERFLOW_WORDS; ++w) {
             m_overflowDirtyMask[w].store(0ULL, std::memory_order_relaxed);
+            m_overflowInFlightMask[w].store(0ULL, std::memory_order_relaxed);
         }
         for (size_t s = 0; s < OVERFLOW_CAPACITY; ++s) {
             m_overflowTable[s].packed.store(0ULL, std::memory_order_relaxed);
@@ -101,31 +102,45 @@ public:
             for (size_t retry = 0; retry < MAX_CAS_RETRIES; ++retry) {
                 if (cur != 0ULL && unpackParamId(cur) != paramId) {
                     if (reclaimableSlot == OVERFLOW_CAPACITY) {
-                        const uint64_t dirtyWord = m_overflowDirtyMask[wordIdx].load(std::memory_order_relaxed);
-                        if ((dirtyWord & bitMask) == 0ULL) {
-                            reclaimableSlot = slot;
-                            reclaimableExpected = cur;
+                        const uint64_t busyWord =
+                            m_overflowDirtyMask[wordIdx].load(std::memory_order_acquire) |
+                            m_overflowInFlightMask[wordIdx].load(std::memory_order_acquire);
+                        if ((busyWord & bitMask) == 0ULL) {
+                            const uint64_t verifyCur = m_overflowTable[slot].packed.load(std::memory_order_acquire);
+                            if (verifyCur == cur) {
+                                reclaimableSlot = slot;
+                                reclaimableExpected = cur;
+                            }
                         }
                     }
                     break;
                 }
+
+                m_overflowInFlightMask[wordIdx].fetch_or(bitMask, std::memory_order_acq_rel);
                 if (m_overflowTable[slot].packed.compare_exchange_weak(
                         cur, newPacked, std::memory_order_acq_rel, std::memory_order_acquire)) {
                     m_overflowDirtyMask[wordIdx].fetch_or(bitMask, std::memory_order_release);
+                    m_overflowInFlightMask[wordIdx].fetch_and(~bitMask, std::memory_order_release);
                     return;
                 }
+                m_overflowInFlightMask[wordIdx].fetch_and(~bitMask, std::memory_order_release);
             }
         }
 
-        // If all 512 slots were occupied by distinct historical IDs, reclaim the first already-drained clean slot
+        // If all 512 slots were occupied by distinct historical IDs (and paramId was not present),
+        // atomically claim the first drained, non-in-flight slot.
         if (reclaimableSlot < OVERFLOW_CAPACITY) {
             const size_t wordIdx = reclaimableSlot / 64;
             const uint64_t bitMask = 1ULL << (reclaimableSlot % 64);
-            if ((m_overflowDirtyMask[wordIdx].load(std::memory_order_acquire) & bitMask) == 0ULL) {
-                if (m_overflowTable[reclaimableSlot].packed.compare_exchange_strong(
-                        reclaimableExpected, newPacked, std::memory_order_acq_rel, std::memory_order_acquire)) {
-                    m_overflowDirtyMask[wordIdx].fetch_or(bitMask, std::memory_order_release);
+            const uint64_t prevInFlight = m_overflowInFlightMask[wordIdx].fetch_or(bitMask, std::memory_order_acq_rel);
+            if ((prevInFlight & bitMask) == 0ULL) {
+                if ((m_overflowDirtyMask[wordIdx].load(std::memory_order_acquire) & bitMask) == 0ULL) {
+                    if (m_overflowTable[reclaimableSlot].packed.compare_exchange_strong(
+                            reclaimableExpected, newPacked, std::memory_order_acq_rel, std::memory_order_acquire)) {
+                        m_overflowDirtyMask[wordIdx].fetch_or(bitMask, std::memory_order_release);
+                    }
                 }
+                m_overflowInFlightMask[wordIdx].fetch_and(~bitMask, std::memory_order_release);
             }
         }
     }
@@ -142,7 +157,7 @@ public:
         const size_t startSlot = hashParamId(paramId);
         for (size_t probe = 0; probe < OVERFLOW_CAPACITY; ++probe) {
             const size_t slot = (startSlot + probe) & OVERFLOW_MASK;
-            const uint64_t entry = m_overflowTable[slot].packed.load(std::memory_order_relaxed);
+            const uint64_t entry = m_overflowTable[slot].packed.load(std::memory_order_acquire);
             if (entry == 0ULL) {
                 break;
             }
@@ -273,6 +288,7 @@ private:
     alignas(64) std::array<std::atomic<uint64_t>, BITMASK_WORDS> m_dirtyMask{};
     alignas(64) std::array<std::atomic<float>, MAX_PARAMS> m_values{};
     alignas(64) std::array<std::atomic<uint64_t>, OVERFLOW_WORDS> m_overflowDirtyMask{};
+    alignas(64) std::array<std::atomic<uint64_t>, OVERFLOW_WORDS> m_overflowInFlightMask{};
     alignas(64) std::array<OverflowEntry, OVERFLOW_CAPACITY> m_overflowTable{};
 };
 

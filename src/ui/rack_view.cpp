@@ -622,7 +622,10 @@ void RackView::render() {
                 m_config.load();
                 double sr = m_asio.currentSampleRate();
                 if (sr <= 0.0) sr = 48000.0;
-                m_riffBuffer.prepare(sr, static_cast<int>(m_config.retroactiveBufferMinutes));
+                if (m_config.retroactiveBufferMinutes != m_cachedConfig.retroactiveBufferMinutes) {
+                    m_riffBuffer.prepare(sr, static_cast<int>(m_config.retroactiveBufferMinutes));
+                }
+                m_cachedConfig = m_config;
             }
         }
         m_practiceToolsModal->render();
@@ -1941,8 +1944,8 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                         badgeTextCol, ui::px(18.0f));
         ImGui::SameLine(0, ui::px(6.0f));
 
-        // Flex title with scrolling marquee if overflowing
-        std::string rawName = slot->name();
+        // Flex title with scrolling marquee if overflowing (zero per-frame string allocations)
+        const std::string& rawName = slot->name();
         const float rightEdge = cardWidth - ui::px(8.0f) - ui::px(38.0f) - (branchIndex == -1 ? ui::px(46.0f) : ui::px(24.0f));
         const float availTitleW = std::max(ui::px(60.0f), rightEdge - ImGui::GetCursorPosX() - ui::px(6.0f));
         const float rawTextW = ImGui::CalcTextSize(rawName.c_str()).x;
@@ -1983,14 +1986,18 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             }
             dl->AddText(ImVec2(titlePos.x - scrollOffset, textY), ImGui::GetColorU32(titleColor), rawName.c_str());
         } else if (overflow > 0.0f) {
-            // Static left-aligned title with clean right-side ellipsis so the start of the plugin name is never clipped
-            std::string truncated = rawName;
-            const float ellipsisW = ImGui::CalcTextSize("..").x;
-            while (truncated.size() > 3 && ImGui::CalcTextSize(truncated.c_str()).x + ellipsisW > availTitleW) {
-                truncated.pop_back();
-            }
-            truncated += "..";
-            dl->AddText(ImVec2(titlePos.x, textY), ImGui::GetColorU32(titleColor), truncated.c_str());
+            // Single-pass ImGui ellipsis rendering with zero heap allocations
+            ImGui::PushStyleColor(ImGuiCol_Text, titleColor);
+            ImGui::RenderTextEllipsis(
+                dl,
+                ImVec2(titlePos.x, textY),
+                ImVec2(titlePos.x + availTitleW, textY + fontH),
+                titlePos.x + availTitleW,
+                rawName.c_str(),
+                rawName.c_str() + rawName.size(),
+                nullptr
+            );
+            ImGui::PopStyleColor();
         } else {
             dl->AddText(ImVec2(titlePos.x, textY), ImGui::GetColorU32(titleColor), rawName.c_str());
         }

@@ -15,9 +15,35 @@
 #include <pmmintrin.h>
 #endif
 
+#ifndef STATUS_GUARD_PAGE_VIOLATION
+#define STATUS_GUARD_PAGE_VIOLATION ((DWORD)0x80000001L)
+#endif
+#ifndef EXCEPTION_BREAKPOINT
+#define EXCEPTION_BREAKPOINT ((DWORD)0x80000003L)
+#endif
+#ifndef EXCEPTION_SINGLE_STEP
+#define EXCEPTION_SINGLE_STEP ((DWORD)0x80000004L)
+#endif
+
 namespace praccy::plugins {
 
+inline bool isBenignFirstChanceException(DWORD code) noexcept {
+    switch (code) {
+        case 0xE06D7363u:                 // MSVC C++ exception
+        case 0x406D1388u:                 // MS_VC_EXCEPTION (SetThreadName)
+        case STATUS_GUARD_PAGE_VIOLATION: // DRM / stack growth guard page probe
+        case EXCEPTION_BREAKPOINT:        // Debugger / PACE / iLok anti-debug probe
+        case EXCEPTION_SINGLE_STEP:       // Debugger / DRM single-step trap
+            return true;
+        default:
+            return false;
+    }
+}
+
 inline bool isCrashException(DWORD code) noexcept {
+    if (isBenignFirstChanceException(code)) {
+        return false;
+    }
     switch (code) {
         case EXCEPTION_ACCESS_VIOLATION:
         case EXCEPTION_DATATYPE_MISALIGNMENT:
@@ -92,8 +118,7 @@ inline int filterSehException(DWORD code, DWORD* outExceptionCode) noexcept {
     if (outExceptionCode) {
         *outExceptionCode = code;
     }
-    // Do not intercept MSVC C++ exceptions (0xE06D7363)
-    if (code == 0xE06D7363) {
+    if (isBenignFirstChanceException(code)) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
     if (isCrashException(code)) {
@@ -142,8 +167,8 @@ inline LONG WINAPI vehExceptionHandler(PEXCEPTION_POINTERS ep) {
     }
     const DWORD code = ep->ExceptionRecord->ExceptionCode;
 
-    // Explicitly pass non-hardware C++ exceptions through
-    if (code == 0xE06D7363) {
+    // Explicitly pass C++ exceptions and benign first-chance DRM/guard-page exceptions through
+    if (isBenignFirstChanceException(code)) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
 

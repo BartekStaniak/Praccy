@@ -18,6 +18,7 @@
 #include <utility>
 #include <thread>
 #include <future>
+#include <functional>
 #include "vst3_param_queue.h"
 #include <readerwriterqueue/readerwriterqueue.h>
 
@@ -74,13 +75,16 @@ public:
 private:
     void suspendAndFenceAudio() noexcept;
     void resumeAudio() noexcept;
+    void enqueueParamForAudio(Steinberg::Vst::ParamID paramId, double normVal) noexcept;
+    void drainAllParamQueues() noexcept;
+    void invokeOnHostThread(const std::function<void()>& fn, DWORD timeoutMs = 5000) const;
 
     HMODULE m_module{nullptr};
     Steinberg::IPluginFactory* m_factory{nullptr};
-    Steinberg::Vst::IComponent* m_component{nullptr};
+    mutable Steinberg::Vst::IComponent* m_component{nullptr};
     Steinberg::Vst::IAudioProcessor* m_processor{nullptr};
-    Steinberg::Vst::IEditController* m_controller{nullptr};
-    Steinberg::IPlugView* m_plugView{nullptr};
+    mutable Steinberg::Vst::IEditController* m_controller{nullptr};
+    mutable Steinberg::IPlugView* m_plugView{nullptr};
 
     std::string m_path;
     std::string m_bundleFileName;
@@ -96,7 +100,12 @@ private:
     mutable int m_preferredHeight{600};
 
     FastParameterChanges m_inputParamChanges;
-    moodycamel::ReaderWriterQueue<std::pair<Steinberg::Vst::ParamID, double>> m_paramQueue{128};
+    // Dedicated SPSC queues per producer thread to preserve moodycamel::ReaderWriterQueue single-producer invariant:
+    // - m_uiParamQueue: written by UI/non-host threads (serialized by m_uiParamQueueMutex)
+    // - m_guiHostParamQueue: written exclusively by m_hostThread (onGuiPerformEdit / onGuiRestartComponent)
+    mutable std::mutex m_uiParamQueueMutex;
+    moodycamel::ReaderWriterQueue<std::pair<Steinberg::Vst::ParamID, double>> m_uiParamQueue{128};
+    moodycamel::ReaderWriterQueue<std::pair<Steinberg::Vst::ParamID, double>> m_guiHostParamQueue{128};
 
     struct AudioThreadParamEvent {
         Steinberg::Vst::ParamID id{0};

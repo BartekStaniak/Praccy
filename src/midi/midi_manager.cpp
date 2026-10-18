@@ -2,6 +2,9 @@
 #include <iostream>
 #include <sstream>
 #include <cstring>
+#if defined(_M_X64) || defined(__x86_64__)
+#include <immintrin.h>
+#endif
 
 namespace praccy::midi {
 
@@ -15,6 +18,20 @@ MidiManager::MidiManager() {
 
 MidiManager::~MidiManager() {
     closeDevice();
+}
+
+void MidiManager::acquireSeqlockWrite() noexcept {
+    while (m_seqlockWriteFlag.test_and_set(std::memory_order_acquire)) {
+#if defined(_M_X64) || defined(__x86_64__)
+        _mm_pause();
+#endif
+    }
+    m_ccTableSeq.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void MidiManager::releaseSeqlockWrite() noexcept {
+    m_ccTableSeq.fetch_add(1, std::memory_order_release);
+    m_seqlockWriteFlag.clear(std::memory_order_release);
 }
 
 std::vector<MidiDeviceInfo> MidiManager::enumerateInputDevices() {
@@ -73,7 +90,7 @@ void MidiManager::addBinding(const MidiBinding& binding) {
         const uint8_t ch = (binding.midiChannel <= 16) ? binding.midiChannel : 0;
         const uint8_t cc = binding.triggerNumber;
         if (cc < NUM_CC_NUMBERS) {
-            m_ccTableSeq.fetch_add(1, std::memory_order_acq_rel);
+            acquireSeqlockWrite();
             auto& slot = m_ccTable[ch][cc];
             slot.active = true;
             slot.paramId = (binding.paramId != 0)
@@ -86,10 +103,10 @@ void MidiManager::addBinding(const MidiBinding& binding) {
                 slot.bindings[slot.count++].fromMidiBinding(binding);
             }
             m_atomicCcTable[ch][cc].store(slot);
-            m_ccTableSeq.fetch_add(1, std::memory_order_release);
+            releaseSeqlockWrite();
         }
     } else {
-        m_ccTableSeq.fetch_add(1, std::memory_order_acq_rel);
+        acquireSeqlockWrite();
         uint32_t idx = m_atomicNonCcCount.load(std::memory_order_relaxed);
         if (idx < MAX_NON_CC_BINDINGS) {
             PodCcBinding pod{};
@@ -97,7 +114,7 @@ void MidiManager::addBinding(const MidiBinding& binding) {
             m_atomicNonCcBindings[idx].store(pod);
             m_atomicNonCcCount.store(idx + 1, std::memory_order_release);
         }
-        m_ccTableSeq.fetch_add(1, std::memory_order_release);
+        releaseSeqlockWrite();
     }
 }
 
@@ -106,12 +123,6 @@ void MidiManager::addCcBinding(uint8_t channel, uint8_t cc, uint32_t paramId, fl
     std::lock_guard<std::mutex> lock(m_bindingsMutex);
     drainLearnedPodFromMidiThread();
 
-    m_ccTableSeq.fetch_add(1, std::memory_order_acq_rel);
-    auto& slot = m_ccTable[channel][cc];
-    slot.active = true;
-    slot.paramId = paramId;
-    slot.minVal = minVal;
-    slot.maxVal = maxVal;
     MidiBinding tempB;
     tempB.id = "cc_" + std::to_string(channel) + "_" + std::to_string(cc);
     tempB.targetType = BindingTargetType::SlotOutputGain;
@@ -123,17 +134,24 @@ void MidiManager::addCcBinding(uint8_t channel, uint8_t cc, uint32_t paramId, fl
     tempB.midiChannel = channel;
     tempB.triggerType = MidiMessageType::ControlChange;
     tempB.triggerNumber = cc;
+
+    acquireSeqlockWrite();
+    auto& slot = m_ccTable[channel][cc];
+    slot.active = true;
+    slot.paramId = paramId;
+    slot.minVal = minVal;
+    slot.maxVal = maxVal;
     slot.binding.fromMidiBinding(tempB);
     if (slot.count == 0) {
         slot.bindings[0] = slot.binding;
         slot.count = 1;
     }
     m_atomicCcTable[channel][cc].store(slot);
-    m_ccTableSeq.fetch_add(1, std::memory_order_release);
+    releaseSeqlockWrite();
 }
 
 void MidiManager::rebuildCcTable() {
-    m_ccTableSeq.fetch_add(1, std::memory_order_acq_rel); // Odd = write in progress
+    acquireSeqlockWrite(); // Exclusive writer + Odd sequence = write in progress
     for (size_t ch = 0; ch < NUM_MIDI_CHANNELS; ++ch) {
         for (size_t cc = 0; cc < NUM_CC_NUMBERS; ++cc) {
             m_ccTable[ch][cc].clear();
@@ -169,7 +187,7 @@ void MidiManager::rebuildCcTable() {
             m_atomicCcTable[ch][cc].store(m_ccTable[ch][cc]);
         }
     }
-    m_ccTableSeq.fetch_add(1, std::memory_order_release); // Even = write complete
+    releaseSeqlockWrite(); // Even = write complete
 }
 
 void MidiManager::removeBinding(const std::string& id) {
@@ -186,7 +204,7 @@ void MidiManager::clearBindings() {
     std::lock_guard<std::mutex> lock(m_bindingsMutex);
     m_hasPendingLearnedPod.store(false, std::memory_order_relaxed);
     m_bindings.clear();
-    m_ccTableSeq.fetch_add(1, std::memory_order_acq_rel);
+    acquireSeqlockWrite();
     m_atomicNonCcCount.store(0, std::memory_order_relaxed);
     for (size_t ch = 0; ch < NUM_MIDI_CHANNELS; ++ch) {
         for (size_t cc = 0; cc < NUM_CC_NUMBERS; ++cc) {
@@ -194,7 +212,7 @@ void MidiManager::clearBindings() {
             m_atomicCcTable[ch][cc].store(m_ccTable[ch][cc]);
         }
     }
-    m_ccTableSeq.fetch_add(1, std::memory_order_release);
+    releaseSeqlockWrite();
 }
 
 void MidiManager::stopLearnAndBind(uint8_t channel, uint8_t cc, uint32_t paramId, float minVal, float maxVal) {
@@ -242,7 +260,7 @@ void MidiManager::stopLearnAndBind(uint8_t channel, uint8_t cc, uint32_t paramId
 
     m_bindings.push_back(b);
 
-    m_ccTableSeq.fetch_add(1, std::memory_order_acq_rel);
+    acquireSeqlockWrite();
     auto& entry = m_ccTable[channel][cc];
     entry.active = true;
     entry.paramId = paramId;
@@ -255,7 +273,7 @@ void MidiManager::stopLearnAndBind(uint8_t channel, uint8_t cc, uint32_t paramId
         entry.bindings[0].fromMidiBinding(b);
     }
     m_atomicCcTable[channel][cc].store(entry);
-    m_ccTableSeq.fetch_add(1, std::memory_order_release);
+    releaseSeqlockWrite();
 
     m_learning.store(false, std::memory_order_release);
 }
@@ -264,10 +282,23 @@ void MidiManager::stopLearnAndBind(uint32_t paramId) {
     stopLearnAndBind(1, 11, paramId, 0.0f, 1.0f);
 }
 
-const FlatCcBinding& MidiManager::getCcBinding(uint8_t channel, uint8_t cc) const noexcept {
-    static const FlatCcBinding s_empty{};
-    if (channel >= NUM_MIDI_CHANNELS || cc >= NUM_CC_NUMBERS) return s_empty;
-    return m_ccTable[channel][cc];
+FlatCcBinding MidiManager::getCcBinding(uint8_t channel, uint8_t cc) const noexcept {
+    FlatCcBinding out{};
+    if (channel >= NUM_MIDI_CHANNELS || cc >= NUM_CC_NUMBERS) return out;
+
+    for (int retry = 0; retry < 8; ++retry) {
+        const uint32_t seq1 = m_ccTableSeq.load(std::memory_order_acquire);
+        if ((seq1 & 1u) != 0u) {
+            continue;
+        }
+        m_atomicCcTable[channel][cc].load(out);
+        const uint32_t seq2 = m_ccTableSeq.load(std::memory_order_acquire);
+        if (seq1 == seq2) {
+            return out;
+        }
+    }
+    m_atomicCcTable[channel][cc].load(out);
+    return out;
 }
 
 void MidiManager::startLearning(BindingTargetType target, int slot, int branch, int scene, int branchSlot, uint32_t paramId) {
@@ -403,7 +434,7 @@ void MidiManager::handleMidiMessage(uint8_t status, uint8_t d1, uint8_t d2) {
             if (type == MidiMessageType::ControlChange && learnedPod.triggerNumber < NUM_CC_NUMBERS) {
                 const uint8_t ch = (channel <= 16) ? channel : 0;
                 const uint8_t cc = learnedPod.triggerNumber;
-                m_ccTableSeq.fetch_add(1, std::memory_order_acq_rel);
+                acquireSeqlockWrite();
                 auto& slot = m_ccTable[ch][cc];
                 slot.active = true;
                 slot.paramId = (learnedPod.paramId != 0)
@@ -416,15 +447,15 @@ void MidiManager::handleMidiMessage(uint8_t status, uint8_t d1, uint8_t d2) {
                     slot.bindings[slot.count++] = learnedPod;
                 }
                 m_atomicCcTable[ch][cc].store(slot);
-                m_ccTableSeq.fetch_add(1, std::memory_order_release);
+                releaseSeqlockWrite();
             } else {
-                m_ccTableSeq.fetch_add(1, std::memory_order_acq_rel);
+                acquireSeqlockWrite();
                 const uint32_t idx = m_atomicNonCcCount.load(std::memory_order_relaxed);
                 if (idx < MAX_NON_CC_BINDINGS) {
                     m_atomicNonCcBindings[idx].store(learnedPod);
                     m_atomicNonCcCount.store(idx + 1, std::memory_order_release);
                 }
-                m_ccTableSeq.fetch_add(1, std::memory_order_release);
+                releaseSeqlockWrite();
             }
 
             m_learnedPodForUiSync.store(learnedPod);
@@ -498,7 +529,7 @@ std::string MidiManager::lastActivityDescription() const {
     } else if (type == MidiMessageType::NoteOn) {
         ss << "Ch " << static_cast<int>(ch) << " Note " << static_cast<int>(d1) << " Vel " << static_cast<int>(d2);
     } else {
-        ss << "Ch " << static_cast<int>(ch) << " Status 0x" << std::hex << static_cast<int>(status);
+        ss << "MIDI 0x" << std::hex << static_cast<int>(status);
     }
     return ss.str();
 }

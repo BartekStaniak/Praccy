@@ -400,6 +400,13 @@ void PluginBrowserModal::updateFilteredList() {
         });
     }
 
+    for (auto& item : m_filteredItems) {
+        if (item.descriptor) {
+            item.displayName = cleanPluginName(item.descriptor->name);
+            item.categoryName = m_scanner.getPluginCategory(item.descriptor->name, item.descriptor->vendor);
+        }
+    }
+
     if (m_selectedIndex >= static_cast<int>(m_filteredItems.size())) {
         m_selectedIndex = std::max(0, static_cast<int>(m_filteredItems.size()) - 1);
     }
@@ -509,8 +516,8 @@ void PluginBrowserModal::renderPluginRow(int index, float rowH) {
     const auto& item = m_filteredItems[index];
     const auto* desc = item.descriptor;
     if (!desc) return;
-    const std::string pluginName = desc->name;
-    const std::string pluginVendor = desc->vendor;
+    const std::string& pluginName = desc->name;
+    const std::string& pluginVendor = desc->vendor;
     const plugins::PluginType pluginType = desc->type;
 
     const bool isSelected = (index == m_selectedIndex);
@@ -568,10 +575,10 @@ void PluginBrowserModal::renderPluginRow(int index, float rowH) {
     ImVec2 badgeSz = ImGui::CalcTextSize(badgeStr);
     curX += (badgeSz.x + 12.0f) + 10.0f;
 
-    // 3. Clean Plugin Title (suffix clutter stripped)
+    // 3. Clean Plugin Title (cached in PaletteItem during updateFilteredList)
     float textY = rowPos.y + (rowH - fontH) * 0.5f;
     ImGui::SetCursorScreenPos(ImVec2(curX, textY));
-    std::string displayName = cleanPluginName(pluginName);
+    const std::string& displayName = !item.displayName.empty() ? item.displayName : pluginName;
     ImVec4 titleCol = isSelected ? tokens.text.accent.vec4 : tokens.text.primary.vec4;
     ImGui::TextColored(titleCol, "%s", displayName.c_str());
 
@@ -581,8 +588,8 @@ void PluginBrowserModal::renderPluginRow(int index, float rowH) {
         ImGui::TextColored(tokens.text.secondary.vec4, "%s", pluginVendor.c_str());
     }
 
-    // 5. Intelligent Type/Category Capsule on the far right
-    std::string catName = m_scanner.getPluginCategory(pluginName, pluginVendor);
+    // 5. Intelligent Type/Category Capsule on the far right (cached in PaletteItem)
+    const std::string& catName = item.categoryName;
     bool pillHovered = false;
     if (!catName.empty()) {
         ImVec2 catSz = ImGui::CalcTextSize(catName.c_str());

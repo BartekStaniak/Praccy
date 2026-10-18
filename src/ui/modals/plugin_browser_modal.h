@@ -18,6 +18,8 @@ enum class PaletteScope : uint8_t {
 
 struct PaletteItem {
     const plugins::PluginDescriptor* descriptor{nullptr};
+    std::string displayName;
+    std::string categoryName;
     int score{0};
     bool isRecent{false};
     bool isFavorite{false};

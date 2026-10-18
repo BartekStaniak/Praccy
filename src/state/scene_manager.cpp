@@ -273,7 +273,13 @@ void SceneManager::setSceneName(size_t index, const std::string& name) {
     }
 }
 
-std::unique_ptr<audio::PluginSlot> SceneManager::createSlotFromPreset(const PluginSlotPreset& p, bool allowAsync) {
+std::unique_ptr<audio::PluginSlot> SceneManager::createSlotFromPreset(
+    const PluginSlotPreset& p,
+    bool allowAsync,
+    double sampleRate,
+    uint32_t maxBlockSize) {
+    const double effectiveSampleRate = (sampleRate > 0.0) ? sampleRate : 48000.0;
+    const uint32_t effectiveMaxBlockSize = (maxBlockSize > 0) ? maxBlockSize : 256u;
     if (allowAsync && (p.type == "VST3" || p.path.find(".vst3") != std::string::npos ||
                        p.type == "CLAP" || p.path.find(".clap") != std::string::npos)) {
         auto placeholder = std::make_unique<audio::LoadingPluginPlaceholder>(
@@ -315,8 +321,8 @@ std::unique_ptr<audio::PluginSlot> SceneManager::createSlotFromPreset(const Plug
             p.name,
             "",
             p.state,
-            48000.0,
-            256,
+            effectiveSampleRate,
+            effectiveMaxBlockSize,
             false // Option 1.A: do not auto-open GUI for scene load
         );
 
@@ -547,7 +553,7 @@ bool SceneManager::applyGraphSnapshot(const ScenePreset& scene, audio::GraphEngi
 
     for (const auto& np : scene.nodes) {
         if (np.kind == NodePreset::Kind::Plugin) {
-            auto slot = createSlotFromPreset(np.slot, allowAsync);
+            auto slot = createSlotFromPreset(np.slot, allowAsync, graph.sampleRate(), graph.maxBlockSize());
             if (slot) {
                 slot->prepare(graph.sampleRate(), graph.maxBlockSize());
                 newNodes.push_back(std::move(slot));
@@ -566,7 +572,7 @@ bool SceneManager::applyGraphSnapshot(const ScenePreset& scene, audio::GraphEngi
                 branch->setPhaseInvert(bp.phaseInvert);
 
                 for (const auto& sp : bp.slots) {
-                    auto slot = createSlotFromPreset(sp, allowAsync);
+                    auto slot = createSlotFromPreset(sp, allowAsync, graph.sampleRate(), graph.maxBlockSize());
                     if (slot) {
                         slot->prepare(graph.sampleRate(), graph.maxBlockSize());
                         branch->addSlot(std::move(slot));

@@ -8,6 +8,7 @@
 #include <mutex>
 #include <atomic>
 #include <thread>
+#include <optional>
 
 namespace praccy::state {
 struct AppConfig;
@@ -89,6 +90,13 @@ public:
         PluginType preferredType = PluginType::VST3
     ) const;
 
+    [[nodiscard]] std::optional<PluginDescriptor> resolvePluginCopy(
+        const std::string& name,
+        const std::string& bundleFileName = "",
+        const std::string& guidOrClapId = "",
+        PluginType preferredType = PluginType::VST3
+    ) const;
+
     [[nodiscard]] std::vector<std::string> getDevelopers() const;
     [[nodiscard]] std::vector<PluginDescriptor> getFilteredPlugins(
         const std::string& searchQuery,
@@ -106,6 +114,7 @@ private:
 
     std::vector<std::string> m_searchPaths;
     std::vector<PluginDescriptor> m_plugins;
+    mutable std::vector<std::vector<PluginDescriptor>> m_retiredPluginSnapshots;
     std::vector<std::string> m_favorites;
     bool m_favoritesInitialized{false};
     std::unordered_map<std::string, std::string> m_categoryOverrides;

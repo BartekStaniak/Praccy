@@ -23,6 +23,7 @@
 #include "plugins/builtin_dsp.h"
 #include "plugins/plugin_scanner.h"
 #include "plugins/plugin_window.h"
+#include "plugins/clap_host.h"
 #include "state/app_config.h"
 #include "ui/theme.h"
 #include "ui/rack_view.h"
@@ -294,6 +295,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     // 0. Initialize OLE/COM apartment for hosted plugin UI technologies (Direct2D, WIC, shell)
     OleInitialize(nullptr);
+    praccy::plugins::ClapPluginInstance::setMainThreadId(GetCurrentThreadId());
 
     // 1. Enable Per-Monitor v2 DPI awareness before window creation
     ImGui_ImplWin32_EnableDpiAwareness();

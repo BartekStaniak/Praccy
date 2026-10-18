@@ -407,13 +407,12 @@ void InstrumentTuner::detectPitchYin() {
 
 void InstrumentTuner::publishResult(bool hasPitch, float freq, int note, float cents) {
     uint32_t seq = m_resultSeq.load(std::memory_order_relaxed);
-    m_resultSeq.store(seq + 1, std::memory_order_release);
-    std::atomic_thread_fence(std::memory_order_release);
+    m_resultSeq.store(seq + 1, std::memory_order_seq_cst);
 
     m_detectedFreq.store(freq, std::memory_order_relaxed);
     m_detectedMidiNote.store(note, std::memory_order_relaxed);
     m_detectedCents.store(cents, std::memory_order_relaxed);
-    m_hasPitch.store(hasPitch, std::memory_order_relaxed);
+    m_hasPitch.store(hasPitch, std::memory_order_release);
 
     m_resultSeq.store(seq + 2, std::memory_order_release);
 }
@@ -444,13 +443,12 @@ TunerResult InstrumentTuner::currentResult() const {
             continue;
         }
 
-        std::atomic_thread_fence(std::memory_order_acquire);
-        hasPitch = m_hasPitch.load(std::memory_order_relaxed);
+        hasPitch = m_hasPitch.load(std::memory_order_acquire);
         freq = m_detectedFreq.load(std::memory_order_relaxed);
         note = m_detectedMidiNote.load(std::memory_order_relaxed);
         cents = m_detectedCents.load(std::memory_order_relaxed);
 
-        seq2 = m_resultSeq.load(std::memory_order_acquire);
+        seq2 = m_resultSeq.load(std::memory_order_seq_cst);
     } while (seq1 != seq2 && ++retryCount < 10);
 
     if (seq1 != seq2 || (seq1 & 1)) {

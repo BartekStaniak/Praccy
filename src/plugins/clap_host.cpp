@@ -12,6 +12,8 @@ namespace praccy::plugins {
 
 namespace {
 
+std::atomic<DWORD> s_mainThreadId{0};
+
 bool CLAP_ABI clapOutputEventsTryPush(const clap_output_events_t* list, const clap_event_header_t* event) {
     if (!list || !list->ctx || !event) return false;
     auto* self = static_cast<ClapPluginInstance*>(list->ctx);
@@ -20,7 +22,7 @@ bool CLAP_ABI clapOutputEventsTryPush(const clap_output_events_t* list, const cl
 }
 
 struct Win32TimerRecord {
-    ClapPluginInstance* instance{nullptr};
+    std::shared_ptr<std::atomic<ClapPluginInstance*>> lifetimeToken;
     clap_id clapTimerId{0};
     UINT_PTR timerId{0};
 };
@@ -30,25 +32,47 @@ std::unordered_map<UINT_PTR, Win32TimerRecord> s_win32Timers;
 clap_id s_nextClapTimerId = 1;
 
 VOID CALLBACK clapTimerCallback(HWND /*hwnd*/, UINT /*uMsg*/, UINT_PTR idEvent, DWORD /*dwTime*/) {
-    ClapPluginInstance* inst = nullptr;
+    std::shared_ptr<std::atomic<ClapPluginInstance*>> token;
     clap_id cTimerId = 0;
     {
         std::lock_guard<std::mutex> lock(s_timerMutex);
         auto it = s_win32Timers.find(idEvent);
         if (it != s_win32Timers.end()) {
-            inst = it->second.instance;
+            token = it->second.lifetimeToken;
             cTimerId = it->second.clapTimerId;
         }
     }
-    if (inst) {
-        inst->fireTimer(cTimerId);
+    if (token) {
+        if (auto* inst = token->load(std::memory_order_acquire)) {
+            inst->fireTimer(cTimerId);
+        }
     }
 }
 
 } // anonymous namespace
 
+ClapPluginInstance::ClapPluginInstance()
+    : m_mainThreadId(mainThreadId()),
+      m_timerLifetimeToken(std::make_shared<std::atomic<ClapPluginInstance*>>(this)) {}
+
+void ClapPluginInstance::setMainThreadId(DWORD tid) noexcept {
+    s_mainThreadId.store(tid, std::memory_order_release);
+}
+
+DWORD ClapPluginInstance::mainThreadId() noexcept {
+    DWORD tid = s_mainThreadId.load(std::memory_order_acquire);
+    if (tid == 0) {
+        tid = GetCurrentThreadId();
+        DWORD expected = 0;
+        if (!s_mainThreadId.compare_exchange_strong(expected, tid, std::memory_order_acq_rel)) {
+            tid = expected;
+        }
+    }
+    return tid;
+}
+
 void ClapPluginInstance::suspendAndFenceAudio() noexcept {
-    m_suspendProcessing.store(true, std::memory_order_release);
+    m_suspendProcessing.store(true, std::memory_order_seq_cst);
     if (GetCurrentThreadId() != m_audioThreadId.load(std::memory_order_relaxed)) {
         while (m_activeProcessCallbacks.load(std::memory_order_acquire) != 0) {
 #if defined(_M_X64) || defined(__x86_64__)
@@ -211,7 +235,7 @@ bool CLAP_ABI ClapPluginInstance::clapHostRegisterTimer(const clap_host_t* host,
     {
         std::lock_guard<std::mutex> lock(s_timerMutex);
         cId = s_nextClapTimerId++;
-        s_win32Timers[tid] = Win32TimerRecord{self, cId, tid};
+        s_win32Timers[tid] = Win32TimerRecord{self->m_timerLifetimeToken, cId, tid};
         self->m_activeTimers[cId] = tid;
     }
     *timer_id = cId;
@@ -342,8 +366,18 @@ void ClapPluginInstance::flushPendingParamsIfStopped() {
     if (m_isActivated) {
         return;
     }
-    if (m_isProcessing.load(std::memory_order_acquire) ||
-        m_activeProcessCallbacks.load(std::memory_order_acquire) != 0) {
+
+    m_activeProcessCallbacks.fetch_add(1, std::memory_order_seq_cst);
+    struct FlushCallbackGuard {
+        std::atomic<uint32_t>& counter;
+        ~FlushCallbackGuard() noexcept {
+            counter.fetch_sub(1, std::memory_order_release);
+        }
+    } guard{m_activeProcessCallbacks};
+    if (m_isActivated ||
+        m_isProcessing.load(std::memory_order_acquire) ||
+        m_suspendProcessing.load(std::memory_order_acquire) ||
+        m_activeProcessCallbacks.load(std::memory_order_acquire) != 1) {
         return;
     }
     const uint64_t pushGenBefore = m_paramPushGen.load(std::memory_order_acquire);
@@ -365,11 +399,7 @@ void ClapPluginInstance::flushPendingParamsIfStopped() {
 
 void ClapPluginInstance::drainGuiOutParamQueue() const {
     std::pair<clap_id, double> guiEv;
-    bool any = false;
     while (m_guiOutParamQueue.try_dequeue(guiEv)) {
-        if (!any) {
-            any = true;
-        }
         std::lock_guard<std::mutex> lock(m_paramCacheMutex);
         m_paramCache[static_cast<uint32_t>(guiEv.first)] = static_cast<float>(guiEv.second);
     }
@@ -442,7 +472,7 @@ std::unique_ptr<ClapPluginInstance> ClapPluginInstance::loadFromFile(const std::
     instance->m_name = desc->name ? desc->name : "CLAP Plugin";
     instance->m_vendor = desc->vendor ? desc->vendor : "Unknown";
     instance->m_version = desc->version ? desc->version : "1.0.0";
-    instance->m_mainThreadId = GetCurrentThreadId();
+    instance->m_mainThreadId = ClapPluginInstance::mainThreadId();
 
     instance->m_host.clap_version = CLAP_VERSION;
     instance->m_host.host_data = instance.get();
@@ -501,6 +531,9 @@ std::unique_ptr<ClapPluginInstance> ClapPluginInstance::loadFromFile(const std::
 
 ClapPluginInstance::~ClapPluginInstance() {
     suspendAndFenceAudio();
+    if (m_timerLifetimeToken) {
+        m_timerLifetimeToken->store(nullptr, std::memory_order_release);
+    }
     closeGui();
     {
         std::lock_guard<std::mutex> lock(s_timerMutex);
@@ -563,14 +596,13 @@ void ClapPluginInstance::process(audio::AudioProcessContext& ctx) {
         return;
     }
 
-    m_activeProcessCallbacks.fetch_add(1, std::memory_order_acq_rel);
+    m_activeProcessCallbacks.fetch_add(1, std::memory_order_seq_cst);
     struct ActiveCallbackGuard {
         std::atomic<uint32_t>& counter;
         ~ActiveCallbackGuard() noexcept {
             counter.fetch_sub(1, std::memory_order_release);
         }
     } callbackGuard{m_activeProcessCallbacks};
-
     if (m_suspendProcessing.load(std::memory_order_acquire) ||
         m_faulted.load(std::memory_order_relaxed)) {
         ctx.output.copyFrom(ctx.input);

@@ -131,7 +131,14 @@ void PluginScanner::addPlugin(const PluginDescriptor& desc) {
         return d.name == desc.name;
     });
     if (it == m_plugins.end()) {
-        m_plugins.push_back(desc);
+        if (m_plugins.size() == m_plugins.capacity()) {
+            std::vector<PluginDescriptor> updated = m_plugins;
+            updated.push_back(desc);
+            m_retiredPluginSnapshots.push_back(std::move(m_plugins));
+            m_plugins = std::move(updated);
+        } else {
+            m_plugins.push_back(desc);
+        }
     } else {
         *it = desc;
     }
@@ -180,7 +187,14 @@ void PluginScanner::loadFromConfig(const state::AppConfig& cfg) {
             return existing.name == desc.name;
         });
         if (it == m_plugins.end()) {
-            m_plugins.push_back(std::move(desc));
+            if (m_plugins.size() == m_plugins.capacity()) {
+                std::vector<PluginDescriptor> updated = m_plugins;
+                updated.push_back(std::move(desc));
+                m_retiredPluginSnapshots.push_back(std::move(m_plugins));
+                m_plugins = std::move(updated);
+            } else {
+                m_plugins.push_back(std::move(desc));
+            }
         } else {
             it->type = desc.type;
             it->category = desc.category;
@@ -638,6 +652,9 @@ void PluginScanner::runScan() {
                     }
                 }
             }
+            if (!m_plugins.empty()) {
+                m_retiredPluginSnapshots.push_back(std::move(m_plugins));
+            }
             m_plugins = std::move(found);
         }
         saveToAppConfig();
@@ -1092,6 +1109,18 @@ const PluginDescriptor* PluginScanner::resolvePlugin(
 
     // Tier 4 (Fallback): Return nullptr
     return nullptr;
+}
+
+std::optional<PluginDescriptor> PluginScanner::resolvePluginCopy(
+    const std::string& name,
+    const std::string& bundleFileName,
+    const std::string& guidOrClapId,
+    PluginType preferredType
+) const {
+    const PluginDescriptor* ptr = resolvePlugin(name, bundleFileName, guidOrClapId, preferredType);
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!ptr) return std::nullopt;
+    return *ptr;
 }
 
 } // namespace praccy::plugins

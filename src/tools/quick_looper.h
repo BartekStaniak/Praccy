@@ -97,6 +97,7 @@ private:
     std::atomic<int64_t> m_lastProcessTimeNs{0};
     std::atomic<std::thread::id> m_audioThreadId{};
     std::atomic_flag m_stateLock = ATOMIC_FLAG_INIT;
+    std::atomic_flag m_cmdProducerLock = ATOMIC_FLAG_INIT;
 
     static constexpr size_t kCmdQueueCapacity = 64;
     std::array<std::atomic<LooperCommand>, kCmdQueueCapacity> m_cmdQueue{};

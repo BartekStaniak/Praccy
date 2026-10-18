@@ -35,49 +35,74 @@ public:
 
     /**
      * @brief Pre-allocates circular stereo buffer for specified duration.
-     * Must be called from control thread before real-time streaming starts.
+     * Safe even if called while audio callback is active: allocates new storage off-fence,
+     * then fences in-flight audio writes via Dekker handshake before O(1) vector swap.
      *
      * @param sampleRate Audio sample rate (e.g. 48000.0)
      * @param durationMinutes Recording window duration (1, 2, 5, or 10)
      */
     void prepare(double sampleRate, int durationMinutes) {
-        m_isPreparing.store(true, std::memory_order_release);
         if (durationMinutes <= 0) durationMinutes = 2;
         if (sampleRate <= 0.0) sampleRate = 48000.0;
 
+        const size_t targetCapacity = std::max<size_t>(
+            static_cast<size_t>(sampleRate * 60.0 * static_cast<double>(durationMinutes)), 1024);
+
+        // If already prepared with identical capacity and sample rate, preserve existing riff history
+        if (m_capacityFrames == targetCapacity &&
+            std::abs(m_sampleRate - sampleRate) < 1.0 &&
+            m_durationMinutes == durationMinutes &&
+            m_bufferL.size() == targetCapacity &&
+            m_bufferR.size() == targetCapacity &&
+            !m_isPreparing.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        // Allocate outside the audio fence so the audio thread never spins on OS page faults
+        std::vector<float> newBufL(targetCapacity, 0.0f);
+        std::vector<float> newBufR(targetCapacity, 0.0f);
+        std::vector<float> newSpillL(kSpilloverCapacityFrames, 0.0f);
+        std::vector<float> newSpillR(kSpilloverCapacityFrames, 0.0f);
+
+        m_isPreparing.store(true, std::memory_order_seq_cst);
+        while (m_audioWritingMain.load(std::memory_order_acquire) ||
+               m_audioWritingSpillover.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+
         m_sampleRate = sampleRate;
         m_durationMinutes = durationMinutes;
+        m_capacityFrames = targetCapacity;
 
-        const size_t targetCapacity = static_cast<size_t>(sampleRate * 60.0 * static_cast<double>(durationMinutes));
-        m_capacityFrames = std::max<size_t>(targetCapacity, 1024);
-
-        m_bufferL.assign(m_capacityFrames, 0.0f);
-        m_bufferR.assign(m_capacityFrames, 0.0f);
-        m_spilloverL.assign(kSpilloverCapacityFrames, 0.0f);
-        m_spilloverR.assign(kSpilloverCapacityFrames, 0.0f);
-        m_spilloverCount = 0;
+        m_bufferL.swap(newBufL);
+        m_bufferR.swap(newBufR);
+        m_spilloverL.swap(newSpillL);
+        m_spilloverR.swap(newSpillR);
+        m_spilloverCount.store(0, std::memory_order_relaxed);
 
         m_writeHead.store(0, std::memory_order_relaxed);
         m_totalFramesWritten.store(0, std::memory_order_relaxed);
         m_captureActive.store(false, std::memory_order_relaxed);
-        m_audioWritingMain.store(false, std::memory_order_relaxed);
         m_isPreparing.store(false, std::memory_order_release);
     }
 
     /**
-     * @brief Clears buffer contents and resets write head.
+     * @brief Clears buffer contents and resets write head safely.
      */
     void reset() noexcept {
-        m_isPreparing.store(true, std::memory_order_release);
+        m_isPreparing.store(true, std::memory_order_seq_cst);
+        while (m_audioWritingMain.load(std::memory_order_acquire) ||
+               m_audioWritingSpillover.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
         std::fill(m_bufferL.begin(), m_bufferL.end(), 0.0f);
         std::fill(m_bufferR.begin(), m_bufferR.end(), 0.0f);
         std::fill(m_spilloverL.begin(), m_spilloverL.end(), 0.0f);
         std::fill(m_spilloverR.begin(), m_spilloverR.end(), 0.0f);
-        m_spilloverCount = 0;
+        m_spilloverCount.store(0, std::memory_order_relaxed);
         m_writeHead.store(0, std::memory_order_relaxed);
         m_totalFramesWritten.store(0, std::memory_order_relaxed);
         m_captureActive.store(false, std::memory_order_relaxed);
-        m_audioWritingMain.store(false, std::memory_order_relaxed);
         m_isPreparing.store(false, std::memory_order_release);
     }
 
@@ -86,26 +111,30 @@ public:
      * Guaranteed 0 dynamic allocations and 0 mutex locks on the audio callback.
      */
     inline void push(const float* left, const float* right, size_t numSamples) noexcept {
-        if (!left || numSamples == 0 || m_capacityFrames == 0 || m_isPreparing.load(std::memory_order_relaxed)) return;
+        if (!left || numSamples == 0 || m_capacityFrames == 0 || m_isPreparing.load(std::memory_order_acquire)) return;
         const float* srcR = right ? right : left;
 
-        // Wait-free Dekker handshake with captureSlice(): if an export is reading m_bufferL/R,
-        // divert incoming audio samples into pre-allocated m_spilloverL/R without blocking.
+        // Wait-free Dekker handshake with captureSlice() and prepare():
         if (m_captureActive.load(std::memory_order_acquire)) {
             pushToSpillover(left, srcR, numSamples);
             return;
         }
 
         m_audioWritingMain.store(true, std::memory_order_seq_cst);
+        if (m_isPreparing.load(std::memory_order_seq_cst)) {
+            m_audioWritingMain.store(false, std::memory_order_release);
+            return;
+        }
         if (m_captureActive.load(std::memory_order_seq_cst)) {
             m_audioWritingMain.store(false, std::memory_order_release);
             pushToSpillover(left, srcR, numSamples);
             return;
         }
 
-        if (m_spilloverCount > 0) {
-            appendToMainRing(m_spilloverL.data(), m_spilloverR.data(), m_spilloverCount);
-            m_spilloverCount = 0;
+        const size_t spillCount = m_spilloverCount.load(std::memory_order_relaxed);
+        if (spillCount > 0) {
+            appendToMainRing(m_spilloverL.data(), m_spilloverR.data(), spillCount);
+            m_spilloverCount.store(0, std::memory_order_relaxed);
         }
 
         appendToMainRing(left, srcR, numSamples);
@@ -124,7 +153,8 @@ public:
      */
     bool captureSlice(float* stagingBufferL, float* stagingBufferR,
                       size_t maxSamples, size_t& capturedSamples) const noexcept {
-        if (!stagingBufferL || !stagingBufferR || maxSamples == 0 || m_capacityFrames == 0) {
+        if (!stagingBufferL || !stagingBufferR || maxSamples == 0 || m_capacityFrames == 0 ||
+            m_isPreparing.load(std::memory_order_acquire)) {
             capturedSamples = 0;
             return false;
         }
@@ -142,6 +172,11 @@ public:
         // Wait for any in-flight audio callback memcpy to finish (< 5 microseconds)
         while (m_audioWritingMain.load(std::memory_order_acquire)) {
             std::this_thread::yield();
+        }
+
+        if (m_isPreparing.load(std::memory_order_acquire)) {
+            capturedSamples = 0;
+            return false;
         }
 
         const size_t head = m_writeHead.load(std::memory_order_acquire);
@@ -237,14 +272,20 @@ public:
 
 private:
     inline void pushToSpillover(const float* left, const float* right, size_t numSamples) noexcept {
-        if (m_spilloverL.empty() || m_spilloverR.empty()) return;
-        const size_t avail = (m_spilloverCount < m_spilloverL.size()) ? (m_spilloverL.size() - m_spilloverCount) : 0;
+        m_audioWritingSpillover.store(true, std::memory_order_seq_cst);
+        if (m_isPreparing.load(std::memory_order_seq_cst) || m_spilloverL.empty() || m_spilloverR.empty()) {
+            m_audioWritingSpillover.store(false, std::memory_order_release);
+            return;
+        }
+        const size_t curCount = m_spilloverCount.load(std::memory_order_relaxed);
+        const size_t avail = (curCount < m_spilloverL.size()) ? (m_spilloverL.size() - curCount) : 0;
         const size_t toCopy = std::min(numSamples, avail);
         if (toCopy > 0) {
-            std::memcpy(&m_spilloverL[m_spilloverCount], left, toCopy * sizeof(float));
-            std::memcpy(&m_spilloverR[m_spilloverCount], right, toCopy * sizeof(float));
-            m_spilloverCount += toCopy;
+            std::memcpy(&m_spilloverL[curCount], left, toCopy * sizeof(float));
+            std::memcpy(&m_spilloverR[curCount], right, toCopy * sizeof(float));
+            m_spilloverCount.store(curCount + toCopy, std::memory_order_release);
         }
+        m_audioWritingSpillover.store(false, std::memory_order_release);
     }
 
     inline void appendToMainRing(const float* left, const float* right, size_t numSamples) noexcept {
@@ -286,12 +327,13 @@ private:
     std::vector<float> m_bufferR;
     std::vector<float> m_spilloverL;
     std::vector<float> m_spilloverR;
-    size_t m_spilloverCount{0};
+    std::atomic<size_t> m_spilloverCount{0};
 
     alignas(64) std::atomic<size_t> m_writeHead{0};
     alignas(64) std::atomic<size_t> m_totalFramesWritten{0};
     alignas(64) mutable std::atomic<bool> m_captureActive{false};
     alignas(64) std::atomic<bool> m_audioWritingMain{false};
+    alignas(64) std::atomic<bool> m_audioWritingSpillover{false};
     alignas(64) std::atomic<bool> m_isPreparing{false};
 };
 

@@ -12,6 +12,7 @@
 #include <atomic>
 #include <mutex>
 #include <array>
+#include <thread>
 #include "readerwriterqueue/readerwriterqueue.h"
 
 namespace praccy::plugins {
@@ -29,9 +30,9 @@ public:
     static constexpr size_t MAX_CACHED_PARAM_RANGES = 256;
 
     struct CachedParamRange {
-        uint32_t id{0};
-        float minVal{0.0f};
-        float maxVal{1.0f};
+        std::atomic<uint32_t> id{0};
+        std::atomic<float> minVal{0.0f};
+        std::atomic<float> maxVal{1.0f};
     };
 
     explicit PluginSlot(std::unique_ptr<AudioNode> innerNode);
@@ -95,7 +96,7 @@ public:
     }
 
     [[nodiscard]] AudioNode* innerNode() const noexcept {
-        AudioNode* node = m_rtInnerNode.load(std::memory_order_relaxed);
+        AudioNode* node = m_rtInnerNode.load(std::memory_order_acquire);
         return node ? node : m_innerNode.get();
     }
     [[nodiscard]] LevelMeter& meter() noexcept { return m_meter; }
@@ -122,6 +123,10 @@ private:
     std::atomic<AudioNode*> m_rtInnerNode{nullptr};
     std::atomic<plugins::IPluginInstance*> m_rtPluginPtr{nullptr};
     plugins::IPluginInstance* m_pluginPtr{nullptr};
+    std::atomic<uint32_t> m_slotSuspendDepth{0};
+    std::atomic<uint32_t> m_slotActiveCallbacks{0};
+    double m_sampleRate{0.0};
+    uint32_t m_maxBlockSize{0};
     std::atomic<float> m_dryWet{1.0f};      // 1.0 = 100% wet
     std::atomic<float> m_inputGainDb{0.0f};  // 0 dB
     std::atomic<float> m_outputGainDb{0.0f}; // 0 dB
@@ -299,6 +304,8 @@ private:
     // 5. Fail-Safe Audio Thread Stash (Prevents destruction on audio thread if queue is saturated)
     std::vector<std::unique_ptr<PluginSlot>> m_deferredReclaim;
     std::atomic<bool> m_isAudioRunning{false};
+    std::atomic<uint32_t> m_branchSuspendDepth{0};
+    std::atomic<uint32_t> m_branchActiveCallbacks{0};
 
     // 6. Parallel Delay Compensation (PDC) stereo circular delay lines (16,384 samples)
     std::vector<float> m_delayBufferL;
@@ -435,6 +442,8 @@ private:
     OwnedAudioBuffer m_mixBuffer;
     std::atomic<float> m_blend{0.0f};
     std::atomic<bool> m_isAudioRunning{false};
+    std::atomic<uint32_t> m_blockSuspendDepth{0};
+    std::atomic<uint32_t> m_blockActiveCallbacks{0};
     std::atomic<uint32_t> m_blockLatency{0};
     double m_sampleRate{48000.0};
     uint32_t m_maxBlockSize{256};
@@ -585,16 +594,28 @@ public:
     void reset();
     void setAudioRunning(bool running) noexcept;
 
+    /**
+     * @brief Executes a structural or slot mutation safely by fencing the real-time audio thread
+     * via a two-way Dekker atomic handshake (m_suspendDepth + m_activeCallbacks).
+     */
     template <typename Fn>
     void executeWithAudioFence(Fn&& fn) {
+        beginAudioFence();
         const bool wasRunning = m_isAudioRunning.load(std::memory_order_acquire);
         if (wasRunning) {
             setAudioRunning(false);
         }
+        struct FenceRestoreGuard {
+            GraphEngine* self;
+            bool restoreRunning;
+            ~FenceRestoreGuard() noexcept {
+                if (restoreRunning) {
+                    self->setAudioRunning(true);
+                }
+                self->endAudioFence();
+            }
+        } restoreGuard{this, wasRunning};
         std::forward<Fn>(fn)();
-        if (wasRunning) {
-            setAudioRunning(true);
-        }
     }
 
     // UI-thread mutations (Push to SPSC command queue, update UI shadow list)
@@ -661,6 +682,26 @@ public:
     void stashForReclamation(std::unique_ptr<AudioNode> node) noexcept;
 
 private:
+    void beginAudioFence() noexcept {
+        m_suspendDepth.fetch_add(1, std::memory_order_seq_cst);
+        while (m_activeCallbacks.load(std::memory_order_acquire) != 0) {
+            std::this_thread::yield();
+        }
+    }
+    void endAudioFence() noexcept {
+        m_suspendDepth.fetch_sub(1, std::memory_order_release);
+    }
+
+    struct ScopedAudioFence {
+        GraphEngine* engine;
+        explicit ScopedAudioFence(GraphEngine* e) noexcept : engine(e) {
+            engine->beginAudioFence();
+        }
+        ~ScopedAudioFence() noexcept {
+            engine->endAudioFence();
+        }
+    };
+
     void stashChainForReclamation(std::unique_ptr<NodeChain> chain) noexcept;
     void flushStashedReclamations() noexcept;
     void drainCommandQueueIntoActive();
@@ -686,7 +727,7 @@ private:
     std::array<std::atomic<AudioNode*>, MAX_GRAPH_NODES> m_rtNodes{};
     std::atomic<size_t> m_rtNumNodes{0};
 
-    // 2. Audio-Thread Active Nodes (Only accessed from Audio thread in process() or prepare())
+    // 2. Audio-Thread Active Nodes (Only accessed from Audio thread in process() or under ScopedAudioFence)
     std::vector<std::unique_ptr<AudioNode>> m_activeNodes;
 
     // 3. SPSC Command Queue: UI Thread -> Audio Thread
@@ -704,6 +745,8 @@ private:
     // UI thread mutex (Guards UI shadow modifications, NEVER locked on audio or MIDI threads!)
     mutable std::mutex m_uiMutex;
     std::atomic<bool> m_isAudioRunning{false};
+    std::atomic<uint32_t> m_suspendDepth{0};
+    std::atomic<uint32_t> m_activeCallbacks{0};
     std::atomic<bool> m_cancelSceneCrossfade{false};
 
     OwnedAudioBuffer m_mainProcessingBuffer;
