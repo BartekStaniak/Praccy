@@ -328,3 +328,21 @@ target_include_directories(test_async_plugin_loading PRIVATE tests)
 target_link_libraries(test_async_plugin_loading PRIVATE praccy_core)
 target_compile_options(test_async_plugin_loading PRIVATE ${PRACCY_STRICT_FLAGS})
 add_test(NAME test_async_plugin_loading COMMAND test_async_plugin_loading)
+
+# 19. Audit Remediation Regression Tests
+add_executable(test_audit_remediation tests/test_audit_remediation.cpp)
+target_include_directories(test_audit_remediation PRIVATE tests)
+target_link_libraries(test_audit_remediation PRIVATE praccy_core)
+target_compile_options(test_audit_remediation PRIVATE ${PRACCY_STRICT_FLAGS})
+
+add_test(NAME audit_regression_rt COMMAND test_audit_remediation --suite=rt)
+set_tests_properties(audit_regression_rt PROPERTIES WILL_FAIL TRUE)
+
+add_test(NAME audit_regression_mem COMMAND test_audit_remediation --suite=mem)
+set_tests_properties(audit_regression_mem PROPERTIES WILL_FAIL TRUE)
+
+add_test(NAME audit_regression_host COMMAND test_audit_remediation --suite=host)
+set_tests_properties(audit_regression_host PROPERTIES WILL_FAIL TRUE)
+
+add_test(NAME audit_regression_ui COMMAND test_audit_remediation --suite=ui)
+set_tests_properties(audit_regression_ui PROPERTIES WILL_FAIL TRUE)

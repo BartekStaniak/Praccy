@@ -93,7 +93,7 @@ PRACCY_NOINLINE void* operator new(std::size_t size, std::align_val_t al) {
 #if defined(_WIN32)
     void* p = _aligned_malloc(size ? size : 1, static_cast<std::size_t>(al));
 #else
-    void* p = std::aligned_alloc(static_cast<std::size_t>(al), size ? size : 1);
+    void* p = std::aligned_alloc(static_cast<std::size_t>(al), ((size ? size : 1) + static_cast<std::size_t>(al) - 1) & ~(static_cast<std::size_t>(al) - 1));
 #endif
     if (!p) throw std::bad_alloc();
     return p;
@@ -107,7 +107,7 @@ PRACCY_NOINLINE void* operator new[](std::size_t size, std::align_val_t al) {
 #if defined(_WIN32)
     void* p = _aligned_malloc(size ? size : 1, static_cast<std::size_t>(al));
 #else
-    void* p = std::aligned_alloc(static_cast<std::size_t>(al), size ? size : 1);
+    void* p = std::aligned_alloc(static_cast<std::size_t>(al), ((size ? size : 1) + static_cast<std::size_t>(al) - 1) & ~(static_cast<std::size_t>(al) - 1));
 #endif
     if (!p) throw std::bad_alloc();
     return p;
