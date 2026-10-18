@@ -301,11 +301,14 @@ private:
     // Lock-free ingestion ring buffer
     AudioRingBuffer m_ringBuffer;
 
-    // Background worker thread state
+    // Background worker thread state & prepare/push Dekker fence
     std::thread m_workerThread;
     std::atomic<bool> m_workerRunning{false};
+    std::atomic<bool> m_preparing{false};
+    std::atomic<uint32_t> m_activePushWriters{0};
     std::condition_variable m_workerCv;
     std::mutex m_workerCvMutex; // Used exclusively for worker cv sleep/shutdown, NEVER on audio thread
+    mutable std::mutex m_dspMutex; // Serializes YIN scratch buffers between workerLoop() and direct process()
 
     // Internal scratch and history buffers (pre-allocated in prepare())
     std::vector<float> m_inputHistory;

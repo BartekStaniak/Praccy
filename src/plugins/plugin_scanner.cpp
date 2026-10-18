@@ -140,7 +140,7 @@ void PluginScanner::addPlugin(const PluginDescriptor& desc) {
         if (m_plugins.size() == m_plugins.capacity()) {
             std::vector<PluginDescriptor> updated = m_plugins;
             updated.push_back(desc);
-            m_retiredPluginSnapshots.push_back(std::move(m_plugins));
+            { if (m_retiredPluginSnapshots.size() >= 2) m_retiredPluginSnapshots.erase(m_retiredPluginSnapshots.begin()); m_retiredPluginSnapshots.push_back(std::move(m_plugins)); }
             m_plugins = std::move(updated);
         } else {
             m_plugins.push_back(desc);
@@ -196,7 +196,7 @@ void PluginScanner::loadFromConfig(const state::AppConfig& cfg) {
             if (m_plugins.size() == m_plugins.capacity()) {
                 std::vector<PluginDescriptor> updated = m_plugins;
                 updated.push_back(std::move(desc));
-                m_retiredPluginSnapshots.push_back(std::move(m_plugins));
+                { if (m_retiredPluginSnapshots.size() >= 2) m_retiredPluginSnapshots.erase(m_retiredPluginSnapshots.begin()); m_retiredPluginSnapshots.push_back(std::move(m_plugins)); }
                 m_plugins = std::move(updated);
             } else {
                 m_plugins.push_back(std::move(desc));
@@ -473,10 +473,14 @@ std::string PluginScanner::detectVendor(const std::filesystem::path& path, const
     }
 
 #if defined(_WIN32)
-    HMODULE hLib = LoadLibraryExW(dllPath.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-    if (!hLib) {
-        hLib = LoadLibraryW(dllPath.wstring().c_str());
-    }
+    HMODULE hLib = nullptr;
+    const std::wstring wDllPath = dllPath.wstring();
+    safeCallPlugin([&]() {
+        hLib = LoadLibraryExW(wDllPath.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+        if (!hLib) {
+            hLib = LoadLibraryW(wDllPath.c_str());
+        }
+    });
     if (hLib) {
         auto* getFactory = reinterpret_cast<GetFactoryProc>(reinterpret_cast<void*>(GetProcAddress(hLib, "GetPluginFactory")));
         std::string fVendor;
@@ -497,7 +501,7 @@ std::string PluginScanner::detectVendor(const std::filesystem::path& path, const
                 fVendor = vendorBuf;
             }
         }
-        FreeLibrary(hLib);
+        safeCallPlugin([&]() { FreeLibrary(hLib); });
         if (!fVendor.empty()) return fVendor;
         if (hadFactory) return "Other";
     }
@@ -663,7 +667,7 @@ void PluginScanner::runScan() {
                 }
             }
             if (!m_plugins.empty()) {
-                m_retiredPluginSnapshots.push_back(std::move(m_plugins));
+                { if (m_retiredPluginSnapshots.size() >= 2) m_retiredPluginSnapshots.erase(m_retiredPluginSnapshots.begin()); m_retiredPluginSnapshots.push_back(std::move(m_plugins)); }
             }
             m_plugins = std::move(found);
         }

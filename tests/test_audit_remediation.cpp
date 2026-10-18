@@ -430,7 +430,7 @@ bool runSuiteMem() {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
 
-        if (completions != 1 || lastLoadedName != "Tube Amp") {
+        if (completions != 1 || lastLoadedName != "Praccy Amp Sim") {
             std::cout << "  [FAIL] F-013: AsyncPluginLoader ABA un-cancelled stale load (completions="
                       << completions << ", last=" << lastLoadedName << ").\n";
             allPassed = false;

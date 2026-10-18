@@ -58,7 +58,7 @@ void AsyncPluginLoader::shutdown() {
     }
     {
         std::lock_guard<std::mutex> lock(m_cancelMutex);
-        m_cancelledSlots.clear();
+        m_latestSlotTaskId.clear();
         m_activeLoadingSlots.clear();
     }
 }
@@ -97,7 +97,7 @@ uint64_t AsyncPluginLoader::enqueueLoad(
     {
         std::lock_guard<std::mutex> lock(m_cancelMutex);
         if (slot) {
-            m_cancelledSlots.erase(slot);
+            m_latestSlotTaskId[slot] = taskId;
             m_activeLoadingSlots.insert(slot);
         }
     }
@@ -114,7 +114,7 @@ uint64_t AsyncPluginLoader::enqueueLoad(
 void AsyncPluginLoader::cancelSlot(audio::PluginSlot* slot) {
     if (!slot) return;
     std::lock_guard<std::mutex> lock(m_cancelMutex);
-    m_cancelledSlots.insert(slot);
+    m_latestSlotTaskId.erase(slot);
     m_activeLoadingSlots.erase(slot);
 }
 
@@ -129,9 +129,8 @@ void AsyncPluginLoader::cancelAll() {
     }
     {
         std::lock_guard<std::mutex> lock(m_cancelMutex);
-        for (auto* s : m_activeLoadingSlots) {
-            m_cancelledSlots.insert(s);
-        }
+        m_cancelAllWatermark = m_nextTaskId.load(std::memory_order_relaxed);
+        m_latestSlotTaskId.clear();
         m_activeLoadingSlots.clear();
     }
 }
@@ -170,11 +169,17 @@ void AsyncPluginLoader::workerLoop() {
             m_taskQueue.pop_front();
         }
 
-        // Check if task was cancelled before starting load
+        // Check if task was cancelled or superseded before starting load
         {
             std::lock_guard<std::mutex> lock(m_cancelMutex);
-            if (task.targetSlot && m_cancelledSlots.count(task.targetSlot)) {
+            if (task.id <= m_cancelAllWatermark) {
                 continue;
+            }
+            if (task.targetSlot) {
+                auto it = m_latestSlotTaskId.find(task.targetSlot);
+                if (it == m_latestSlotTaskId.end() || it->second != task.id) {
+                    continue;
+                }
             }
         }
 
@@ -212,12 +217,17 @@ void AsyncPluginLoader::workerLoop() {
             }
         }, &exCode);
 
-        // Check if task was cancelled while loading in background
+        // Check if task was cancelled or superseded while loading in background
         bool wasCancelled = false;
         {
             std::lock_guard<std::mutex> lock(m_cancelMutex);
-            if (task.targetSlot && m_cancelledSlots.count(task.targetSlot)) {
+            if (task.id <= m_cancelAllWatermark) {
                 wasCancelled = true;
+            } else if (task.targetSlot) {
+                auto it = m_latestSlotTaskId.find(task.targetSlot);
+                if (it == m_latestSlotTaskId.end() || it->second != task.id) {
+                    wasCancelled = true;
+                }
             }
         }
 
@@ -262,11 +272,15 @@ void AsyncPluginLoader::update(std::function<void(
         bool cancelled = false;
         {
             std::lock_guard<std::mutex> lock(m_cancelMutex);
-            if (res.targetSlot) {
-                m_activeLoadingSlots.erase(res.targetSlot);
-                if (m_cancelledSlots.count(res.targetSlot)) {
+            if (res.id <= m_cancelAllWatermark) {
+                cancelled = true;
+            } else if (res.targetSlot) {
+                auto it = m_latestSlotTaskId.find(res.targetSlot);
+                if (it == m_latestSlotTaskId.end() || it->second != res.id) {
                     cancelled = true;
-                    m_cancelledSlots.erase(res.targetSlot);
+                } else {
+                    m_latestSlotTaskId.erase(it);
+                    m_activeLoadingSlots.erase(res.targetSlot);
                 }
             }
         }

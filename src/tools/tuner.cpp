@@ -170,7 +170,14 @@ InstrumentTuner::~InstrumentTuner() {
 }
 
 void InstrumentTuner::prepare(double sampleRate, uint32_t maxBlockSize) {
+    // Fence audio-thread pushSamples() before resizing m_ringBuffer
+    m_preparing.store(true, std::memory_order_seq_cst);
+    while (m_activePushWriters.load(std::memory_order_seq_cst) > 0) {
+        std::this_thread::yield();
+    }
+
     stop();
+    std::lock_guard<std::mutex> dspLock(m_dspMutex);
 
     m_sampleRate = sampleRate;
     m_maxBlockSize = maxBlockSize;
@@ -197,6 +204,7 @@ void InstrumentTuner::prepare(double sampleRate, uint32_t maxBlockSize) {
 
     publishResult(false, 0.0f, 0, 0.0f);
 
+    m_preparing.store(false, std::memory_order_release);
     start();
 }
 
@@ -222,16 +230,27 @@ void InstrumentTuner::stop() {
 
 void InstrumentTuner::pushSamples(const float* monoInput, uint32_t numSamples) noexcept {
     if (!m_enabled.load(std::memory_order_relaxed) || !monoInput || numSamples == 0) return;
-    m_ringBuffer.push(monoInput, numSamples);
+    if (m_preparing.load(std::memory_order_acquire)) return;
+    m_activePushWriters.fetch_add(1, std::memory_order_seq_cst);
+    if (!m_preparing.load(std::memory_order_seq_cst)) {
+        m_ringBuffer.push(monoInput, numSamples);
+    }
+    m_activePushWriters.fetch_sub(1, std::memory_order_release);
 }
 
 void InstrumentTuner::pushSamples(const float* left, const float* right, uint32_t numSamples) noexcept {
     if (!m_enabled.load(std::memory_order_relaxed) || !left || !right || numSamples == 0) return;
-    m_ringBuffer.pushStereo(left, right, numSamples);
+    if (m_preparing.load(std::memory_order_acquire)) return;
+    m_activePushWriters.fetch_add(1, std::memory_order_seq_cst);
+    if (!m_preparing.load(std::memory_order_seq_cst)) {
+        m_ringBuffer.pushStereo(left, right, numSamples);
+    }
+    m_activePushWriters.fetch_sub(1, std::memory_order_release);
 }
 
 void InstrumentTuner::process(const float* monoInput, uint32_t numSamples) {
     if (!m_enabled.load(std::memory_order_relaxed) || !monoInput || numSamples == 0) return;
+    std::lock_guard<std::mutex> dspLock(m_dspMutex);
 
 #if defined(_M_X64) || defined(__x86_64__)
     _mm_setcsr(_mm_getcsr() | 0x8040);
@@ -300,6 +319,7 @@ void InstrumentTuner::workerLoop() {
             continue;
         }
 
+        std::lock_guard<std::mutex> dspLock(m_dspMutex);
         size_t available = m_ringBuffer.availableToRead();
         if (available == 0) continue;
 

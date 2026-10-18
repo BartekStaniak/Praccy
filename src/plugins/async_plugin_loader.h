@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <deque>
 #include <unordered_set>
+#include <unordered_map>
 #include <atomic>
 #include <cstdint>
 
@@ -103,7 +104,8 @@ private:
     std::vector<AsyncLoadResult> m_completedResults;
 
     mutable std::mutex m_cancelMutex;
-    std::unordered_set<audio::PluginSlot*> m_cancelledSlots;
+    std::unordered_map<audio::PluginSlot*, uint64_t> m_latestSlotTaskId;
+    uint64_t m_cancelAllWatermark{0};
     std::unordered_set<audio::PluginSlot*> m_activeLoadingSlots;
 
     std::atomic<bool> m_running{false};

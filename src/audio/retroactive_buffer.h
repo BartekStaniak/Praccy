@@ -49,8 +49,8 @@ public:
             static_cast<size_t>(sampleRate * 60.0 * static_cast<double>(durationMinutes)), 1024);
 
         // If already prepared with identical capacity and sample rate, preserve existing riff history
-        if (m_capacityFrames == targetCapacity &&
-            std::abs(m_sampleRate - sampleRate) < 1.0 &&
+        if (m_capacityFrames.load(std::memory_order_acquire) == targetCapacity &&
+            std::abs(m_sampleRate.load(std::memory_order_acquire) - sampleRate) < 1.0 &&
             m_durationMinutes == durationMinutes &&
             m_bufferL.size() == targetCapacity &&
             m_bufferR.size() == targetCapacity &&
@@ -66,13 +66,14 @@ public:
 
         m_isPreparing.store(true, std::memory_order_seq_cst);
         while (m_audioWritingMain.load(std::memory_order_acquire) ||
-               m_audioWritingSpillover.load(std::memory_order_acquire)) {
+               m_audioWritingSpillover.load(std::memory_order_acquire) ||
+               m_captureActive.load(std::memory_order_acquire)) {
             std::this_thread::yield();
         }
 
-        m_sampleRate = sampleRate;
+        m_sampleRate.store(sampleRate, std::memory_order_relaxed);
         m_durationMinutes = durationMinutes;
-        m_capacityFrames = targetCapacity;
+        m_capacityFrames.store(targetCapacity, std::memory_order_release);
 
         m_bufferL.swap(newBufL);
         m_bufferR.swap(newBufR);
@@ -92,7 +93,8 @@ public:
     void reset() noexcept {
         m_isPreparing.store(true, std::memory_order_seq_cst);
         while (m_audioWritingMain.load(std::memory_order_acquire) ||
-               m_audioWritingSpillover.load(std::memory_order_acquire)) {
+               m_audioWritingSpillover.load(std::memory_order_acquire) ||
+               m_captureActive.load(std::memory_order_acquire)) {
             std::this_thread::yield();
         }
         std::fill(m_bufferL.begin(), m_bufferL.end(), 0.0f);
@@ -111,7 +113,7 @@ public:
      * Guaranteed 0 dynamic allocations and 0 mutex locks on the audio callback.
      */
     inline void push(const float* left, const float* right, size_t numSamples) noexcept {
-        if (!left || numSamples == 0 || m_capacityFrames == 0 || m_isPreparing.load(std::memory_order_acquire)) return;
+        if (!left || numSamples == 0 || m_capacityFrames.load(std::memory_order_acquire) == 0 || m_isPreparing.load(std::memory_order_acquire)) return;
         const float* srcR = right ? right : left;
 
         // Wait-free Dekker handshake with captureSlice() and prepare():
@@ -153,7 +155,8 @@ public:
      */
     bool captureSlice(float* stagingBufferL, float* stagingBufferR,
                       size_t maxSamples, size_t& capturedSamples) const noexcept {
-        if (!stagingBufferL || !stagingBufferR || maxSamples == 0 || m_capacityFrames == 0 ||
+        if (!stagingBufferL || !stagingBufferR || maxSamples == 0 ||
+            m_capacityFrames.load(std::memory_order_acquire) == 0 ||
             m_isPreparing.load(std::memory_order_acquire)) {
             capturedSamples = 0;
             return false;
@@ -174,28 +177,29 @@ public:
             std::this_thread::yield();
         }
 
-        if (m_isPreparing.load(std::memory_order_acquire)) {
+        if (m_isPreparing.load(std::memory_order_seq_cst)) {
             capturedSamples = 0;
             return false;
         }
 
+        const size_t capFrames = m_capacityFrames.load(std::memory_order_acquire);
         const size_t head = m_writeHead.load(std::memory_order_acquire);
         const size_t total = m_totalFramesWritten.load(std::memory_order_acquire);
 
-        const size_t available = std::min(total, m_capacityFrames);
+        const size_t available = std::min(total, capFrames);
         capturedSamples = std::min(available, maxSamples);
         if (capturedSamples == 0) return false;
 
         // Calculate starting index in circular buffer for the most recent `capturedSamples` frames
         const size_t start = (head >= capturedSamples)
             ? (head - capturedSamples)
-            : (m_capacityFrames + head - capturedSamples);
+            : (capFrames + head - capturedSamples);
 
-        if (start + capturedSamples <= m_capacityFrames) {
+        if (start + capturedSamples <= capFrames) {
             std::memcpy(stagingBufferL, &m_bufferL[start], capturedSamples * sizeof(float));
             std::memcpy(stagingBufferR, &m_bufferR[start], capturedSamples * sizeof(float));
         } else {
-            const size_t part1 = m_capacityFrames - start;
+            const size_t part1 = capFrames - start;
             const size_t part2 = capturedSamples - part1;
 
             std::memcpy(stagingBufferL, &m_bufferL[start], part1 * sizeof(float));
@@ -213,9 +217,9 @@ public:
      */
     bool latchAndCopySlice(std::vector<float>& outStagingL, std::vector<float>& outStagingR,
                            size_t& outFramesCaptured, double& outSampleRate) const noexcept {
-        outSampleRate = m_sampleRate;
+        outSampleRate = m_sampleRate.load(std::memory_order_acquire);
         const size_t total = m_totalFramesWritten.load(std::memory_order_acquire);
-        const size_t available = std::min(total, m_capacityFrames);
+        const size_t available = std::min(total, m_capacityFrames.load(std::memory_order_acquire));
 
         if (available == 0) {
             outFramesCaptured = 0;
@@ -233,11 +237,11 @@ public:
         return captureSlice(outStagingL.data(), outStagingR.data(), available, outFramesCaptured);
     }
 
-    [[nodiscard]] size_t capacityFrames() const noexcept { return m_capacityFrames; }
+    [[nodiscard]] size_t capacityFrames() const noexcept { return m_capacityFrames.load(std::memory_order_acquire); }
     [[nodiscard]] size_t totalFramesWritten() const noexcept { return m_totalFramesWritten.load(std::memory_order_relaxed); }
     [[nodiscard]] size_t writeHead() const noexcept { return m_writeHead.load(std::memory_order_relaxed); }
     [[nodiscard]] int durationMinutes() const noexcept { return m_durationMinutes; }
-    [[nodiscard]] double sampleRate() const noexcept { return m_sampleRate; }
+    [[nodiscard]] double sampleRate() const noexcept { return m_sampleRate.load(std::memory_order_acquire); }
 
     /**
      * @brief Generates standardized riff filename in "PRESET_BPM_TIMESTAMP" format
@@ -289,21 +293,22 @@ private:
     }
 
     inline void appendToMainRing(const float* left, const float* right, size_t numSamples) noexcept {
-        if (numSamples == 0 || m_capacityFrames == 0) return;
-        if (numSamples > m_capacityFrames) {
-            const size_t skip = numSamples - m_capacityFrames;
+        const size_t capFrames = m_capacityFrames.load(std::memory_order_relaxed);
+        if (numSamples == 0 || capFrames == 0) return;
+        if (numSamples > capFrames) {
+            const size_t skip = numSamples - capFrames;
             left += skip;
             right += skip;
-            numSamples = m_capacityFrames;
+            numSamples = capFrames;
         }
 
         size_t head = m_writeHead.load(std::memory_order_relaxed);
-        if (head + numSamples <= m_capacityFrames) {
+        if (head + numSamples <= capFrames) {
             std::memcpy(&m_bufferL[head], left, numSamples * sizeof(float));
             std::memcpy(&m_bufferR[head], right, numSamples * sizeof(float));
-            head = (head + numSamples == m_capacityFrames) ? 0 : (head + numSamples);
+            head = (head + numSamples == capFrames) ? 0 : (head + numSamples);
         } else {
-            const size_t part1 = m_capacityFrames - head;
+            const size_t part1 = capFrames - head;
             const size_t part2 = numSamples - part1;
 
             std::memcpy(&m_bufferL[head], left, part1 * sizeof(float));
@@ -319,9 +324,9 @@ private:
         m_totalFramesWritten.fetch_add(numSamples, std::memory_order_release);
     }
 
-    double m_sampleRate{48000.0};
+    std::atomic<double> m_sampleRate{48000.0};
     int m_durationMinutes{2};
-    size_t m_capacityFrames{0};
+    std::atomic<size_t> m_capacityFrames{0};
 
     std::vector<float> m_bufferL;
     std::vector<float> m_bufferR;

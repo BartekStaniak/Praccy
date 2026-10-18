@@ -547,6 +547,7 @@ bool SceneManager::applyGraphSnapshot(const ScenePreset& scene, audio::GraphEngi
         return applyGraphSnapshotInPlace(scene, graph);
     }
 
+    plugins::AsyncPluginLoader::instance().cancelAll();
     plugins::PluginWindowManager::instance().closeAllWindows();
 
     std::vector<std::unique_ptr<audio::AudioNode>> newNodes;

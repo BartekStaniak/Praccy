@@ -2799,6 +2799,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
             m_midi.startLearning(midi::BindingTargetType::SlotOutputGain, effSlot, branchIndex, -1, effBranchSlot);
         }
         if (ImGui::MenuItem("Delete Slot")) {
+            plugins::AsyncPluginLoader::instance().cancelSlot(slot);
             if (hasGui) plugins::PluginWindowManager::instance().closePluginWindow(pluginInst);
             if (m_dspTweakSlot == slot) m_dspTweakSlot = nullptr;
             if (m_expandedSlot == slot) m_expandedSlot = nullptr;
@@ -3530,6 +3531,7 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
             for (size_t s = 0; s < delBr->numSlots(); ++s) {
                 auto* slot = delBr->getSlot(s);
                 if (slot) {
+                    plugins::AsyncPluginLoader::instance().cancelSlot(slot);
                     if (m_dspTweakSlot == slot) m_dspTweakSlot = nullptr;
                     if (m_expandedSlot == slot) m_expandedSlot = nullptr;
                     if (m_pendingGuiEditSlot == slot) m_pendingGuiEditSlot = nullptr;

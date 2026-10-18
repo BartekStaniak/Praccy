@@ -270,9 +270,7 @@ void PluginWindowManager::updateTheme(bool isDark, COLORREF bgCol) {
     m_isDark = isDark;
     m_bgCol = bgCol;
 
-    if (m_bgBrush) {
-        DeleteObject(m_bgBrush);
-    }
+    HBRUSH oldBrush = m_bgBrush;
     m_bgBrush = CreateSolidBrush(bgCol);
 
     BOOL useDark = isDark ? TRUE : FALSE;
@@ -284,6 +282,9 @@ void PluginWindowManager::updateTheme(bool isDark, COLORREF bgCol) {
             SetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND, reinterpret_cast<LONG_PTR>(m_bgBrush));
             InvalidateRect(hwnd, nullptr, TRUE);
         }
+    }
+    if (oldBrush) {
+        DeleteObject(oldBrush);
     }
 }
 
