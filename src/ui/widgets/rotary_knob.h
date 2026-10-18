@@ -55,7 +55,7 @@ inline bool DrawHardwareKnob(
     ImGuiIO& io = ImGui::GetIO();
     const auto& tokens = themeTokens();
 
-    const float R = opt.radius;
+    const float R = ui::px(opt.radius);
     const float diameter = R * 2.0f;
     const float pad = ui::px(4.0f);
     const float widgetW = diameter + pad * 2.0f;

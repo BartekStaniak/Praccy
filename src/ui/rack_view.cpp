@@ -1604,8 +1604,8 @@ void RackView::renderSignalRack() {
     const float viewportWidth = avail.x;
     const float viewportHeight = avail.y;
 
-    const float safeW = (std::isnan(viewportWidth) || viewportWidth <= 0.0f) ? 0.0f : viewportWidth;
-    const float safeH = (std::isnan(viewportHeight) || viewportHeight <= 0.0f) ? 0.0f : viewportHeight;
+    const float safeW = (!std::isfinite(viewportWidth) || viewportWidth <= 0.0f) ? 0.0f : viewportWidth;
+    const float safeH = (!std::isfinite(viewportHeight) || viewportHeight <= 0.0f) ? 0.0f : viewportHeight;
 
     // Dynamically calculate parallel block height based on branch collapse/expand states
     float maxParallelH = 0.0f;
@@ -1758,7 +1758,6 @@ void RackView::renderSignalRack() {
     ImGui::EndChild();
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor();
-    ImGui::EndGroup();
     currentX += outputCardW;
 
     // 3. Right / Bottom Extent Boundaries: Extend canvas ONLY when content exceeds viewport

@@ -522,6 +522,7 @@ void PluginBrowserModal::renderPluginRow(int index, float rowH) {
 
     const bool isSelected = (index == m_selectedIndex);
     ImGui::PushID(index);
+    ImGui::PushID(desc->path.empty() ? desc->name.c_str() : desc->path.c_str());
 
     ImVec2 rowPos = ImGui::GetCursorScreenPos();
     const float rowW = ImGui::GetContentRegionAvail().x;
@@ -649,6 +650,7 @@ void PluginBrowserModal::renderPluginRow(int index, float rowH) {
     }
 
     ImGui::PopID();
+    ImGui::PopID();
     ImGui::SetCursorScreenPos(ImVec2(rowPos.x, rowPos.y + rowH));
 }
 
@@ -666,7 +668,7 @@ void PluginBrowserModal::render() {
     }
 
     const float fontSize = ImGui::GetFontSize();
-    const float dpiScale = std::max(1.0f, fontSize / 13.0f);
+    const float dpiScale = std::max(ui::dpiScale(), fontSize / 15.0f);
     const float modalW = std::clamp(vp->Size.x * 0.55f, 620.0f * dpiScale, 860.0f * dpiScale);
     const float modalH = std::clamp(vp->Size.y * 0.65f, 480.0f * dpiScale, 720.0f * dpiScale);
     const ImVec2 modalSize(modalW, modalH);

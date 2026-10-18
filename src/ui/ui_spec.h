@@ -1,6 +1,7 @@
 #pragma once
 
 #include <imgui.h>
+#include "design_tokens.h"
 #include <algorithm>
 
 namespace praccy::ui {
@@ -20,7 +21,7 @@ namespace Spec {
     inline float comboHeight()         { return ImGui::GetFrameHeight(); }
     inline float pillHeight()          { return ImGui::GetFrameHeight(); }
     inline float defaultWidgetHeight() { return ImGui::GetFrameHeight(); }
-    inline float smallButtonHeight()   { return 24.0f; }
+    inline float smallButtonHeight()   { return ui::px(24.0f); }
 
     inline constexpr float kButtonHeight       = 29.0f; // Matches ImGui::GetFrameHeight() at standard DPI
     inline constexpr float kSmallButtonHeight  = 24.0f; // Inline micro actions (cards/headers)
@@ -55,12 +56,12 @@ namespace Spec {
     // =========================================================================
     inline constexpr float kTableCellPaddingX  = 8.0f;
     inline constexpr float kTableCellPaddingY  = 4.0f;
-    inline ImVec2 tableCellPadding()           { return ImVec2(kTableCellPaddingX, kTableCellPaddingY); }
+    inline ImVec2 tableCellPadding()           { return ImVec2(ui::px(kTableCellPaddingX), ui::px(kTableCellPaddingY)); }
 
     // Standard row height for tables containing standard controls (combos, buttons, pills)
-    inline float tableRowHeight()              { return 30.0f; } // Standard table row height (compact, fits badges/icons)
-    inline float tableCompactRowHeight()       { return 24.0f; } // Compact table row height (hotkeys, etc.)
-    inline float tableBadgeHeight()            { return 20.0f; }
+    inline float tableRowHeight()              { return ui::px(30.0f); } // Standard table row height (compact, fits badges/icons)
+    inline float tableCompactRowHeight()       { return ui::px(24.0f); } // Compact table row height (hotkeys, etc.)
+    inline float tableBadgeHeight()            { return ui::px(20.0f); }
     inline constexpr float kTableBadgeHeight   = 20.0f;
 
     /**

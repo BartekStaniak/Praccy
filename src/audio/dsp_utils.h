@@ -252,6 +252,14 @@ public:
         m_clipped.store(false, std::memory_order_relaxed);
     }
 
+    void setPpmMode(bool enabled) noexcept {
+        m_ppmMode.store(enabled, std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] bool isPpmMode() const noexcept {
+        return m_ppmMode.load(std::memory_order_relaxed);
+    }
+
     void clearClip() noexcept {
         m_clipped.store(false, std::memory_order_relaxed);
     }
@@ -275,18 +283,29 @@ public:
             m_clipped.store(true, std::memory_order_relaxed);
         }
 
-        // Responsive peak ballistics: instantaneous peak capture, snappy 120 ms exponential decay
         const float sr = (sampleRate > 8000.0) ? static_cast<float>(sampleRate) : 48000.0f;
         const float dt = static_cast<float>(numSamples) / sr;
-        const float releaseCoeff = 1.0f - std::exp(-dt / 0.120f);
         const float holdReleaseCoeff = 1.0f - std::exp(-dt / 1.500f);
 
         float curL = m_peakLeft.load(std::memory_order_relaxed);
-        curL = (maxL >= curL) ? maxL : (curL + releaseCoeff * (maxL - curL));
-        m_peakLeft.store(curL < 1e-6f ? 0.0f : curL, std::memory_order_relaxed);
-
         float curR = m_peakRight.load(std::memory_order_relaxed);
-        curR = (targetR >= curR) ? targetR : (curR + releaseCoeff * (targetR - curR));
+
+        if (m_ppmMode.load(std::memory_order_relaxed)) {
+            // DIN IEC 60268-10 Type I PPM ballistics:
+            // 5 ms integration to reach -2 dB (0.7943): tau_attack = 0.003161 s
+            // 20 dB (0.1x) fallback in 1.5 s: tau_release = 0.65144 s
+            const float ppmAttackCoeff = 1.0f - std::exp(-dt / 0.003161f);
+            const float ppmReleaseCoeff = 1.0f - std::exp(-dt / 0.65144f);
+            curL += ((maxL >= curL) ? ppmAttackCoeff : ppmReleaseCoeff) * (maxL - curL);
+            curR += ((targetR >= curR) ? ppmAttackCoeff : ppmReleaseCoeff) * (targetR - curR);
+        } else {
+            // Responsive digital peak ballistics: instantaneous peak capture, snappy 120 ms exponential decay
+            const float releaseCoeff = 1.0f - std::exp(-dt / 0.120f);
+            curL = (maxL >= curL) ? maxL : (curL + releaseCoeff * (maxL - curL));
+            curR = (targetR >= curR) ? targetR : (curR + releaseCoeff * (targetR - curR));
+        }
+
+        m_peakLeft.store(curL < 1e-6f ? 0.0f : curL, std::memory_order_relaxed);
         m_peakRight.store(curR < 1e-6f ? 0.0f : curR, std::memory_order_relaxed);
 
         float holdL = m_holdLeft.load(std::memory_order_relaxed);
@@ -310,6 +329,7 @@ private:
     std::atomic<float> m_holdLeft{0.0f};
     std::atomic<float> m_holdRight{0.0f};
     std::atomic<bool> m_clipped{false};
+    std::atomic<bool> m_ppmMode{false};
 };
 
 /**
