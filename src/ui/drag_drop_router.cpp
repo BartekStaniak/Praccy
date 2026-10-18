@@ -135,7 +135,10 @@ bool DragDropRouter::handleDrop(const std::string& path, DropContext& ctx) const
                     return state::UniversalDawInteropManager::instance().importAndApply(p, *ctx.graph, *ctx.scenes, *ctx.scanner);
                 }
                 plugins::PluginScanner fallbackScanner;
-                fallbackScanner.scanAll();
+                fallbackScanner.loadFromAppConfig();
+                if (fallbackScanner.numPlugins() == 0) {
+                    fallbackScanner.scanSync();
+                }
                 return state::UniversalDawInteropManager::instance().importAndApply(p, *ctx.graph, *ctx.scenes, fallbackScanner);
             }
             if (ctx.scenes) {
@@ -158,7 +161,10 @@ bool DragDropRouter::handleDrop(const std::string& path, DropContext& ctx) const
                         return state::UniversalDawInteropManager::instance().importAndApply(p, *ctx.graph, *ctx.scenes, *ctx.scanner);
                     }
                     plugins::PluginScanner fallbackScanner;
-                    fallbackScanner.scanAll();
+                    fallbackScanner.loadFromAppConfig();
+                    if (fallbackScanner.numPlugins() == 0) {
+                        fallbackScanner.scanSync();
+                    }
                     return state::UniversalDawInteropManager::instance().importAndApply(p, *ctx.graph, *ctx.scenes, fallbackScanner);
                 } else {
                     if (std::filesystem::exists(p) && ctx.scenes->loadFromFile(path)) {

@@ -762,7 +762,6 @@ private:
     OwnedAudioBuffer m_scratchBuffer;
     EqualPowerRamp m_sceneCrossfadeRamp;
     std::vector<std::unique_ptr<AudioNode>> m_fadingOutNodes;
-    OwnedAudioBuffer m_retiringBuffer;
     OwnedAudioBuffer m_activeBuffer;
     uint32_t m_crossfadeRemainingSamples{0};
 

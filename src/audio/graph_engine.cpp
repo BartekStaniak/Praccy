@@ -1369,7 +1369,6 @@ void GraphEngine::prepare(double sampleRate, uint32_t maxBlockSize) {
     m_noiseGate.prepare(sampleRate);
     m_mainProcessingBuffer.resize(2, maxBlockSize);
     m_scratchBuffer.resize(2, maxBlockSize);
-    m_retiringBuffer.resize(2, maxBlockSize);
     m_activeBuffer.resize(2, maxBlockSize);
     m_activeNodes.reserve(MAX_GRAPH_NODES);
     m_fadingOutNodes.reserve(MAX_GRAPH_NODES);

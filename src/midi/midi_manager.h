@@ -149,7 +149,6 @@ private:
     std::atomic<uint32_t> m_learnedReadIdx{0};
 
     std::atomic<uint32_t> m_lastRawMessage{0};
-    std::atomic<uint64_t> m_lastMessageTimestamp{0};
 };
 
 } // namespace praccy::midi
