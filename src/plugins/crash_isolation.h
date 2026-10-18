@@ -4,6 +4,7 @@
 #include <windows.h>
 #else
 #include <csignal>
+#include <cstdint>
 using DWORD = uint32_t;
 #define EXCEPTION_ACCESS_VIOLATION      ((DWORD)0xC0000005L)
 #define EXCEPTION_IN_PAGE_ERROR         ((DWORD)0xC0000006L)

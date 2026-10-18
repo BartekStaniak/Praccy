@@ -1,6 +1,8 @@
 #pragma once
 
 #include <imgui.h>
+#include <imgui_internal.h>
+#include "../ui_spec.h"
 #include <cmath>
 #include <string>
 #include <algorithm>

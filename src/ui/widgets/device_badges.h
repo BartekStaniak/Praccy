@@ -116,7 +116,7 @@ inline void DrawDeviceFaceplateBadge(
     ImVec2 pos,
     ImVec2 size,
     DeviceCategory cat,
-    const std::string& pluginName,
+    [[maybe_unused]] const std::string& pluginName,
     const std::string& vendorName,
     bool isBypassed,
     bool isHovered,
