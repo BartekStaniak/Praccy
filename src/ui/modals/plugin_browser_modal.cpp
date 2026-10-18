@@ -496,7 +496,7 @@ void PluginBrowserModal::instantiateSelectedPlugin() {
             {},
             m_graph.sampleRate(),
             m_graph.maxBlockSize(),
-            false // openGuiWhenDone = false
+            true // openGuiWhenDone = true
         );
     }
 
