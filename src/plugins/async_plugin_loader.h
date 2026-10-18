@@ -40,6 +40,8 @@ struct AsyncLoadTask {
 struct AsyncLoadResult {
     uint64_t id{0};
     audio::PluginSlot* targetSlot{nullptr};
+    std::string name;
+    PluginType type{PluginType::VST3};
     std::unique_ptr<IPluginInstance> instance{nullptr};
     bool success{false};
     std::string errorMessage;

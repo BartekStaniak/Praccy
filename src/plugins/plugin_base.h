@@ -59,6 +59,10 @@ public:
         height = 600;
     }
     virtual void onGuiResize(int /*width*/, int /*height*/) {}
+    virtual bool adjustSize(int& /*width*/, int& /*height*/) { return false; }
+    [[nodiscard]] virtual float getParameterValueByIndex(size_t index) const {
+        return getParameterDesc(index).currentValue;
+    }
 
     [[nodiscard]] virtual const std::string& path() const noexcept {
         static const std::string s_empty;

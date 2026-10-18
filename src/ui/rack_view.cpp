@@ -4588,15 +4588,14 @@ void RackView::initMacrosForSlot(audio::PluginSlot* slot) {
                 }
             }
         } else {
-            const std::regex regexGain(R"((gain|drive|dist|overdrive|input|crunch|preamp))", std::regex::icase);
-            const std::regex regexTone(R"((tone|eq|treble|bass|mid|filter|bright|presence|cut))", std::regex::icase);
-            const std::regex regexVol(R"((vol|volume|master|level|output|post))", std::regex::icase);
-            const std::regex regexMix(R"((mix|blend|dry|wet))", std::regex::icase);
+            auto matchesAny = [](const std::string& str, std::initializer_list<const char*> targets) -> bool {
+                for (const char* t : targets) {
+                    if (str.find(t) != std::string::npos) return true;
+                }
+                return false;
+            };
 
-            auto scoreParam = [](const std::string& name, const std::string& target) -> int {
-                std::string lower = name;
-                std::transform(lower.begin(), lower.end(), lower.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            auto scoreParam = [](const std::string& lower, const std::string& target) -> int {
                 int score = 10;
                 if (lower == target) score = 100;
                 else if (lower.rfind("master", 0) == 0 || lower.rfind("main", 0) == 0) score = 80;
@@ -4610,32 +4609,36 @@ void RackView::initMacrosForSlot(audio::PluginSlot* slot) {
             size_t nParams = pInst->numParameters();
             for (size_t i = 0; i < nParams; ++i) {
                 auto desc = pInst->getParameterDesc(i);
-                if (std::regex_search(desc.name, regexGain)) {
-                    int sc = scoreParam(desc.name, "gain");
+                std::string lower = desc.name;
+                std::transform(lower.begin(), lower.end(), lower.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+                if (matchesAny(lower, {"gain", "drive", "dist", "overdrive", "input", "crunch", "preamp"})) {
+                    int sc = scoreParam(lower, "gain");
                     if (sc > bestScore[0]) {
                         bestScore[0] = sc;
                         macros[0] = {desc.name, desc.id, true, false, false,
                                      pInst->getParameterValue(desc.id), desc.defaultValue, desc.minValue, desc.maxValue};
                     }
                 }
-                if (std::regex_search(desc.name, regexTone)) {
-                    int sc = scoreParam(desc.name, "tone");
+                if (matchesAny(lower, {"tone", "eq", "treble", "bass", "mid", "filter", "bright", "presence", "cut"})) {
+                    int sc = scoreParam(lower, "tone");
                     if (sc > bestScore[1]) {
                         bestScore[1] = sc;
                         macros[1] = {desc.name, desc.id, true, false, false,
                                      pInst->getParameterValue(desc.id), desc.defaultValue, desc.minValue, desc.maxValue};
                     }
                 }
-                if (std::regex_search(desc.name, regexVol)) {
-                    int sc = scoreParam(desc.name, "volume");
+                if (matchesAny(lower, {"vol", "volume", "master", "level", "output", "post"})) {
+                    int sc = scoreParam(lower, "volume");
                     if (sc > bestScore[2]) {
                         bestScore[2] = sc;
                         macros[2] = {desc.name, desc.id, true, false, false,
                                      pInst->getParameterValue(desc.id), desc.defaultValue, desc.minValue, desc.maxValue};
                     }
                 }
-                if (std::regex_search(desc.name, regexMix)) {
-                    int sc = scoreParam(desc.name, "mix");
+                if (matchesAny(lower, {"mix", "blend", "dry", "wet"})) {
+                    int sc = scoreParam(lower, "mix");
                     if (sc > bestScore[3]) {
                         bestScore[3] = sc;
                         macros[3] = {desc.name, desc.id, true, false, false,
@@ -4663,8 +4666,7 @@ void RackView::refreshGuiParamBaseline(audio::PluginSlot* slot) {
     auto& baseline = m_guiParamBaseline[slot];
     baseline.resize(nParams);
     for (size_t p = 0; p < nParams; ++p) {
-        auto desc = pInst->getParameterDesc(p);
-        baseline[p] = desc.currentValue;
+        baseline[p] = pInst->getParameterValueByIndex(p);
     }
 }
 
@@ -4699,10 +4701,10 @@ void RackView::pollPluginGuiEdits(bool forceFlushPending) {
                 refreshGuiParamBaseline(slot);
             } else {
                 for (size_t p = 0; p < nParams; ++p) {
-                    auto desc = pluginInst->getParameterDesc(p);
-                    const float curVal = desc.currentValue;
+                    const float curVal = pluginInst->getParameterValueByIndex(p);
                     if (std::abs(curVal - baseline[p]) > 1e-4f) {
                         baseline[p] = curVal;
+                        auto desc = pluginInst->getParameterDesc(p);
                         slot->setParameter(desc.id, curVal);
                         if (!hasGuiEdit) {
                             editedParamId = desc.id;

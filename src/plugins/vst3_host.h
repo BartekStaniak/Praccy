@@ -59,6 +59,8 @@ public:
     void closeGui() override;
     void getPreferredSize(int& width, int& height) const override;
     void onGuiResize(int width, int height) override;
+    bool adjustSize(int& width, int& height) override;
+    [[nodiscard]] float getParameterValueByIndex(size_t index) const override;
 
     [[nodiscard]] std::vector<uint8_t> saveState() const override;
     bool loadState(const std::vector<uint8_t>& state) override;
@@ -81,7 +83,7 @@ private:
     void resumeAudio() noexcept;
     void enqueueParamForAudio(Steinberg::Vst::ParamID paramId, double normVal) noexcept;
     void drainAllParamQueues() noexcept;
-    void invokeOnHostThread(const std::function<void()>& fn, DWORD timeoutMs = 5000) const;
+    void invokeOnHostThread(const std::function<void()>& fn, DWORD timeoutMs = 25000) const;
 
     HMODULE m_module{nullptr};
     Steinberg::IPluginFactory* m_factory{nullptr};

@@ -208,16 +208,32 @@ void CLAP_ABI ClapPluginInstance::clapHostGuiResizeHintsChanged(const clap_host_
 bool CLAP_ABI ClapPluginInstance::clapHostGuiRequestResize(const clap_host_t* host, uint32_t width, uint32_t height) {
     if (!host || !host->host_data) return false;
     auto* self = static_cast<ClapPluginInstance*>(host->host_data);
-    if (self->m_guiParentHwnd && IsWindow(self->m_guiParentHwnd)) {
-        RECT wr = {0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
-        AdjustWindowRectEx(&wr,
-                           static_cast<DWORD>(GetWindowLongW(self->m_guiParentHwnd, GWL_STYLE)),
-                           FALSE,
-                           static_cast<DWORD>(GetWindowLongW(self->m_guiParentHwnd, GWL_EXSTYLE)));
-        SetWindowPos(self->m_guiParentHwnd, nullptr, 0, 0, wr.right - wr.left, wr.bottom - wr.top, SWP_NOMOVE | SWP_NOZORDER);
+    HWND hwnd = self->m_guiParentHwnd;
+    if (!hwnd || !IsWindow(hwnd)) return false;
+
+    bool expected = false;
+    if (!self->m_inResize.compare_exchange_strong(expected, true)) {
         return true;
     }
-    return false;
+
+    const DWORD winThread = GetWindowThreadProcessId(hwnd, nullptr);
+    if (GetCurrentThreadId() == winThread) {
+        RECT wr = {0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
+        AdjustWindowRectEx(&wr,
+                           static_cast<DWORD>(GetWindowLongW(hwnd, GWL_STYLE)),
+                           FALSE,
+                           static_cast<DWORD>(GetWindowLongW(hwnd, GWL_EXSTYLE)));
+        SetWindowPos(hwnd, nullptr, 0, 0, wr.right - wr.left, wr.bottom - wr.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        self->m_preferredWidth = static_cast<int>(width);
+        self->m_preferredHeight = static_cast<int>(height);
+        self->m_inResize.store(false, std::memory_order_release);
+    } else {
+        PostMessageW(hwnd, WM_USER + 201, static_cast<WPARAM>(width), static_cast<LPARAM>(height));
+        self->m_preferredWidth = static_cast<int>(width);
+        self->m_preferredHeight = static_cast<int>(height);
+        self->m_inResize.store(false, std::memory_order_release);
+    }
+    return true;
 }
 
 bool CLAP_ABI ClapPluginInstance::clapHostGuiRequestShow(const clap_host_t* /*host*/) { return true; }
@@ -861,13 +877,48 @@ bool ClapPluginInstance::openGui(HWND parentHwnd) {
 }
 
 void ClapPluginInstance::onGuiResize(int width, int height) {
+    if (m_inResize.load(std::memory_order_acquire)) {
+        return;
+    }
     if (m_guiExt && m_plugin && m_guiCreated && width > 64 && height > 64 && !m_faulted.load(std::memory_order_relaxed)) {
         safeCallPluginGui([&]() {
-            if (m_guiExt->set_size) {
-                m_guiExt->set_size(m_plugin, static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+            uint32_t w = static_cast<uint32_t>(width);
+            uint32_t h = static_cast<uint32_t>(height);
+            if (m_guiExt->adjust_size) {
+                m_guiExt->adjust_size(m_plugin, &w, &h);
             }
+            if (m_guiExt->set_size) {
+                m_guiExt->set_size(m_plugin, w, h);
+            }
+            m_preferredWidth = static_cast<int>(w);
+            m_preferredHeight = static_cast<int>(h);
         });
     }
+}
+
+bool ClapPluginInstance::adjustSize(int& width, int& height) {
+    if (m_guiExt && m_plugin && m_guiCreated && m_guiExt->adjust_size && !m_faulted.load(std::memory_order_relaxed)) {
+        uint32_t w = static_cast<uint32_t>(width);
+        uint32_t h = static_cast<uint32_t>(height);
+        if (m_guiExt->adjust_size(m_plugin, &w, &h)) {
+            width = static_cast<int>(w);
+            height = static_cast<int>(h);
+            return true;
+        }
+    }
+    return false;
+}
+
+float ClapPluginInstance::getParameterValueByIndex(size_t index) const {
+    if (!m_paramsExt || !m_plugin) return 0.0f;
+    std::lock_guard<std::mutex> lock(m_paramCacheMutex);
+    clap_param_info info{};
+    if (m_paramsExt->get_info(m_plugin, static_cast<uint32_t>(index), &info)) {
+        auto it = m_paramCache.find(info.id);
+        if (it != m_paramCache.end()) return it->second;
+        return static_cast<float>(info.default_value);
+    }
+    return 0.0f;
 }
 
 void ClapPluginInstance::openGuiAsync(HWND parentHwnd, std::function<void(bool success)> onComplete) {
@@ -903,18 +954,22 @@ void ClapPluginInstance::closeGui() {
 void ClapPluginInstance::getPreferredSize(int& width, int& height) const {
     if (m_guiExt && m_plugin && m_guiCreated && !m_faulted.load(std::memory_order_relaxed)) {
         safeCallPlugin([&]() {
-            uint32_t w = 850, h = 600;
+            uint32_t w = static_cast<uint32_t>(m_preferredWidth);
+            uint32_t h = static_cast<uint32_t>(m_preferredHeight);
             if (m_guiExt->get_size && m_guiExt->get_size(m_plugin, &w, &h)) {
                 if (w > 100 && h > 100) {
                     width = static_cast<int>(w);
                     height = static_cast<int>(h);
+                    return;
                 }
             }
+            width = m_preferredWidth;
+            height = m_preferredHeight;
         });
         return;
     }
-    width = 850;
-    height = 600;
+    width = m_preferredWidth;
+    height = m_preferredHeight;
 }
 
 void ClapPluginInstance::resetFault() noexcept {

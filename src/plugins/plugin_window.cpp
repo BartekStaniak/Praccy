@@ -71,7 +71,7 @@ bool PluginWindowManager::openPluginWindow(IPluginInstance* plugin) {
         }
         update();
         if (finished) break;
-        if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count() > 10) {
+        if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count() > 35) {
             std::cerr << "Timeout waiting for openPluginWindow: " << plugin->name() << "\n";
             break;
         }
@@ -312,6 +312,64 @@ LRESULT CALLBACK PluginWindowManager::windowProc(HWND hwnd, UINT msg, WPARAM wPa
         case WM_SIZE: {
             if (plugin && wParam != SIZE_MINIMIZED) {
                 plugin->onGuiResize( static_cast<int>(LOWORD(lParam)), static_cast<int>(HIWORD(lParam)) );
+            }
+            break;
+        }
+        case WM_USER + 201: {
+            int width = static_cast<int>(wParam);
+            int height = static_cast<int>(lParam);
+            if (width > 0 && height > 0) {
+                RECT wr = {0, 0, width, height};
+                AdjustWindowRectEx(&wr,
+                                   static_cast<DWORD>(GetWindowLongW(hwnd, GWL_STYLE)),
+                                   FALSE,
+                                   static_cast<DWORD>(GetWindowLongW(hwnd, GWL_EXSTYLE)));
+                SetWindowPos(hwnd, nullptr, 0, 0, wr.right - wr.left, wr.bottom - wr.top,
+                             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            return 0;
+        }
+        case WM_SIZING: {
+            if (plugin) {
+                RECT* rc = reinterpret_cast<RECT*>(lParam);
+                RECT border = {0, 0, 0, 0};
+                DWORD style = static_cast<DWORD>(GetWindowLongW(hwnd, GWL_STYLE));
+                DWORD exStyle = static_cast<DWORD>(GetWindowLongW(hwnd, GWL_EXSTYLE));
+                AdjustWindowRectEx(&border, style, FALSE, exStyle);
+                int borderWidth = (border.right - border.left);
+                int borderHeight = (border.bottom - border.top);
+
+                int clientW = (rc->right - rc->left) - borderWidth;
+                int clientH = (rc->bottom - rc->top) - borderHeight;
+                if (clientW > 0 && clientH > 0) {
+                    int adjW = clientW;
+                    int adjH = clientH;
+                    if (plugin->adjustSize(adjW, adjH)) {
+                        int finalWinW = adjW + borderWidth;
+                        int finalWinH = adjH + borderHeight;
+                        switch (wParam) {
+                            case WMSZ_LEFT:
+                            case WMSZ_TOPLEFT:
+                            case WMSZ_BOTTOMLEFT:
+                                rc->left = rc->right - finalWinW;
+                                break;
+                            default:
+                                rc->right = rc->left + finalWinW;
+                                break;
+                        }
+                        switch (wParam) {
+                            case WMSZ_TOP:
+                            case WMSZ_TOPLEFT:
+                            case WMSZ_TOPRIGHT:
+                                rc->top = rc->bottom - finalWinH;
+                                break;
+                            default:
+                                rc->bottom = rc->top + finalWinH;
+                                break;
+                        }
+                        return TRUE;
+                    }
+                }
             }
             break;
         }

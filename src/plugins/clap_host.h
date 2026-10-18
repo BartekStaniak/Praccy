@@ -101,6 +101,8 @@ public:
     void closeGui() override;
     void getPreferredSize(int& width, int& height) const override;
     void onGuiResize(int width, int height) override;
+    bool adjustSize(int& width, int& height) override;
+    [[nodiscard]] float getParameterValueByIndex(size_t index) const override;
 
     [[nodiscard]] std::vector<uint8_t> saveState() const override;
     bool loadState(const std::vector<uint8_t>& state) override;
@@ -214,6 +216,9 @@ private:
 
     mutable std::mutex m_paramCacheMutex;
     mutable std::unordered_map<uint32_t, float> m_paramCache;
+    std::atomic<bool> m_inResize{false};
+    int m_preferredWidth{850};
+    int m_preferredHeight{600};
 };
 
 } // namespace praccy::plugins

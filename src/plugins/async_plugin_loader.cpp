@@ -187,6 +187,8 @@ void AsyncPluginLoader::workerLoop() {
         AsyncLoadResult result;
         result.id = task.id;
         result.targetSlot = task.targetSlot;
+        result.name = task.name;
+        result.type = task.type;
         result.openGuiWhenDone = task.openGuiWhenDone;
         result.completionCallback = std::move(task.completionCallback);
 
@@ -309,6 +311,15 @@ void AsyncPluginLoader::update(std::function<void(
             }
             if (res.completionCallback) res.completionCallback(true);
         } else {
+            if (res.targetSlot) {
+                std::unique_ptr<audio::AudioNode> oldNode;
+                std::string displayName = res.name.empty() ? "Failed to Load" : res.name;
+                auto missing = std::make_unique<audio::MissingPluginPlaceholder>(
+                    displayName,
+                    res.type == PluginType::CLAP ? "CLAP" : "VST3"
+                );
+                res.targetSlot->replaceInnerNode(std::move(missing), oldNode);
+            }
             if (res.completionCallback) res.completionCallback(false);
         }
     }

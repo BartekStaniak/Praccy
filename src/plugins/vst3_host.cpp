@@ -300,12 +300,19 @@ void Vst3PluginInstance::invokeOnHostThread(const std::function<void()>& fn, DWO
     if (!PostThreadMessageW(tid, WM_USER + 105, reinterpret_cast<WPARAM>(req), 0)) {
         req->release();
         req->release();
+        CloseHandle(ack);
         fn();
         return;
     }
 
+    const auto startTime = std::chrono::steady_clock::now();
     while (true) {
-        DWORD waitRes = MsgWaitForMultipleObjectsEx(1, &ack, timeoutMs, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startTime).count();
+        if (elapsed >= timeoutMs) {
+            break;
+        }
+        DWORD remainingMs = static_cast<DWORD>(timeoutMs - elapsed);
+        DWORD waitRes = MsgWaitForMultipleObjectsEx(1, &ack, remainingMs, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         if (waitRes == WAIT_OBJECT_0) {
             break;
         } else if (waitRes == WAIT_OBJECT_0 + 1) {
@@ -318,6 +325,7 @@ void Vst3PluginInstance::invokeOnHostThread(const std::function<void()>& fn, DWO
             break;
         }
     }
+    CloseHandle(ack);
     req->release();
 }
 
@@ -1094,8 +1102,15 @@ bool Vst3PluginInstance::openGui(HWND parentHwnd) {
     HANDLE ack = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     PostThreadMessageW(tid, WM_USER + 101, reinterpret_cast<WPARAM>(ack), reinterpret_cast<LPARAM>(parentHwnd));
 
+    const auto startTime = std::chrono::steady_clock::now();
+    const DWORD timeoutMs = 30000;
     while (true) {
-        DWORD waitRes = MsgWaitForMultipleObjectsEx(1, &ack, 10000, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startTime).count();
+        if (elapsed >= timeoutMs) {
+            break;
+        }
+        DWORD remainingMs = static_cast<DWORD>(timeoutMs - elapsed);
+        DWORD waitRes = MsgWaitForMultipleObjectsEx(1, &ack, remainingMs, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         if (waitRes == WAIT_OBJECT_0) {
             break;
         } else if (waitRes == WAIT_OBJECT_0 + 1) {
@@ -1183,12 +1198,33 @@ void Vst3PluginInstance::onGuiResize(int width, int height) {
             if (!m_plugView || m_faulted.load(std::memory_order_relaxed)) return;
             safeCallPluginGui([&]() {
                 Steinberg::ViewRect rect{0, 0, width, height};
+                m_plugView->checkSizeConstraint(&rect);
                 m_plugView->onSize(&rect);
+                m_preferredWidth = rect.right - rect.left;
+                m_preferredHeight = rect.bottom - rect.top;
             });
-            m_preferredWidth = width;
-            m_preferredHeight = height;
         });
     }
+}
+
+bool Vst3PluginInstance::adjustSize(int& width, int& height) {
+    if (m_plugView && !m_faulted.load(std::memory_order_relaxed)) {
+        Steinberg::ViewRect rect{0, 0, width, height};
+        if (m_plugView->checkSizeConstraint(&rect) == Steinberg::kResultOk) {
+            width = rect.right - rect.left;
+            height = rect.bottom - rect.top;
+            return true;
+        }
+    }
+    return false;
+}
+
+float Vst3PluginInstance::getParameterValueByIndex(size_t index) const {
+    std::lock_guard<std::mutex> lock(m_paramCacheMutex);
+    if (index < m_paramDescs.size()) {
+        return m_paramDescs[index].currentValue;
+    }
+    return 0.0f;
 }
 
 void Vst3PluginInstance::closeGuiInternal() {
