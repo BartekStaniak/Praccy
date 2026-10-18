@@ -1,4 +1,5 @@
 #include "asio_manager.h"
+#include "dsp_utils.h"
 #include <iostream>
 #include <algorithm>
 #include <cmath>
