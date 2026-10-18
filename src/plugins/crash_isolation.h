@@ -1,6 +1,27 @@
 #pragma once
 
+#if defined(_WIN32)
 #include <windows.h>
+#else
+#include <csignal>
+using DWORD = uint32_t;
+#define EXCEPTION_ACCESS_VIOLATION      ((DWORD)0xC0000005L)
+#define EXCEPTION_IN_PAGE_ERROR         ((DWORD)0xC0000006L)
+#define EXCEPTION_ILLEGAL_INSTRUCTION   ((DWORD)0xC000001DL)
+#define EXCEPTION_DATATYPE_MISALIGNMENT ((DWORD)0x80000002L)
+#define EXCEPTION_ARRAY_BOUNDS_EXCEEDED ((DWORD)0xC000008CL)
+#define EXCEPTION_FLT_DENORMAL_OPERAND  ((DWORD)0xC000008DL)
+#define EXCEPTION_FLT_DIVIDE_BY_ZERO    ((DWORD)0xC000008EL)
+#define EXCEPTION_FLT_INEXACT_RESULT    ((DWORD)0xC000008FL)
+#define EXCEPTION_FLT_INVALID_OPERATION ((DWORD)0xC0000090L)
+#define EXCEPTION_FLT_OVERFLOW          ((DWORD)0xC0000091L)
+#define EXCEPTION_FLT_STACK_CHECK       ((DWORD)0xC0000092L)
+#define EXCEPTION_FLT_UNDERFLOW         ((DWORD)0xC0000093L)
+#define EXCEPTION_INT_DIVIDE_BY_ZERO    ((DWORD)0xC0000094L)
+#define EXCEPTION_INT_OVERFLOW          ((DWORD)0xC0000095L)
+#define EXCEPTION_PRIV_INSTRUCTION      ((DWORD)0xC0000096L)
+#define EXCEPTION_STACK_OVERFLOW        ((DWORD)0xC00000FDL)
+#endif
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -145,7 +166,7 @@ inline bool sehExecuteLeaf(void (*fn)(void*) noexcept, void* arg, DWORD* outCode
     return sehTrampoline(fn, arg, outCode);
 }
 
-#else
+#elif defined(_WIN32)
 
 struct CrashContext {
     jmp_buf jmpBuf;
@@ -219,6 +240,70 @@ inline bool sehTrampoline(void (*fnPtr)(void*) noexcept, void* fnCtx, DWORD* out
         if (ctx.exceptionCode == EXCEPTION_STACK_OVERFLOW) {
             _resetstkoflw();
         }
+        if (outExCode) {
+            *outExCode = ctx.exceptionCode;
+        }
+        return false;
+    }
+}
+
+inline bool vehLeafInvoke(void (*fn)(void*) noexcept, void* ctxArg, DWORD* outExceptionCode) noexcept {
+    return sehTrampoline(fn, ctxArg, outExceptionCode);
+}
+
+#else
+
+struct CrashContext {
+    sigjmp_buf jmpBuf;
+    CrashContext* prev{nullptr};
+    DWORD exceptionCode{0};
+    bool active{false};
+};
+
+inline thread_local CrashContext* t_currentCrashContext = nullptr;
+inline std::once_flag g_vehInitOnce;
+
+inline void posixSignalHandler(int sig) noexcept {
+    CrashContext* ctx = t_currentCrashContext;
+    if (!ctx || !ctx->active) {
+        std::_Exit(128 + sig);
+    }
+    if (sig == SIGSEGV || sig == SIGBUS) ctx->exceptionCode = EXCEPTION_ACCESS_VIOLATION;
+    else if (sig == SIGFPE) ctx->exceptionCode = EXCEPTION_FLT_DIVIDE_BY_ZERO;
+    else if (sig == SIGILL) ctx->exceptionCode = EXCEPTION_ILLEGAL_INSTRUCTION;
+    else ctx->exceptionCode = EXCEPTION_ACCESS_VIOLATION;
+    siglongjmp(ctx->jmpBuf, 1);
+}
+
+inline void ensureVehRegistered() noexcept {
+    std::call_once(g_vehInitOnce, []() {
+        struct sigaction sa{};
+        sa.sa_handler = posixSignalHandler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = SA_NODEFER;
+        sigaction(SIGSEGV, &sa, nullptr);
+        sigaction(SIGFPE, &sa, nullptr);
+        sigaction(SIGILL, &sa, nullptr);
+        sigaction(SIGBUS, &sa, nullptr);
+    });
+}
+
+inline bool sehTrampoline(void (*fnPtr)(void*) noexcept, void* fnCtx, DWORD* outExCode) noexcept {
+    ensureVehRegistered();
+    CrashContext ctx{};
+    ctx.prev = t_currentCrashContext;
+    ctx.exceptionCode = 0;
+    ctx.active = true;
+    t_currentCrashContext = &ctx;
+
+    if (sigsetjmp(ctx.jmpBuf, 1) == 0) {
+        fnPtr(fnCtx);
+        ctx.active = false;
+        t_currentCrashContext = ctx.prev;
+        return true;
+    } else {
+        ctx.active = false;
+        t_currentCrashContext = ctx.prev;
         if (outExCode) {
             *outExCode = ctx.exceptionCode;
         }

@@ -1,7 +1,11 @@
 #pragma once
 
+#if defined(_WIN32)
 #include <windows.h>
 #include <shellapi.h>
+#else
+using HDROP = void*;
+#endif
 #include <filesystem>
 #include <vector>
 #include <string>

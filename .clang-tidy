@@ -1,0 +1,11 @@
+Checks: >
+  -*,
+  bugprone-*,
+  concurrency-*,
+  performance-*,
+  modernize-*,
+  cppcoreguidelines-*,
+  clang-analyzer-*
+WarningsAsErrors: ''
+HeaderFilterRegex: '^src/.*'
+FormatStyle: none

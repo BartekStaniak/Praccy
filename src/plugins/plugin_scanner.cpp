@@ -8,7 +8,13 @@
 #include <algorithm>
 #include <set>
 #include <unordered_set>
+#if defined(_WIN32)
 #include <windows.h>
+#else
+#include <strings.h>
+#define _stricmp strcasecmp
+using HMODULE = void*;
+#endif
 #include <pluginterfaces/base/ipluginbase.h>
 #include <clap/clap.h>
 
@@ -466,6 +472,7 @@ std::string PluginScanner::detectVendor(const std::filesystem::path& path, const
         if (std::filesystem::exists(candidate)) dllPath = candidate;
     }
 
+#if defined(_WIN32)
     HMODULE hLib = LoadLibraryExW(dllPath.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
     if (!hLib) {
         hLib = LoadLibraryW(dllPath.wstring().c_str());
@@ -494,6 +501,9 @@ std::string PluginScanner::detectVendor(const std::filesystem::path& path, const
         if (!fVendor.empty()) return fVendor;
         if (hadFactory) return "Other";
     }
+#else
+    (void)dllPath;
+#endif
 
     return "Other";
 }
@@ -684,6 +694,7 @@ void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vec
                 std::vector<ScannedClapDesc> foundDescs;
                 bool inspected = false;
 
+#if defined(_WIN32)
                 try {
                     if (HMODULE hLib = LoadLibraryExW(path.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH)) {
                         const auto* entry = reinterpret_cast<const clap_plugin_entry_t*>(
@@ -719,6 +730,7 @@ void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vec
                 } catch (...) {
                     inspected = false;
                 }
+#endif
 
                 if (inspected && !foundDescs.empty()) {
                     for (const auto& fd : foundDescs) {
@@ -775,6 +787,7 @@ void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vec
                     std::string factoryVendor;
 
                     // Extract canonical 32-char VST3 Class GUID for Tier-1 PluginResolver (guarded by SEH/VEH)
+#if defined(_WIN32)
                     try {
                         std::filesystem::path dllPath = path;
                         if (std::filesystem::is_directory(path)) {
@@ -827,6 +840,7 @@ void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vec
                     } catch (...) {
                         std::cerr << "[PluginScanner] Unknown exception inspecting VST3 " << path.string() << "\n";
                     }
+#endif
 
                     desc.vendor = !factoryVendor.empty() ? factoryVendor : detectVendor(path, name);
                     {

@@ -6,8 +6,15 @@
 #endif
 
 #include "midi_types.h"
+#if defined(_WIN32)
 #include <windows.h>
 #include <mmsystem.h>
+#else
+using HMIDIIN = void*;
+using UINT = unsigned int;
+using DWORD_PTR = uintptr_t;
+#define CALLBACK
+#endif
 #include <vector>
 #include <string>
 #include <functional>

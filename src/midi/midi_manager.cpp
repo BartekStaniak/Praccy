@@ -36,6 +36,7 @@ void MidiManager::releaseSeqlockWrite() noexcept {
 
 std::vector<MidiDeviceInfo> MidiManager::enumerateInputDevices() {
     std::vector<MidiDeviceInfo> devices;
+#if defined(_WIN32)
     const UINT numDevs = midiInGetNumDevs();
 
     for (UINT i = 0; i < numDevs; ++i) {
@@ -47,12 +48,13 @@ std::vector<MidiDeviceInfo> MidiManager::enumerateInputDevices() {
             devices.push_back(std::move(info));
         }
     }
+#endif
     return devices;
 }
 
 bool MidiManager::openDevice(uint32_t deviceId) {
     closeDevice();
-
+#if defined(_WIN32)
     MMRESULT res = midiInOpen(&m_handle, deviceId, reinterpret_cast<DWORD_PTR>(&MidiManager::midiInProc), reinterpret_cast<DWORD_PTR>(this), CALLBACK_FUNCTION);
     if (res != MMSYSERR_NOERROR) {
         std::cerr << "Failed to open MIDI device: " << deviceId << " (res=" << res << ")\n";
@@ -62,15 +64,23 @@ bool MidiManager::openDevice(uint32_t deviceId) {
     m_currentDeviceId = deviceId;
     midiInStart(m_handle);
     return true;
+#else
+    (void)deviceId;
+    return false;
+#endif
 }
 
 void MidiManager::closeDevice() {
+#if defined(_WIN32)
     if (m_handle) {
         midiInStop(m_handle);
         midiInReset(m_handle);
         midiInClose(m_handle);
         m_handle = nullptr;
     }
+#else
+    m_handle = nullptr;
+#endif
 }
 
 void MidiManager::drainLearnedPodFromMidiThread() {
@@ -329,7 +339,11 @@ void MidiManager::cancelLearning() {
 }
 
 void CALLBACK MidiManager::midiInProc(HMIDIIN /*hMidiIn*/, UINT wMsg, DWORD_PTR dwInstance, DWORD_PTR dwParam1, DWORD_PTR /*dwParam2*/) {
+#if defined(_WIN32)
     if (wMsg != MIM_DATA) return;
+#else
+    if (wMsg != 0x3C3u) return;
+#endif
 
     auto* manager = reinterpret_cast<MidiManager*>(dwInstance);
     if (!manager) return;

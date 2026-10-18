@@ -14,7 +14,11 @@
 #include <atomic>
 #include <mutex>
 #include <unordered_map>
+#if defined(_WIN32)
 #include <windows.h>
+#else
+using HMODULE = void*;
+#endif
 #include <utility>
 #include <thread>
 #include <future>

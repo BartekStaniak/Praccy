@@ -60,7 +60,7 @@ bool DragDropRouter::isChain(const std::filesystem::path& path) noexcept {
 std::vector<ClassifiedDropItem> DragDropRouter::parseHDrop(HDROP hDrop) {
     std::vector<ClassifiedDropItem> items;
     if (!hDrop) return items;
-
+#if defined(_WIN32)
     const UINT fileCount = DragQueryFileW(hDrop, 0xFFFFFFFF, nullptr, 0);
     items.reserve(fileCount);
 
@@ -79,7 +79,7 @@ std::vector<ClassifiedDropItem> DragDropRouter::parseHDrop(HDROP hDrop) {
             });
         }
     }
-
+#endif
     return items;
 }
 

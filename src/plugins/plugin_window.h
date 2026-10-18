@@ -1,7 +1,23 @@
 #pragma once
 
 #include "plugin_base.h"
+#if defined(_WIN32)
 #include <windows.h>
+#else
+using ATOM = uint16_t;
+using HBRUSH = void*;
+using COLORREF = uint32_t;
+using UINT = unsigned int;
+using WPARAM = uintptr_t;
+using LPARAM = intptr_t;
+using LRESULT = intptr_t;
+#ifndef CALLBACK
+#define CALLBACK
+#endif
+#ifndef RGB
+#define RGB(r,g,b) ((uint32_t)(((uint8_t)(r)|((uint16_t)((uint8_t)(g))<<8))|(((uint32_t)(uint8_t)(b))<<16)))
+#endif
+#endif
 #include <unordered_map>
 #include <unordered_set>
 #include <functional>

@@ -6,7 +6,13 @@
 #include <vector>
 #include <atomic>
 #include <functional>
+#if defined(_WIN32)
 #include <windows.h>
+#else
+using HWND = void*;
+using HMODULE = void*;
+using UINT_PTR = uintptr_t;
+#endif
 
 namespace praccy::plugins {
 

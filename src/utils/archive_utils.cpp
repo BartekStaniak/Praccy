@@ -4,7 +4,9 @@
 
 #include "archive_utils.h"
 
+#if defined(_WIN32)
 #include <windows.h>
+#endif
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -280,7 +282,11 @@ bool extractZipArchive(const std::filesystem::path& zipPath,
         return false;
     }
 
+#if defined(_WIN32)
     FILE* fp = _wfopen(zipPath.wstring().c_str(), L"rb");
+#else
+    FILE* fp = std::fopen(zipPath.string().c_str(), "rb");
+#endif
     if (!fp) {
         outError = "Failed to open zip archive: " + zipPath.string();
         return false;

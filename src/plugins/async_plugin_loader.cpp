@@ -4,7 +4,9 @@
 #include "builtin_dsp.h"
 #include "../audio/graph_engine.h"
 
+#if defined(_WIN32)
 #include <objbase.h>
+#endif
 #include <iostream>
 #include <algorithm>
 #include <fstream>
@@ -147,8 +149,10 @@ size_t AsyncPluginLoader::pendingTaskCount() const {
 
 void AsyncPluginLoader::workerLoop() {
     // Initialize COM on worker thread for VST3/system interop
+#if defined(_WIN32)
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     (void)hr;
+#endif
 
     while (m_running.load(std::memory_order_relaxed)) {
         AsyncLoadTask task;
@@ -237,7 +241,9 @@ void AsyncPluginLoader::workerLoop() {
         }
     }
 
+#if defined(_WIN32)
     CoUninitialize();
+#endif
 }
 
 void AsyncPluginLoader::update(std::function<void(

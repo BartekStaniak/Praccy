@@ -23,6 +23,7 @@ project(Praccy VERSION ${PRACCY_VER_MAJOR}.${PRACCY_VER_MINOR}.${PRACCY_VER_PATC
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Ensure <pluginterfaces/...> resolves cleanly from third_party/vst3_pluginterfaces
 if(NOT EXISTS "${CMAKE_BINARY_DIR}/vst3_sdk/pluginterfaces")
@@ -37,7 +38,9 @@ include_directories(SYSTEM "${CMAKE_BINARY_DIR}/vst3_sdk")
 
 # Dynamic Sanitizers
 option(PRACCY_ENABLE_ASAN_UBSAN "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+option(PRACCY_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 option(PRACCY_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+option(PRACCY_ENABLE_RTSAN "Enable RealTimeSanitizer" OFF)
 option(PRACCY_SANITIZER "Enable dynamic sanitizer (address, thread, undefined, realtime)" "")
 
 if(PRACCY_ENABLE_ASAN_UBSAN OR PRACCY_SANITIZER STREQUAL "address")
@@ -48,28 +51,30 @@ if(PRACCY_ENABLE_ASAN_UBSAN OR PRACCY_SANITIZER STREQUAL "address")
         add_link_options(-fsanitize=address,undefined)
     endif()
 endif()
+if(PRACCY_ENABLE_UBSAN OR PRACCY_SANITIZER STREQUAL "undefined")
+    if(NOT MSVC)
+        add_compile_options(-fsanitize=undefined -fno-omit-frame-pointer)
+        add_link_options(-fsanitize=undefined)
+    endif()
+endif()
 if(PRACCY_ENABLE_TSAN OR PRACCY_SANITIZER STREQUAL "thread")
     if(NOT MSVC)
         add_compile_options(-fsanitize=thread -fno-omit-frame-pointer)
         add_link_options(-fsanitize=thread)
     endif()
 endif()
-if(PRACCY_SANITIZER STREQUAL "realtime")
+if(PRACCY_ENABLE_RTSAN OR PRACCY_SANITIZER STREQUAL "realtime")
     if(NOT MSVC)
         add_compile_options(-fsanitize=realtime -fno-omit-frame-pointer)
         add_link_options(-fsanitize=realtime)
     endif()
 endif()
 
-if(NOT MSVC)
-    add_compile_options(-Wno-missing-field-initializers)
-endif()
-
 # Strict compiler warning and optimization flags
 if(MSVC)
     set(PRACCY_STRICT_FLAGS /O2 /W4 /permissive-)
 else()
-    set(PRACCY_STRICT_FLAGS -O3 -Wall -Wextra -Wpedantic -Wconversion -Wshadow $<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor> -Wno-unused-parameter -Wno-missing-field-initializers)
+    set(PRACCY_STRICT_FLAGS -O3 -Wall -Wextra -Wpedantic -Wconversion -Wshadow $<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>)
 endif()
 
 # Third-party source files isolated from strict first-party compiler warnings
