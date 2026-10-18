@@ -38,7 +38,7 @@ With **Version 2.7-beta3**, Praccy bridges the gap between practice and professi
 ### ⚡ Non-Blocking Asynchronous Plugin Loading & GUI Initialization
 - **Zero-Block Asynchronous Plugin Loading**: Heavy plugins (e.g. Archetype Gojira X, large convolution reverbs) initialize entirely on a background thread pool without freezing the main UI or stalling the audio engine.
 - **Animated Loading & Opening Slot States**: Live arc-spinner and pulsing focus border while plugins and their heavy GPU interfaces compile and attach in the background.
-- **Asynchronous GUI View Attachment**: `openPluginWindowAsync` returns in `< 1 ms`, isolating Win32 view initialization and Direct2D/OpenGL context creation to the plugin's dedicated host thread, smoothly presenting the window when fully ready.
+- **Asynchronous GUI View Attachment**: `openPluginWindowAsync` returns in `< 1 ms`, isolating VST3 Win32 view initialization to the plugin's dedicated STA host thread and deferring CLAP GUI attachment to the main-thread poll cycle, smoothly presenting the window when ready while guarding against mid-flight window cancellation.
 - **Bit-Exact Dry Audio Pass-Through**: Signal continues uninterrupted during loading and GUI opening with zero buffer dropouts and zero real-time audio thread allocations.
 
 ### 🌐 Universal DAW Interop Matrix (Stage 2)
@@ -60,7 +60,7 @@ Exchange your complete plugin rigs and presets bidirectionally with the leading 
 - **Horizontal Rack Drag-and-Drop**: Reorder pedalboard slots with live ghost previews and atomic SPSC audio-thread swap crossfades.
 - **Global Key & MIDI Map Mode (`Ctrl+K` / `Ctrl+M`)**: Ableton-style click-to-learn hardware mapping, strictly guarded with `!WantTextInput` so search boxes never trigger commands.
 - **Spotlight Command Palette Virtualization**: Search 1,500+ plugins at a locked 144 FPS powered by `ImGuiListClipper`, featuring `All`, `Favorites`, and `Recents` scope pills.
-- **DIN IEC 60268-10 PPM Ballistic Meters**: Multi-segment gradient level meters with exponential decay and audio-reactive cable glow.
+- **Dual-Mode Peak & DIN IEC 60268-10 PPM Ballistic Meters**: Multi-segment gradient level meters supporting both instantaneous Digital Peak (120 ms decay) and DIN IEC 60268-10 Type I PPM (5 ms integration, 20 dB / 1.5 s fallback) ballistics with 1.5 s peak hold and audio-reactive cable glow.
 - **WCAG 2.1 AA Production Themes**: Four hand-crafted color palettes (**Obsidian Studio**, **Cyber / Midnight**, **Nordic Slate**, and **Vintage Console**) with 100% design token purity.
 
 ---
