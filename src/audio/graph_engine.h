@@ -658,8 +658,9 @@ public:
     [[nodiscard]] double sampleRate() const noexcept { return m_sampleRate; }
     [[nodiscard]] uint32_t maxBlockSize() const noexcept { return m_maxBlockSize; }
 
-private:
     void stashForReclamation(std::unique_ptr<AudioNode> node) noexcept;
+
+private:
     void stashChainForReclamation(std::unique_ptr<NodeChain> chain) noexcept;
     void flushStashedReclamations() noexcept;
     void drainCommandQueueIntoActive();

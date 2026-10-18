@@ -1082,7 +1082,7 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
         }
         auto itNodes = kv.find("numNodes");
         size_t count = (itNodes != kv.end()) ? praccy::utils::parseInteger<size_t>(itNodes->second, 0) : 0;
-        count = (std::min)(count, static_cast<size_t>(128));
+        count = (std::min)(count, static_cast<size_t>(1000));
 
         for (size_t n = 0; n < count; ++n) {
             std::string pfx = "node_" + std::to_string(n) + "_";
@@ -1158,11 +1158,9 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
         }
     }
     if (!hasValidPresetSections) {
-        if (m_scenes.empty()) {
-            initializeDefaultScenes();
-            initializeDefaultUserPresets();
-        }
-        return false;
+        initializeDefaultScenes();
+        initializeDefaultUserPresets();
+        return true;
     }
 
     m_scenes.clear();

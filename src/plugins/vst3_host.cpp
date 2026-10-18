@@ -29,6 +29,11 @@ DEF_CLASS_IID (IParamValueQueue)
 
 namespace praccy::plugins {
 
+struct AsyncGuiOpenReq {
+    HWND parentHwnd{nullptr};
+    std::function<void(bool)> callback;
+};
+
 using InitDllProc = bool (PLUGIN_API *)();
 using ExitDllProc = bool (PLUGIN_API *)();
 using GetFactoryProc = Steinberg::IPluginFactory* (PLUGIN_API *)();
@@ -309,7 +314,7 @@ void Vst3PluginInstance::onGuiRestartComponent(Steinberg::int32 flags) noexcept 
     }
 }
 
-std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::string& path) {
+bool Vst3PluginInstance::initHostInternal(const std::string& path) {
     std::filesystem::path p(path);
     std::filesystem::path dllPath = p;
 
@@ -334,7 +339,7 @@ std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::
     HMODULE hLib = LoadLibraryW(dllPath.wstring().c_str());
     if (!hLib) {
         std::cerr << "Failed to LoadLibrary for VST3: " << dllPath.string() << "\n";
-        return nullptr;
+        return false;
     }
 
     auto* initDll = reinterpret_cast<InitDllProc>(reinterpret_cast<void*>(GetProcAddress(hLib, "InitDll")));
@@ -346,14 +351,14 @@ std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::
     if (!getFactory) {
         std::cerr << "GetPluginFactory not found in: " << dllPath.string() << "\n";
         FreeLibrary(hLib);
-        return nullptr;
+        return false;
     }
 
     Steinberg::IPluginFactory* factory = getFactory();
     if (!factory) {
         std::cerr << "GetPluginFactory returned nullptr in: " << dllPath.string() << "\n";
         FreeLibrary(hLib);
-        return nullptr;
+        return false;
     }
 
     // Find Audio Effect Class
@@ -374,72 +379,164 @@ std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::
         std::cerr << "No audio effect class found in: " << dllPath.string() << "\n";
         factory->release();
         FreeLibrary(hLib);
-        return nullptr;
+        return false;
     }
 
-    auto instance = std::make_unique<Vst3PluginInstance>();
-    instance->m_module = hLib;
-    instance->m_factory = factory;
-    instance->m_path = path;
-    instance->m_bundleFileName = std::filesystem::path(path).filename().string();
+    m_module = hLib;
+    m_factory = factory;
+    m_path = path;
+    m_bundleFileName = std::filesystem::path(path).filename().string();
     Steinberg::FUID fuid = Steinberg::FUID::fromTUID(classInfo.cid);
     char guidStr[33] = {0};
     fuid.toString(guidStr);
-    instance->m_classGuid = guidStr;
-    instance->m_name = classInfo.name;
-    instance->m_vendor = "VST3 Plugin";
+    m_classGuid = guidStr;
+    m_name = classInfo.name;
+    m_vendor = "VST3 Plugin";
 
     // Query Vendor from factory info if available
     Steinberg::PFactoryInfo factoryInfo{};
     if (factory->getFactoryInfo(&factoryInfo) == Steinberg::kResultOk) {
         if (factoryInfo.vendor[0] != '\0') {
-            instance->m_vendor = factoryInfo.vendor;
+            m_vendor = factoryInfo.vendor;
         }
     }
 
     // Create Component Instance
-    if (factory->createInstance(classInfo.cid, Steinberg::Vst::IComponent::iid, reinterpret_cast<void**>(&instance->m_component)) != Steinberg::kResultOk || !instance->m_component) {
-        std::cerr << "Failed to create IComponent for: " << instance->m_name << "\n";
-        return nullptr; // ~Vst3PluginInstance releases m_factory and unloads m_module
+    if (factory->createInstance(classInfo.cid, Steinberg::Vst::IComponent::iid, reinterpret_cast<void**>(&m_component)) != Steinberg::kResultOk || !m_component) {
+        std::cerr << "Failed to create IComponent for: " << m_name << "\n";
+        return false;
     }
 
     // Query Audio Processor
-    if (instance->m_component->queryInterface(Steinberg::Vst::IAudioProcessor::iid, reinterpret_cast<void**>(&instance->m_processor)) != Steinberg::kResultOk || !instance->m_processor) {
-        std::cerr << "Failed to query IAudioProcessor for: " << instance->m_name << "\n";
-        return nullptr; // ~Vst3PluginInstance releases m_component, m_factory, and unloads m_module
+    if (m_component->queryInterface(Steinberg::Vst::IAudioProcessor::iid, reinterpret_cast<void**>(&m_processor)) != Steinberg::kResultOk || !m_processor) {
+        std::cerr << "Failed to query IAudioProcessor for: " << m_name << "\n";
+        return false;
     }
 
-    instance->m_component->initialize(nullptr);
+    m_component->initialize(nullptr);
 
-    // Create / Query Edit Controller
+    m_impl->processContext.state = Steinberg::Vst::ProcessContext::kPlaying |
+                                   Steinberg::Vst::ProcessContext::kTempoValid |
+                                   Steinberg::Vst::ProcessContext::kTimeSigValid;
+    m_impl->processContext.sampleRate = m_sampleRate;
+    m_impl->processContext.tempo = 120.0;
+    m_impl->processContext.timeSigNumerator = 4;
+    m_impl->processContext.timeSigDenominator = 4;
+    m_impl->processContext.projectTimeSamples = 0;
+
+    // Initialize controller and cache on host thread
+    ensureControllerInitialized();
+
+    return true;
+}
+
+std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::string& path) {
+    auto instance = std::make_unique<Vst3PluginInstance>();
+    auto loadPromise = std::make_shared<std::promise<bool>>();
+    auto loadFuture = loadPromise->get_future();
+
+    instance->m_hostThread = std::thread([inst = instance.get(), path, p = loadPromise]() {
+        HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        (void)hr;
+        inst->m_hostThreadId.store(GetCurrentThreadId(), std::memory_order_release);
+
+        // Force creation of Win32 message queue for this thread
+        MSG dummyMsg;
+        PeekMessageW(&dummyMsg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
+
+        bool ok = inst->initHostInternal(path);
+        p->set_value(ok);
+        if (!ok) {
+            inst->teardownHostInternal();
+            CoUninitialize();
+            return;
+        }
+
+        // Host thread Win32 message pump for plugin GUI and event dispatch
+        MSG msg;
+        while (GetMessageW(&msg, nullptr, 0, 0)) {
+            if (msg.message == WM_USER + 101) { // OPEN_GUI
+                HWND parent = reinterpret_cast<HWND>(msg.lParam);
+                HANDLE ack = reinterpret_cast<HANDLE>(msg.wParam);
+                inst->openGuiInternal(parent);
+                if (ack) SetEvent(ack);
+            } else if (msg.message == WM_USER + 102) { // CLOSE_GUI
+                HANDLE ack = reinterpret_cast<HANDLE>(msg.wParam);
+                inst->closeGuiInternal();
+                if (ack) SetEvent(ack);
+            } else if (msg.message == WM_USER + 103) { // QUIT
+                inst->closeGuiInternal();
+                PostQuitMessage(0);
+            } else if (msg.message == WM_USER + 104) { // OPEN_GUI_ASYNC
+                auto* req = reinterpret_cast<AsyncGuiOpenReq*>(msg.wParam);
+                if (req) {
+                    bool guiOk = inst->openGuiInternal(req->parentHwnd);
+                    inst->m_asyncGuiResults.try_enqueue({ req->parentHwnd, guiOk, std::move(req->callback) });
+                    delete req;
+                }
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+
+        inst->teardownHostInternal();
+        CoUninitialize();
+    });
+
+    if (!loadFuture.get()) {
+        if (instance->m_hostThread.joinable()) {
+            instance->m_hostThread.join();
+        }
+        return nullptr;
+    }
+
+    return instance;
+}
+
+bool Vst3PluginInstance::ensureControllerInitialized() {
+    if (m_controllerInitialized.load(std::memory_order_acquire)) {
+        return m_controller != nullptr;
+    }
+    std::lock_guard<std::mutex> lock(m_controllerInitMutex);
+    if (m_controllerInitialized.load(std::memory_order_relaxed)) {
+        return m_controller != nullptr;
+    }
+
+    if (!m_component || !m_factory) {
+        m_controllerInitialized.store(true, std::memory_order_release);
+        return false;
+    }
+
+    // Create / Query Edit Controller on calling (message/UI) thread
     Steinberg::TUID controllerCid{};
-    if (instance->m_component->getControllerClassId(controllerCid) == Steinberg::kResultOk) {
-        factory->createInstance(controllerCid, Steinberg::Vst::IEditController::iid, reinterpret_cast<void**>(&instance->m_controller));
+    if (m_component->getControllerClassId(controllerCid) == Steinberg::kResultOk) {
+        m_factory->createInstance(controllerCid, Steinberg::Vst::IEditController::iid, reinterpret_cast<void**>(&m_controller));
     }
-    if (!instance->m_controller) {
-        instance->m_component->queryInterface(Steinberg::Vst::IEditController::iid, reinterpret_cast<void**>(&instance->m_controller));
+    if (!m_controller) {
+        m_component->queryInterface(Steinberg::Vst::IEditController::iid, reinterpret_cast<void**>(&m_controller));
     }
-    if (!instance->m_controller) {
+    if (!m_controller) {
+        const int32_t classCount = m_factory->countClasses();
         for (int32_t i = 0; i < classCount; ++i) {
             Steinberg::PClassInfo cInfo{};
-            if (factory->getClassInfo(i, &cInfo) == Steinberg::kResultOk) {
+            if (m_factory->getClassInfo(i, &cInfo) == Steinberg::kResultOk) {
                 if (std::strcmp(cInfo.category, kVstComponentControllerClass) == 0) {
-                    factory->createInstance(cInfo.cid, Steinberg::Vst::IEditController::iid, reinterpret_cast<void**>(&instance->m_controller));
-                    if (instance->m_controller) break;
+                    m_factory->createInstance(cInfo.cid, Steinberg::Vst::IEditController::iid, reinterpret_cast<void**>(&m_controller));
+                    if (m_controller) break;
                 }
             }
         }
     }
 
-    if (instance->m_controller) {
-        instance->m_controller->initialize(nullptr);
-        instance->m_controller->setComponentHandler(&instance->m_impl->componentHandler);
+    if (m_controller) {
+        m_controller->initialize(nullptr);
+        m_controller->setComponentHandler(&m_impl->componentHandler);
 
         // Connect IConnectionPoint between component and controller
         Steinberg::Vst::IConnectionPoint* cpComp = nullptr;
         Steinberg::Vst::IConnectionPoint* cpCtrl = nullptr;
-        instance->m_component->queryInterface(Steinberg::Vst::IConnectionPoint::iid, reinterpret_cast<void**>(&cpComp));
-        instance->m_controller->queryInterface(Steinberg::Vst::IConnectionPoint::iid, reinterpret_cast<void**>(&cpCtrl));
+        m_component->queryInterface(Steinberg::Vst::IConnectionPoint::iid, reinterpret_cast<void**>(&cpComp));
+        m_controller->queryInterface(Steinberg::Vst::IConnectionPoint::iid, reinterpret_cast<void**>(&cpCtrl));
         if (cpComp && cpCtrl) {
             cpComp->connect(cpCtrl);
             cpCtrl->connect(cpComp);
@@ -448,22 +545,26 @@ std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::
         if (cpCtrl) cpCtrl->release();
 
         // Sync initial state from component to controller
-        instance->m_suppressHandlerCallbacks.store(true, std::memory_order_relaxed);
+        m_suppressHandlerCallbacks.store(true, std::memory_order_relaxed);
         PraccyMemoryStream stateStream;
-        if (instance->m_component->getState(&stateStream) == Steinberg::kResultOk) {
+        if (m_component->getState(&stateStream) == Steinberg::kResultOk) {
             stateStream.seek(0, Steinberg::IBStream::kIBSeekSet, nullptr);
-            instance->m_controller->setComponentState(&stateStream);
+            m_controller->setComponentState(&stateStream);
         }
-        instance->m_suppressHandlerCallbacks.store(false, std::memory_order_relaxed);
+        m_suppressHandlerCallbacks.store(false, std::memory_order_relaxed);
 
         // Populate initial parameter cache and parameter descriptors
-        const int32_t pCount = instance->m_controller->getParameterCount();
-        instance->m_paramDescs.reserve(pCount);
-        instance->m_paramIdToIndex.reserve(pCount);
-        instance->m_paramCache.reserve(pCount);
+        std::lock_guard<std::mutex> paramLock(m_paramCacheMutex);
+        const int32_t pCount = m_controller->getParameterCount();
+        m_paramDescs.clear();
+        m_paramIdToIndex.clear();
+        m_paramCache.clear();
+        m_paramDescs.reserve(pCount);
+        m_paramIdToIndex.reserve(pCount);
+        m_paramCache.reserve(pCount);
         for (int32_t i = 0; i < pCount; ++i) {
             Steinberg::Vst::ParameterInfo info{};
-            if (instance->m_controller->getParameterInfo(i, info) == Steinberg::kResultOk) {
+            if (m_controller->getParameterInfo(i, info) == Steinberg::kResultOk) {
                 PluginParameterDesc desc;
                 desc.id = info.id;
                 char nameBuf[128] = {0};
@@ -474,35 +575,22 @@ std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::
                 desc.minValue = 0.0f;
                 desc.maxValue = 1.0f;
                 desc.defaultValue = static_cast<float>(info.defaultNormalizedValue);
-                float curVal = static_cast<float>(instance->m_controller->getParamNormalized(info.id));
+                float curVal = static_cast<float>(m_controller->getParamNormalized(info.id));
                 desc.currentValue = curVal;
 
-                instance->m_paramIdToIndex[info.id] = instance->m_paramDescs.size();
-                instance->m_paramDescs.push_back(std::move(desc));
-                instance->m_paramCache[info.id] = curVal;
+                m_paramIdToIndex[info.id] = m_paramDescs.size();
+                m_paramDescs.push_back(std::move(desc));
+                m_paramCache[info.id] = curVal;
             }
         }
     }
 
-    instance->m_impl->processContext.state = Steinberg::Vst::ProcessContext::kPlaying |
-                                           Steinberg::Vst::ProcessContext::kTempoValid |
-                                           Steinberg::Vst::ProcessContext::kTimeSigValid;
-    instance->m_impl->processContext.sampleRate = instance->m_sampleRate;
-    instance->m_impl->processContext.tempo = 120.0;
-    instance->m_impl->processContext.timeSigNumerator = 4;
-    instance->m_impl->processContext.timeSigDenominator = 4;
-    instance->m_impl->processContext.projectTimeSamples = 0;
-
-    return instance;
+    m_controllerInitialized.store(true, std::memory_order_release);
+    return m_controller != nullptr;
 }
 
-Vst3PluginInstance::~Vst3PluginInstance() {
-    suspendAndFenceAudio();
-    closeGui();
-    if (m_impl) {
-        m_impl->componentHandler.detachHost();
-        m_impl->plugFrame.detachHost();
-    }
+void Vst3PluginInstance::teardownHostInternal() {
+    closeGuiInternal();
 
     // 1. Disconnect connection points between component and controller
     if (m_component && m_controller) {
@@ -577,6 +665,21 @@ Vst3PluginInstance::~Vst3PluginInstance() {
         if (exitDll) exitDll();
         FreeLibrary(m_module);
         m_module = nullptr;
+    }
+}
+
+Vst3PluginInstance::~Vst3PluginInstance() {
+    suspendAndFenceAudio();
+    if (m_impl) {
+        m_impl->componentHandler.detachHost();
+        m_impl->plugFrame.detachHost();
+    }
+    if (m_hostThread.joinable()) {
+        const DWORD tid = m_hostThreadId.load(std::memory_order_acquire);
+        if (tid != 0) {
+            PostThreadMessageW(tid, WM_USER + 103, 0, 0);
+        }
+        m_hostThread.join();
     }
 }
 
@@ -755,11 +858,13 @@ void Vst3PluginInstance::resetFault() noexcept {
 }
 
 size_t Vst3PluginInstance::numParameters() const noexcept {
+    const_cast<Vst3PluginInstance*>(this)->ensureControllerInitialized();
     std::lock_guard<std::mutex> lock(m_paramCacheMutex);
     return m_paramDescs.size();
 }
 
 PluginParameterDesc Vst3PluginInstance::getParameterDesc(size_t index) const {
+    const_cast<Vst3PluginInstance*>(this)->ensureControllerInitialized();
     std::lock_guard<std::mutex> lock(m_paramCacheMutex);
     if (index < m_paramDescs.size()) {
         PluginParameterDesc desc = m_paramDescs[index];
@@ -818,17 +923,20 @@ void Vst3PluginInstance::setParameterFromAudioThread(uint32_t paramId, float val
 
 float Vst3PluginInstance::getParameterValue(uint32_t paramId) const {
     if (m_faulted.load(std::memory_order_relaxed)) return 0.0f;
+    const_cast<Vst3PluginInstance*>(this)->ensureControllerInitialized();
     std::lock_guard<std::mutex> lock(m_paramCacheMutex);
     auto it = m_paramCache.find(paramId);
     return (it != m_paramCache.end()) ? it->second : 0.0f;
 }
 
 bool Vst3PluginInstance::hasCustomGui() const noexcept {
+    const_cast<Vst3PluginInstance*>(this)->ensureControllerInitialized();
     return m_controller != nullptr;
 }
 
-bool Vst3PluginInstance::openGui(HWND parentHwnd) {
+bool Vst3PluginInstance::openGuiInternal(HWND parentHwnd) {
     if (m_faulted.load(std::memory_order_acquire)) return false;
+    ensureControllerInitialized();
     if (!m_controller || !parentHwnd) return false;
 
     DWORD exCode = 0;
@@ -869,6 +977,65 @@ bool Vst3PluginInstance::openGui(HWND parentHwnd) {
     return m_guiParentHwnd != nullptr;
 }
 
+bool Vst3PluginInstance::openGui(HWND parentHwnd) {
+    if (m_faulted.load(std::memory_order_acquire)) return false;
+    if (!parentHwnd) return false;
+
+    const DWORD tid = m_hostThreadId.load(std::memory_order_acquire);
+    if (tid == 0 || GetCurrentThreadId() == tid) {
+        return openGuiInternal(parentHwnd);
+    }
+
+    HANDLE ack = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    PostThreadMessageW(tid, WM_USER + 101, reinterpret_cast<WPARAM>(ack), reinterpret_cast<LPARAM>(parentHwnd));
+
+    while (true) {
+        DWORD waitRes = MsgWaitForMultipleObjectsEx(1, &ack, 10000, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        if (waitRes == WAIT_OBJECT_0) {
+            break;
+        } else if (waitRes == WAIT_OBJECT_0 + 1) {
+            MSG m;
+            while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
+                TranslateMessage(&m);
+                DispatchMessageW(&m);
+            }
+        } else {
+            break;
+        }
+    }
+    CloseHandle(ack);
+    return m_guiParentHwnd != nullptr;
+}
+
+void Vst3PluginInstance::openGuiAsync(HWND parentHwnd, std::function<void(bool success)> onComplete) {
+    if (m_faulted.load(std::memory_order_acquire) || !parentHwnd) {
+        if (onComplete) onComplete(false);
+        return;
+    }
+
+    const DWORD tid = m_hostThreadId.load(std::memory_order_acquire);
+    if (tid == 0 || GetCurrentThreadId() == tid) {
+        bool ok = openGuiInternal(parentHwnd);
+        if (onComplete) onComplete(ok);
+        return;
+    }
+
+    auto* req = new AsyncGuiOpenReq{ parentHwnd, std::move(onComplete) };
+    if (!PostThreadMessageW(tid, WM_USER + 104, reinterpret_cast<WPARAM>(req), 0)) {
+        delete req;
+        if (onComplete) onComplete(false);
+    }
+}
+
+void Vst3PluginInstance::pollAsyncGuiResults() {
+    AsyncGuiOpenResult res;
+    while (m_asyncGuiResults.try_dequeue(res)) {
+        if (res.callback) {
+            res.callback(res.success);
+        }
+    }
+}
+
 void Vst3PluginInstance::getPreferredSize(int& width, int& height) const {
     if (m_preferredWidth > 0 && m_preferredHeight > 0) {
         width = m_preferredWidth;
@@ -904,7 +1071,7 @@ void Vst3PluginInstance::onGuiResize(int width, int height) {
     }
 }
 
-void Vst3PluginInstance::closeGui() {
+void Vst3PluginInstance::closeGuiInternal() {
     if (m_plugView) {
         safeCallPluginGui([&]() {
             m_plugView->removed();
@@ -917,6 +1084,33 @@ void Vst3PluginInstance::closeGui() {
             m_impl->plugFrame.detachHost();
         }
     }
+}
+
+void Vst3PluginInstance::closeGui() {
+    const DWORD tid = m_hostThreadId.load(std::memory_order_acquire);
+    if (tid == 0 || GetCurrentThreadId() == tid) {
+        closeGuiInternal();
+        return;
+    }
+
+    HANDLE ack = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    PostThreadMessageW(tid, WM_USER + 102, reinterpret_cast<WPARAM>(ack), 0);
+
+    while (true) {
+        DWORD waitRes = MsgWaitForMultipleObjectsEx(1, &ack, 5000, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        if (waitRes == WAIT_OBJECT_0) {
+            break;
+        } else if (waitRes == WAIT_OBJECT_0 + 1) {
+            MSG m;
+            while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
+                TranslateMessage(&m);
+                DispatchMessageW(&m);
+            }
+        } else {
+            break;
+        }
+    }
+    CloseHandle(ack);
 }
 
 std::vector<uint8_t> Vst3PluginInstance::saveState() const {

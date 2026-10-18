@@ -7,6 +7,8 @@
 #include <objbase.h>
 #include <iostream>
 #include <algorithm>
+#include <fstream>
+#include <filesystem>
 
 namespace praccy::plugins {
 
@@ -118,6 +120,10 @@ void AsyncPluginLoader::cancelAll() {
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
         m_taskQueue.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_resultMutex);
+        m_completedResults.clear();
     }
     {
         std::lock_guard<std::mutex> lock(m_cancelMutex);
@@ -266,6 +272,10 @@ void AsyncPluginLoader::update(std::function<void(
         }
 
         if (res.success && res.instance && res.targetSlot) {
+            auto* vst3 = dynamic_cast<Vst3PluginInstance*>(res.instance.get());
+            if (vst3) {
+                vst3->ensureControllerInitialized();
+            }
             if (onSlotReady) {
                 onSlotReady(res.targetSlot, std::move(res.instance), res.openGuiWhenDone);
             }

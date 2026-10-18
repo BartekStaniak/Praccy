@@ -357,6 +357,8 @@ void RackView::render() {
         applyAudioSettings(m_asio.currentSampleRate(), static_cast<uint32_t>(m_asio.currentBufferSize()));
     }
 
+    plugins::PluginWindowManager::instance().update();
+
     if (m_config.enableLiveThumbnails && m_thumbnailMgr) {
         m_thumbnailMgr->update();
     }
@@ -366,21 +368,29 @@ void RackView::render() {
         std::unique_ptr<audio::AudioNode> oldNode;
         plugins::IPluginInstance* instPtr = inst.get();
         std::string name = inst->name();
-        slot->replaceInnerNode(std::move(inst), oldNode);
+
+        m_graph.executeWithAudioFence([&]() {
+            slot->replaceInnerNode(std::move(inst), oldNode);
+        });
+        if (oldNode) {
+            m_graph.stashForReclamation(std::move(oldNode));
+        }
 
         // Reinitialize macros for newly available parameters
         initMacrosForSlot(slot);
 
         triggerHudToast("LOADED: " + name);
 
-        // Option 2.A: Automatically open GUI window if requested
         if (openGuiWhenDone && instPtr->hasCustomGui()) {
             refreshGuiParamBaseline(slot);
-            plugins::PluginWindowManager::instance().openPluginWindow(instPtr);
-            HWND hWin = plugins::PluginWindowManager::instance().getWindow(instPtr);
-            if (hWin && m_config.enableLiveThumbnails && m_thumbnailMgr) {
-                m_thumbnailMgr->captureWindowAsync(name, hWin, 30);
-            }
+            plugins::PluginWindowManager::instance().openPluginWindowAsync(instPtr, [this, name, instPtr](bool success) {
+                if (success) {
+                    HWND hWin = plugins::PluginWindowManager::instance().getWindow(instPtr);
+                    if (hWin && m_config.enableLiveThumbnails && m_thumbnailMgr) {
+                        m_thumbnailMgr->captureWindowAsync(name, hWin, 30);
+                    }
+                }
+            });
         }
     });
 
@@ -407,17 +417,18 @@ void RackView::render() {
     const auto& mainTokens = themeTokens();
     ImGui::PushStyleColor(ImGuiCol_WindowBg, mainTokens.surfaces.windowBg.vec4);
     ImGui::PushStyleColor(ImGuiCol_Border, mainTokens.borders.subtle.vec4);
+    const float kWindowPad = ui::px(12.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 12.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(kWindowPad, kWindowPad));
     if (ImGui::Begin("PraccyMainWindow", nullptr, windowFlags)) {
         renderPracticeRibbon();
-        ImGui::Spacing();
+        ImGui::Dummy(ImVec2(0.0f, ui::px(2.0f)));
         ImGui::Separator();
-        ImGui::Spacing();
+        ImGui::Dummy(ImVec2(0.0f, ui::px(2.0f)));
         renderSceneBar();
-        ImGui::Spacing();
+        ImGui::Dummy(ImVec2(0.0f, ui::px(2.0f)));
         ImGui::Separator();
-        ImGui::Spacing();
+        ImGui::Dummy(ImVec2(0.0f, ui::px(2.0f)));
         renderSignalRack();
         renderBottomBar();
 
@@ -715,8 +726,10 @@ bool RackView::renderStatusPill(bool isRunning, const char* statusText) {
 void RackView::renderPracticeRibbon() {
     const auto& tokens = themeTokens();
     const float btnH = Metrics::buttonHeight();
-    const float modH = ui::px(98.0f);
-    const float kRow2Y = 6.0f + btnH + 8.0f;
+    const float kRowGap = ui::px(6.0f);
+    const float kPadY = 6.0f;
+    const float kRow2Y = kPadY + btnH + kRowGap;
+    const float modH = kRow2Y + btnH + kPadY;
 
     ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(4.0f, 0.0f));
 
@@ -731,7 +744,7 @@ void RackView::renderPracticeRibbon() {
         ImGui::PushStyleColor(ImGuiCol_Border, tokens.borders.card.vec4);
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 6.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, kPadY));
 
         // ----------------------------------------------------
         // Column 1: Strobe Tuner Module
@@ -755,7 +768,7 @@ void RackView::renderPracticeRibbon() {
         ImGui::BeginChild("Mod_Metro", ImVec2(0, modH), true, ImGuiWindowFlags_NoScrollbar);
         {
             const float fontH = ImGui::GetFontSize();
-            ImGui::SetCursorPos(ImVec2(ImGui::GetStyle().WindowPadding.x, 6.0f + (btnH - fontH) * 0.5f));
+            ImGui::SetCursorPos(ImVec2(ImGui::GetStyle().WindowPadding.x, kPadY + (btnH - fontH) * 0.5f));
             ImGui::TextColored(tokens.text.muted.vec4, "METRONOME");
             ImGui::SameLine(0, 8);
             bool metroPlaying = m_metronome.isPlaying();
@@ -796,7 +809,7 @@ void RackView::renderPracticeRibbon() {
             const float rightEdge = ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x;
             const float comboStartX = rightEdge - sigW;
 
-            ImGui::SetCursorPos(ImVec2(comboStartX, 6.0f));
+            ImGui::SetCursorPos(ImVec2(comboStartX, kPadY));
 
             auto now = std::chrono::steady_clock::now();
             bool tapFlash = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastTapFlash).count() < 120;
@@ -918,7 +931,7 @@ void RackView::renderPracticeRibbon() {
             const float btnW = btnH; // Standard square button matching power/options
             const float rightEdge = ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x;
             const float powerBtnX = rightEdge - btnW;
-            const float powerBtnY = 6.0f;
+            const float powerBtnY = kPadY;
 
             ImGui::SetCursorPos(ImVec2(ImGui::GetStyle().WindowPadding.x, powerBtnY + (btnH - ImGui::GetFontSize()) * 0.5f));
             ImGui::TextColored(tokens.text.muted.vec4, "NOISE GATE");
@@ -966,7 +979,7 @@ void RackView::renderPracticeRibbon() {
         {
             float masterVol = m_graph.masterVolumeDb();
 
-            ImGui::SetCursorPos(ImVec2(ImGui::GetStyle().WindowPadding.x, 6.0f + (btnH - ImGui::GetFontSize()) * 0.5f));
+            ImGui::SetCursorPos(ImVec2(ImGui::GetStyle().WindowPadding.x, kPadY + (btnH - ImGui::GetFontSize()) * 0.5f));
             ImGui::TextColored(tokens.text.primary.vec4, "MASTER OUTPUT");
 
             char valStr[32];
@@ -974,7 +987,7 @@ void RackView::renderPracticeRibbon() {
             float valTextW = ImGui::CalcTextSize(valStr).x;
             const float rightEdge = ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x;
             if (rightEdge - valTextW > ImGui::GetStyle().WindowPadding.x + ImGui::CalcTextSize("MASTER OUTPUT").x + 8.0f) {
-                ImGui::SetCursorPos(ImVec2(rightEdge - valTextW, 6.0f + (btnH - ImGui::GetFontSize()) * 0.5f));
+                ImGui::SetCursorPos(ImVec2(rightEdge - valTextW, kPadY + (btnH - ImGui::GetFontSize()) * 0.5f));
                 ImGui::TextColored(tokens.text.primary.vec4, "%s", valStr);
             }
 
@@ -1536,7 +1549,7 @@ void RackView::renderSignalRack() {
     m_graph.processReclamation();
 
     const auto& tokens = themeTokens();
-    const float bottomBarReservedH = 54.0f;
+    const float bottomBarReservedH = Metrics::buttonHeight() + ui::px(10.0f);
     ImGui::PushStyleColor(ImGuiCol_ChildBg, tokens.surfaces.panelBg.vec4);
     ImGui::PushStyleColor(ImGuiCol_Border, tokens.borders.subtle.vec4);
     ImGui::BeginChild("RackScrollArea", ImVec2(0, -bottomBarReservedH), true, ImGuiWindowFlags_HorizontalScrollbar);
@@ -1871,6 +1884,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
     const bool isFaulted = pluginInst && pluginInst->isFaulted();
     const bool isMissing = slot->innerNode() && slot->innerNode()->isMissing();
     const bool isLoading = slot->innerNode() && slot->innerNode()->isLoading();
+    const bool isOpeningGui = pluginInst && plugins::PluginWindowManager::instance().isWindowOpening(pluginInst);
     const bool bypassed = slot->isBypassed();
 
     ImVec4 cardBg = (isFaulted || isMissing) ? static_cast<ImVec4>(tokens.surfaces.cardBgFaulted) :
@@ -1905,6 +1919,9 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         ImU32 badgeTextCol = tokens.text.badgeInternal;
         if (isLoading) {
             badgeStr = "LOADING";
+            badgeTextCol = tokens.signal.active.u32;
+        } else if (isOpeningGui) {
+            badgeStr = "OPENING";
             badgeTextCol = tokens.signal.active.u32;
         } else if (isMissing) {
             badgeStr = "MISSING";
@@ -2167,66 +2184,129 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         }
 
         // Preview rendering:
-        if (isLoading) {
+        if (isLoading || isOpeningGui) {
+            dl->PushClipRect(previewPos, ImVec2(previewPos.x + previewW, previewPos.y + previewH), true);
+
             const float t = static_cast<float>(ImGui::GetTime());
             const float pulse = 0.55f + 0.45f * std::sin(5.0f * t);
 
-            // Animated subtle loading arc spinner
-            const float centerX = previewPos.x + previewW * 0.5f;
-            const float centerY = previewPos.y + previewH * 0.35f;
-            const float radius = ui::px(10.0f);
+            ImFont* font = g_fontUI ? g_fontUI : ImGui::GetFont();
+            const char* loadTitle = isOpeningGui ? "OPENING GUI..." : "LOADING PLUGIN...";
+            const char* loadSub = isOpeningGui ? "Initializing interface..." : "Dry Pass-Through Active";
 
+            float titleFontSize = ui::px(12.0f);
+            float subFontSize = ui::px(10.5f);
+
+            const float padX = ui::px(8.0f);
+            const float maxAvailW = std::max(40.0f, previewW - padX * 2.0f);
+
+            // Ensure subtitle fits within card preview width with safety margin
+            ImVec2 sSz = font->CalcTextSizeA(subFontSize, FLT_MAX, -1.0f, loadSub);
+            if (sSz.x > maxAvailW && sSz.x > 0.0f) {
+                subFontSize = std::max(ui::px(8.0f), subFontSize * (maxAvailW / sSz.x));
+                sSz = font->CalcTextSizeA(subFontSize, FLT_MAX, -1.0f, loadSub);
+            }
+
+            const float spinRadius = ui::px(6.0f);
+            const float spinGap = ui::px(5.0f);
+
+            ImVec2 tSz = font->CalcTextSizeA(titleFontSize, FLT_MAX, -1.0f, loadTitle);
+            const float row1W = spinRadius * 2.0f + spinGap + tSz.x;
+            if (row1W > maxAvailW && tSz.x > 0.0f) {
+                titleFontSize = std::max(ui::px(8.5f), titleFontSize * ((maxAvailW - spinRadius * 2.0f - spinGap) / tSz.x));
+                tSz = font->CalcTextSizeA(titleFontSize, FLT_MAX, -1.0f, loadTitle);
+            }
+
+            const float row1H = std::max(spinRadius * 2.0f, titleFontSize);
+            const float rowGap = ui::px(4.0f);
+            const float row2H = subFontSize;
+            const float totalH = row1H + rowGap + row2H;
+
+            const float startY = previewPos.y + (previewH - totalH) * 0.5f;
+            const float row1Y = startY;
+            const float row2Y = startY + row1H + rowGap;
+
+            const float finalRow1W = spinRadius * 2.0f + spinGap + tSz.x;
+            const float row1StartX = previewPos.x + std::max(padX, (previewW - finalRow1W) * 0.5f);
+            const float spinnerCenterX = row1StartX + spinRadius;
+            const float spinnerCenterY = row1Y + row1H * 0.5f;
+
+            // Animated subtle loading arc spinner
             const int numSegments = 16;
             const float startAngle = t * 6.0f;
             const float arcLength = 4.71239f; // 270 degrees
             dl->PathClear();
             for (int i = 0; i <= numSegments; ++i) {
                 float a = startAngle + (static_cast<float>(i) / static_cast<float>(numSegments)) * arcLength;
-                dl->PathLineTo(ImVec2(centerX + std::cos(a) * radius, centerY + std::sin(a) * radius));
+                dl->PathLineTo(ImVec2(spinnerCenterX + std::cos(a) * spinRadius, spinnerCenterY + std::sin(a) * spinRadius));
             }
-            dl->PathStroke(tokens.borders.focus.withAlpha(pulse), 0, 2.0f);
+            dl->PathStroke(tokens.borders.focus.withAlpha(pulse), 0, ui::px(1.8f));
 
-            const char* loadTitle = "LOADING PLUGIN...";
-            ImVec2 tSz = ImGui::CalcTextSize(loadTitle);
-            dl->AddText(ImVec2(previewPos.x + (previewW - tSz.x) * 0.5f, previewPos.y + previewH - ui::px(24.0f)),
-                        tokens.signal.active, loadTitle);
+            // Row 1: Title next to spinner
+            const float titleX = row1StartX + spinRadius * 2.0f + spinGap;
+            const float titleY = row1Y + (row1H - titleFontSize) * 0.5f;
+            dl->AddText(font, titleFontSize, ImVec2(titleX, titleY), tokens.signal.active, loadTitle);
 
-            const char* loadSub = "Dry signal pass-through active";
-            ImVec2 sSz = ImGui::CalcTextSize(loadSub);
-            dl->AddText(ImVec2(previewPos.x + (previewW - sSz.x) * 0.5f, previewPos.y + previewH - ui::px(11.0f)),
-                        tokens.text.secondary, loadSub);
+            // Row 2: Subtitle centered
+            const float subX = previewPos.x + std::max(padX, (previewW - sSz.x) * 0.5f);
+            const float subY = row2Y + (row2H - subFontSize) * 0.5f;
+            dl->AddText(font, subFontSize, ImVec2(subX, subY), tokens.text.secondary, loadSub);
+
+            dl->PopClipRect();
         } else if (isMissing) {
+            ImFont* font = g_fontUI ? g_fontUI : ImGui::GetFont();
             const char* missTitle = "MISSING PLUGIN";
-            ImVec2 tSz = ImGui::CalcTextSize(missTitle);
-            dl->AddText(ImVec2(previewPos.x + (previewW - tSz.x) * 0.5f, previewPos.y + 4.0f),
+            float titleFontSize = ui::px(12.0f);
+            ImVec2 tSz = font->CalcTextSizeA(titleFontSize, FLT_MAX, -1.0f, missTitle);
+            dl->AddText(font, titleFontSize, ImVec2(previewPos.x + (previewW - tSz.x) * 0.5f, previewPos.y + ui::px(4.0f)),
                         tokens.signal.faulted, missTitle);
 
             const char* missSub = "Dry signal pass-through active";
-            ImVec2 sSz = ImGui::CalcTextSize(missSub);
-            dl->AddText(ImVec2(previewPos.x + (previewW - sSz.x) * 0.5f, previewPos.y + 18.0f),
+            float subFontSize = ui::px(10.5f);
+            const float padX = ui::px(8.0f);
+            const float maxAvailW = previewW - padX * 2.0f;
+            ImVec2 sSz = font->CalcTextSizeA(subFontSize, FLT_MAX, -1.0f, missSub);
+            if (sSz.x > maxAvailW && sSz.x > 0.0f) {
+                subFontSize *= (maxAvailW / sSz.x);
+                sSz = font->CalcTextSizeA(subFontSize, FLT_MAX, -1.0f, missSub);
+            }
+            dl->AddText(font, subFontSize, ImVec2(previewPos.x + (previewW - sSz.x) * 0.5f, previewPos.y + ui::px(18.0f)),
                         tokens.text.secondary, missSub);
 
-            ImGui::SetCursorScreenPos(ImVec2(previewPos.x + (previewW - 140.0f) * 0.5f, previewPos.y + previewH - 23.0f));
+            const float btnW = ui::px(140.0f);
+            const float btnH = ui::px(18.0f);
+            ImGui::SetCursorScreenPos(ImVec2(previewPos.x + (previewW - btnW) * 0.5f, previewPos.y + previewH - btnH - ui::px(4.0f)));
             char replaceBtnId[48];
             std::snprintf(replaceBtnId, sizeof(replaceBtnId), "FIND REPLACEMENT##%d_%d_%d", slotIndex, blockIndex, branchIndex);
-            if (ImGui::Button(replaceBtnId, ImVec2(140.0f, 18.0f))) {
+            if (ImGui::Button(replaceBtnId, ImVec2(btnW, btnH))) {
                 m_pluginBrowserModal->open(blockIndex, branchIndex);
             }
         } else if (isFaulted) {
+            ImFont* font = g_fontUI ? g_fontUI : ImGui::GetFont();
             const char* crashTitle = "PLUGIN CRASH ISOLATED";
-            ImVec2 tSz = ImGui::CalcTextSize(crashTitle);
-            dl->AddText(ImVec2(previewPos.x + (previewW - tSz.x) * 0.5f, previewPos.y + 4.0f),
+            float titleFontSize = ui::px(11.5f);
+            ImVec2 tSz = font->CalcTextSizeA(titleFontSize, FLT_MAX, -1.0f, crashTitle);
+            dl->AddText(font, titleFontSize, ImVec2(previewPos.x + (previewW - tSz.x) * 0.5f, previewPos.y + ui::px(4.0f)),
                         tokens.signal.faulted, crashTitle);
 
             const char* crashSub = "Dry signal pass-through active";
-            ImVec2 sSz = ImGui::CalcTextSize(crashSub);
-            dl->AddText(ImVec2(previewPos.x + (previewW - sSz.x) * 0.5f, previewPos.y + 18.0f),
+            float subFontSize = ui::px(10.5f);
+            const float padX = ui::px(8.0f);
+            const float maxAvailW = previewW - padX * 2.0f;
+            ImVec2 sSz = font->CalcTextSizeA(subFontSize, FLT_MAX, -1.0f, crashSub);
+            if (sSz.x > maxAvailW && sSz.x > 0.0f) {
+                subFontSize *= (maxAvailW / sSz.x);
+                sSz = font->CalcTextSizeA(subFontSize, FLT_MAX, -1.0f, crashSub);
+            }
+            dl->AddText(font, subFontSize, ImVec2(previewPos.x + (previewW - sSz.x) * 0.5f, previewPos.y + ui::px(18.0f)),
                         tokens.text.secondary, crashSub);
 
-            ImGui::SetCursorScreenPos(ImVec2(previewPos.x + (previewW - 130.0f) * 0.5f, previewPos.y + previewH - 23.0f));
+            const float btnW = ui::px(130.0f);
+            const float btnH = ui::px(18.0f);
+            ImGui::SetCursorScreenPos(ImVec2(previewPos.x + (previewW - btnW) * 0.5f, previewPos.y + previewH - btnH - ui::px(4.0f)));
             char reloadBtnId[48];
             std::snprintf(reloadBtnId, sizeof(reloadBtnId), "RELOAD PLUGIN##%d_%d_%d", slotIndex, blockIndex, branchIndex);
-            if (ImGui::Button(reloadBtnId, ImVec2(130.0f, 18.0f))) {
+            if (ImGui::Button(reloadBtnId, ImVec2(btnW, btnH))) {
                 m_graph.executeWithAudioFence([&]() {
                     pluginInst->resetFault();
                     slot->reset();
@@ -2253,7 +2333,7 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         }
 
         // Crisp inner border stroke
-        ImU32 frameBorder = isLoading ? static_cast<ImU32>(tokens.borders.focus.withAlpha(0.6f + 0.4f * std::sin(6.0f * static_cast<float>(ImGui::GetTime())))) :
+        ImU32 frameBorder = (isLoading || isOpeningGui) ? static_cast<ImU32>(tokens.borders.focus.withAlpha(0.6f + 0.4f * std::sin(6.0f * static_cast<float>(ImGui::GetTime())))) :
                             ((isFaulted || isMissing) ? static_cast<ImU32>(tokens.borders.cardFaulted) :
                             (isWindowOpen ? static_cast<ImU32>(tokens.borders.cardGlowOpen) :
                             (isPreviewHovered ? static_cast<ImU32>(tokens.borders.cardHovered) :
@@ -2263,6 +2343,8 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         if (previewClicked && !isFaulted && !isMissing) {
             if (isLoading) {
                 triggerHudToast("LOADING IN BACKGROUND... WILL ACTIVATE SHORTLY");
+            } else if (isOpeningGui) {
+                triggerHudToast("OPENING GUI IN BACKGROUND... PLEASE WAIT");
             } else {
                 m_focusedSlot = slot;
                 m_focusedSlotIndex = slotIndex;
@@ -2270,11 +2352,14 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
                 m_focusedBranchIndex = branchIndex;
                 if (hasGui) {
                     refreshGuiParamBaseline(slot);
-                    plugins::PluginWindowManager::instance().openPluginWindow(pluginInst);
-                    HWND hWin = plugins::PluginWindowManager::instance().getWindow(pluginInst);
-                    if (hWin && m_config.enableLiveThumbnails && m_thumbnailMgr) {
-                        m_thumbnailMgr->captureWindowAsync(slot->name(), hWin, 30);
-                    }
+                    plugins::PluginWindowManager::instance().openPluginWindowAsync(pluginInst, [this, slot, pluginInst](bool success) {
+                        if (success) {
+                            HWND hWin = plugins::PluginWindowManager::instance().getWindow(pluginInst);
+                            if (hWin && m_config.enableLiveThumbnails && m_thumbnailMgr) {
+                                m_thumbnailMgr->captureWindowAsync(slot->name(), hWin, 30);
+                            }
+                        }
+                    });
                 } else {
                     m_dspTweakSlot = (m_dspTweakSlot == slot) ? nullptr : slot;
                 }
@@ -2673,11 +2758,14 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         if (hasGui) {
             if (ImGui::MenuItem("Open Plugin GUI Window")) {
                 refreshGuiParamBaseline(slot);
-                plugins::PluginWindowManager::instance().openPluginWindow(pluginInst);
-                HWND hWin = plugins::PluginWindowManager::instance().getWindow(pluginInst);
-                if (hWin && m_config.enableLiveThumbnails && m_thumbnailMgr) {
-                    m_thumbnailMgr->captureWindowAsync(slot->name(), hWin, 30);
-                }
+                plugins::PluginWindowManager::instance().openPluginWindowAsync(pluginInst, [this, slot, pluginInst](bool success) {
+                    if (success) {
+                        HWND hWin = plugins::PluginWindowManager::instance().getWindow(pluginInst);
+                        if (hWin && m_config.enableLiveThumbnails && m_thumbnailMgr) {
+                            m_thumbnailMgr->captureWindowAsync(slot->name(), hWin, 30);
+                        }
+                    }
+                });
             }
             HWND hWin = plugins::PluginWindowManager::instance().getWindow(pluginInst);
             if (hWin && ImGui::MenuItem("Capture GUI Preview Screenshot")) {
@@ -2743,7 +2831,13 @@ void RackView::renderPluginSlot(audio::PluginSlot* slot, int slotIndex, int bloc
         m_focusedBranchIndex = branchIndex;
     }
 
-    if (m_focusedSlot == slot) {
+    if (isOpeningGui) {
+        ImDrawList* fgDl = ImGui::GetWindowDrawList();
+        const float t = static_cast<float>(ImGui::GetTime());
+        const float pulse = 0.6f + 0.4f * std::sin(6.0f * t);
+        fgDl->AddRect(cardScreenMin, ImVec2(cardScreenMin.x + cardWidth, cardScreenMin.y + cardHeight),
+                      tokens.borders.focus.withAlpha(pulse).u32, 6.0f, 0, 2.0f);
+    } else if (m_focusedSlot == slot) {
         ImDrawList* fgDl = ImGui::GetWindowDrawList();
         fgDl->AddRect(cardScreenMin, ImVec2(cardScreenMin.x + cardWidth, cardScreenMin.y + cardHeight),
                       tokens.borders.focus.u32, 6.0f, 0, 2.0f);
@@ -3456,6 +3550,7 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
 }
 
 void RackView::renderBottomBar() {
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, ui::px(3.0f)));
     ImGui::Separator();
     const auto& tokens = themeTokens();
 
@@ -3601,7 +3696,7 @@ void RackView::renderBottomBar() {
             {ImGuiCol_Button, isLegendVisible ? tokens.text.accent.vec4 : tokens.surfaces.buttonBg.vec4},
             {ImGuiCol_Border, isLegendVisible ? tokens.borders.focus.vec4 : tokens.borders.subtle.vec4}
         });
-        if (CenteredButton("##HotkeyLegendToggleBtn", ImVec2(hotkeyBtnW, Metrics::kButtonHeight))) {
+        if (CenteredButton("##HotkeyLegendToggleBtn", ImVec2(hotkeyBtnW, Metrics::buttonHeight()))) {
             m_showHotkeyLegend = !m_showHotkeyLegend;
         }
 
@@ -3627,6 +3722,7 @@ void RackView::renderBottomBar() {
 
     ImGui::SameLine(0, spacingBetween);
     renderStatusPill(m_asio.isRunning(), statusText);
+    ImGui::PopStyleVar(); // ItemSpacing
 }
 
 void RackView::renderMeter(const char* label, float level, float width, float height) {

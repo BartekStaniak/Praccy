@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include <functional>
 #include <windows.h>
 
 namespace praccy::plugins {
@@ -41,6 +42,11 @@ public:
 
     [[nodiscard]] virtual bool hasCustomGui() const noexcept = 0;
     virtual bool openGui(HWND parentHwnd) = 0;
+    virtual void openGuiAsync(HWND parentHwnd, std::function<void(bool success)> onComplete) {
+        bool ok = openGui(parentHwnd);
+        if (onComplete) onComplete(ok);
+    }
+    virtual void pollAsyncGuiResults() {}
     virtual void closeGui() = 0;
     virtual void getPreferredSize(int& width, int& height) const {
         width = 850;

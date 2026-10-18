@@ -1,6 +1,8 @@
 #include "plugin_window.h"
 #include <dwmapi.h>
 #include <iostream>
+#include <chrono>
+#include <thread>
 
 namespace praccy::plugins {
 
@@ -42,13 +44,44 @@ PluginWindowManager::~PluginWindowManager() {
     }
 }
 
+bool PluginWindowManager::isWindowOpening(IPluginInstance* plugin) const {
+    if (!plugin) return false;
+    return m_openingPlugins.find(plugin) != m_openingPlugins.end();
+}
+
 bool PluginWindowManager::openPluginWindow(IPluginInstance* plugin) {
     if (!plugin) return false;
+    if (isWindowOpen(plugin)) {
+        return openPluginWindowAsync(plugin, nullptr);
+    }
+    bool finished = false;
+    bool result = false;
+    if (!openPluginWindowAsync(plugin, [&](bool success) {
+        finished = true;
+        result = success;
+    })) {
+        return false;
+    }
+    auto start = std::chrono::steady_clock::now();
+    while (!finished) {
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        update();
+        if (finished) break;
+        if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count() > 10) {
+            std::cerr << "Timeout waiting for openPluginWindow: " << plugin->name() << "\n";
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return result;
+}
 
-    // Determine initial preferred size from plugin
-    int prefW = 850;
-    int prefH = 600;
-    plugin->getPreferredSize(prefW, prefH);
+bool PluginWindowManager::openPluginWindowAsync(IPluginInstance* plugin, std::function<void(bool success)> onComplete) {
+    if (!plugin) return false;
 
     // If window already open, bring to front, restore without forcing global HWND_TOPMOST
     auto it = m_openWindows.find(plugin);
@@ -58,8 +91,19 @@ bool PluginWindowManager::openPluginWindow(IPluginInstance* plugin) {
         SetWindowPos(existingHwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
         BringWindowToTop(existingHwnd);
         SetForegroundWindow(existingHwnd);
+        if (onComplete) onComplete(true);
         return true;
     }
+
+    // If already opening in background, avoid duplicate requests
+    if (isWindowOpening(plugin)) {
+        return true;
+    }
+
+    // Determine initial preferred size from plugin
+    int prefW = 850;
+    int prefH = 600;
+    plugin->getPreferredSize(prefW, prefH);
 
     std::wstring wTitle;
     const std::string& pName = plugin->name();
@@ -87,6 +131,7 @@ bool PluginWindowManager::openPluginWindow(IPluginInstance* plugin) {
     int posX = std::max(0, (screenW - winW) / 2);
     int posY = std::max(0, (screenH - winH) / 2);
 
+    // Create window initially hidden so no empty frame flickers while attaching GUI
     HWND hwnd = CreateWindowExW(
         exStyle,
         reinterpret_cast<LPCWSTR>(m_windowClassAtom),
@@ -109,57 +154,97 @@ bool PluginWindowManager::openPluginWindow(IPluginInstance* plugin) {
 
     if (!hwnd) {
         std::cerr << "Failed to create Win32 window for plugin: " << plugin->name() << "\n";
+        if (onComplete) onComplete(false);
         return false;
     }
 
     SetPropW(hwnd, L"PluginInstance", reinterpret_cast<HANDLE>(plugin));
 
-    if (!plugin->openGui(hwnd)) {
-        std::cerr << "plugin->openGui returned false for: " << plugin->name() << "\n";
-        DestroyWindow(hwnd);
-        return false;
-    }
+    m_openingPlugins.insert(plugin);
+    m_pendingWindows[plugin] = hwnd;
 
-    // Check if plugin size changed after attaching GUI
-    int actualW = prefW;
-    int actualH = prefH;
-    plugin->getPreferredSize(actualW, actualH);
-    if (actualW != prefW || actualH != prefH) {
+    plugin->openGuiAsync(hwnd, [this, plugin, hwnd, onComplete = std::move(onComplete)](bool success) {
+        m_openingPlugins.erase(plugin);
+        m_pendingWindows.erase(plugin);
+
+        if (!success) {
+            std::cerr << "plugin->openGuiAsync returned false for: " << plugin->name() << "\n";
+            DestroyWindow(hwnd);
+            if (onComplete) onComplete(false);
+            return;
+        }
+
+        // Check if plugin size changed after attaching GUI
+        int actualW = 850;
+        int actualH = 600;
+        plugin->getPreferredSize(actualW, actualH);
+        DWORD actStyle = WS_OVERLAPPEDWINDOW;
+        DWORD actExStyle = m_mainHwnd ? WS_EX_APPWINDOW : (WS_EX_APPWINDOW | WS_EX_TOPMOST);
         RECT actualWr = {0, 0, actualW, actualH};
-        AdjustWindowRectEx(&actualWr, style, FALSE, exStyle);
-        winW = actualWr.right - actualWr.left;
-        winH = actualWr.bottom - actualWr.top;
-        posX = std::max(0, (screenW - winW) / 2);
-        posY = std::max(0, (screenH - winH) / 2);
-    }
+        AdjustWindowRectEx(&actualWr, actStyle, FALSE, actExStyle);
+        int actWinW = actualWr.right - actualWr.left;
+        int actWinH = actualWr.bottom - actualWr.top;
+        int scrW = GetSystemMetrics(SM_CXSCREEN);
+        int scrH = GetSystemMetrics(SM_CYSCREEN);
+        int actPosX = std::max(0, (scrW - actWinW) / 2);
+        int actPosY = std::max(0, (scrH - actWinH) / 2);
 
-    m_openWindows[plugin] = hwnd;
-    m_windowToPlugin[hwnd] = plugin;
+        m_openWindows[plugin] = hwnd;
+        m_windowToPlugin[hwnd] = plugin;
 
-    // Position centered and at top of owner z-order without locking HWND_TOPMOST over external apps
-    SetWindowPos(hwnd, HWND_TOP, posX, posY, winW, winH, SWP_SHOWWINDOW);
-    ShowWindow(hwnd, SW_SHOW);
-    UpdateWindow(hwnd);
-    BringWindowToTop(hwnd);
-    SetForegroundWindow(hwnd);
+        // Position centered and at top of owner z-order without locking HWND_TOPMOST over external apps
+        SetWindowPos(hwnd, HWND_TOP, actPosX, actPosY, actWinW, actWinH, SWP_SHOWWINDOW);
+        ShowWindow(hwnd, SW_SHOW);
+        UpdateWindow(hwnd);
+        BringWindowToTop(hwnd);
+        SetForegroundWindow(hwnd);
+
+        if (onComplete) onComplete(true);
+    });
+
     return true;
 }
 
+void PluginWindowManager::update() {
+    if (m_openingPlugins.empty()) return;
+    std::vector<IPluginInstance*> openingList(m_openingPlugins.begin(), m_openingPlugins.end());
+    for (auto* p : openingList) {
+        if (p) {
+            p->pollAsyncGuiResults();
+        }
+    }
+}
+
 void PluginWindowManager::closePluginWindow(IPluginInstance* plugin) {
+    auto pendIt = m_pendingWindows.find(plugin);
+    if (pendIt != m_pendingWindows.end()) {
+        HWND hwnd = pendIt->second;
+        m_pendingWindows.erase(pendIt);
+        m_openingPlugins.erase(plugin);
+        plugin->closeGui();
+        if (hwnd && IsWindow(hwnd)) DestroyWindow(hwnd);
+    }
     auto it = m_openWindows.find(plugin);
     if (it != m_openWindows.end()) {
         HWND hwnd = it->second;
         m_openWindows.erase(it);
         m_windowToPlugin.erase(hwnd);
         plugin->closeGui();
-        DestroyWindow(hwnd);
+        if (hwnd && IsWindow(hwnd)) DestroyWindow(hwnd);
     }
 }
 
 void PluginWindowManager::closeAllWindows() {
+    for (auto& [plugin, hwnd] : m_pendingWindows) {
+        if (plugin) plugin->closeGui();
+        if (hwnd && IsWindow(hwnd)) DestroyWindow(hwnd);
+    }
+    m_pendingWindows.clear();
+    m_openingPlugins.clear();
+
     for (auto& [plugin, hwnd] : m_openWindows) {
         if (plugin) plugin->closeGui();
-        if (IsWindow(hwnd)) DestroyWindow(hwnd);
+        if (hwnd && IsWindow(hwnd)) DestroyWindow(hwnd);
     }
     m_openWindows.clear();
     m_windowToPlugin.clear();

@@ -15,8 +15,8 @@ set(PRACCY_VER_MINOR ${CMAKE_MATCH_1})
 string(REGEX MATCH "#define PRACCY_VERSION_PATCH ([0-9]+)" _ "${_PRACCY_VER_H}")
 set(PRACCY_VER_PATCH ${CMAKE_MATCH_1})
 
-# Version: 2.7-beta2
-set(PRACCY_VERSION_STRING "2.7-beta2")
+# Version: 2.7-beta3
+set(PRACCY_VERSION_STRING "2.7-beta3")
 
 project(Praccy VERSION ${PRACCY_VER_MAJOR}.${PRACCY_VER_MINOR}.${PRACCY_VER_PATCH} LANGUAGES CXX C RC)
 
@@ -315,7 +315,7 @@ add_executable(test_remediation_characterization tests/test_remediation_characte
 target_include_directories(test_remediation_characterization PRIVATE tests)
 target_link_libraries(test_remediation_characterization PRIVATE praccy_core)
 target_compile_options(test_remediation_characterization PRIVATE ${PRACCY_STRICT_FLAGS})
-add_test(NAME test_remediation_characterization COMMAND test_remediation_characterization)
+add_test(NAME test_remediation_characterization COMMAND test_remediation_characterization --verify-fixed)
 
 # 18. Async Plugin Loading Tests
 add_executable(test_async_plugin_loading tests/test_async_plugin_loading.cpp)

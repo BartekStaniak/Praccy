@@ -228,11 +228,6 @@ void InstrumentTuner::pushSamples(const float* left, const float* right, uint32_
 void InstrumentTuner::process(const float* monoInput, uint32_t numSamples) {
     if (!m_enabled.load(std::memory_order_relaxed) || !monoInput || numSamples == 0) return;
 
-    if (m_workerRunning.load(std::memory_order_relaxed)) {
-        pushSamples(monoInput, numSamples);
-        return;
-    }
-
 #if defined(_M_X64) || defined(__x86_64__)
     _mm_setcsr(_mm_getcsr() | 0x8040);
 #endif

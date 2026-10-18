@@ -480,7 +480,6 @@ void PluginBrowserModal::instantiateSelectedPlugin() {
             m_graph.addSerialNode(std::move(slot));
         }
 
-        // Option 2.A: Automatically open GUI when background loading completes
         plugins::AsyncPluginLoader::instance().enqueueLoad(
             slotPtr,
             desc->path,
@@ -490,7 +489,7 @@ void PluginBrowserModal::instantiateSelectedPlugin() {
             {},
             m_graph.sampleRate(),
             m_graph.maxBlockSize(),
-            true // openGuiWhenDone = true
+            false // openGuiWhenDone = false
         );
     }
 

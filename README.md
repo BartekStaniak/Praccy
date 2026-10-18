@@ -6,7 +6,7 @@
 
 ### Ultra-lightweight ASIO VST3 & CLAP host for instant instrument practice, live jamming, and universal DAW preset exchange.
 
-[![Release](https://img.shields.io/badge/release-v2.7--beta2-brightgreen.svg)](https://github.com/BartekStaniak/Praccy/releases)
+[![Release](https://img.shields.io/badge/release-v2.7--beta3-brightgreen.svg)](https://github.com/BartekStaniak/Praccy/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64-blue.svg)](https://github.com/BartekStaniak/Praccy)
 [![Audio Architecture](https://img.shields.io/badge/audio-ASIO%20%7C%20VST3%20%7C%20CLAP-orange.svg)](https://github.com/BartekStaniak/Praccy)
 [![Graphics](https://img.shields.io/badge/gui-DirectX%2011%20%7C%20Dear%20ImGui-purple.svg)](https://github.com/BartekStaniak/Praccy)
@@ -29,11 +29,17 @@ Full digital audio workstations like REAPER, Ableton Live, Cubase, or Studio One
 
 **Praccy** was built from the ground up to solve this exact problem. It is an ultra-lean, native C++20 ASIO host designed specifically for practicing, noodling, and live pedalboard-style jamming. It bypasses all unnecessary DAW layers, communicates directly with your audio interface via native ASIO, renders a high-framerate hardware-accelerated interface via DirectX 11 and Dear ImGui, and gets you playing in seconds.
 
-With **Version 2.7-beta2**, Praccy bridges the gap between practice and professional studio production through the **Universal DAW Interop Matrix** and the **Musician Velocity Engine**.
+With **Version 2.7-beta3**, Praccy bridges the gap between practice and professional studio production through the **Universal DAW Interop Matrix**, the **Musician Velocity Engine**, and the **Non-Blocking Asynchronous Plugin & GUI Pipeline**.
 
 ---
 
-## What's New in Version 2.7-beta2
+## What's New in Version 2.7-beta3
+
+### ⚡ Non-Blocking Asynchronous Plugin Loading & GUI Initialization
+- **Zero-Block Asynchronous Plugin Loading**: Heavy plugins (e.g. Archetype Gojira X, large convolution reverbs) initialize entirely on a background thread pool without freezing the main UI or stalling the audio engine.
+- **Animated Loading & Opening Slot States**: Live arc-spinner and pulsing focus border while plugins and their heavy GPU interfaces compile and attach in the background.
+- **Asynchronous GUI View Attachment**: `openPluginWindowAsync` returns in `< 1 ms`, isolating Win32 view initialization and Direct2D/OpenGL context creation to the plugin's dedicated host thread, smoothly presenting the window when fully ready.
+- **Bit-Exact Dry Audio Pass-Through**: Signal continues uninterrupted during loading and GUI opening with zero buffer dropouts and zero real-time audio thread allocations.
 
 ### 🌐 Universal DAW Interop Matrix (Stage 2)
 Exchange your complete plugin rigs and presets bidirectionally with the leading digital audio workstations:

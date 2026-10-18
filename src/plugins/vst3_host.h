@@ -16,6 +16,8 @@
 #include <unordered_map>
 #include <windows.h>
 #include <utility>
+#include <thread>
+#include <future>
 #include "vst3_param_queue.h"
 #include <readerwriterqueue/readerwriterqueue.h>
 
@@ -47,6 +49,8 @@ public:
 
     [[nodiscard]] bool hasCustomGui() const noexcept override;
     bool openGui(HWND parentHwnd) override;
+    void openGuiAsync(HWND parentHwnd, std::function<void(bool success)> onComplete) override;
+    void pollAsyncGuiResults() override;
     void closeGui() override;
     void getPreferredSize(int& width, int& height) const override;
     void onGuiResize(int width, int height) override;
@@ -55,6 +59,8 @@ public:
     bool loadState(const std::vector<uint8_t>& state) override;
 
     [[nodiscard]] Steinberg::IPlugView* plugView() const noexcept { return m_plugView; }
+
+    bool ensureControllerInitialized();
 
     void resetFault() noexcept override;
 
@@ -111,6 +117,24 @@ private:
     mutable std::vector<PluginParameterDesc> m_paramDescs;
     mutable std::unordered_map<uint32_t, size_t> m_paramIdToIndex;
     mutable std::unordered_map<uint32_t, float> m_paramCache;
+
+    mutable std::atomic<bool> m_controllerInitialized{false};
+    mutable std::mutex m_controllerInitMutex;
+
+    std::thread m_hostThread;
+    std::atomic<DWORD> m_hostThreadId{0};
+
+    bool initHostInternal(const std::string& path);
+    void teardownHostInternal();
+    bool openGuiInternal(HWND parentHwnd);
+    void closeGuiInternal();
+
+    struct AsyncGuiOpenResult {
+        HWND parentHwnd{nullptr};
+        bool success{false};
+        std::function<void(bool success)> callback;
+    };
+    moodycamel::ReaderWriterQueue<AsyncGuiOpenResult> m_asyncGuiResults{16};
 
     struct Impl;
     std::unique_ptr<Impl> m_impl;
