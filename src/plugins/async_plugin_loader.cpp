@@ -73,7 +73,8 @@ uint64_t AsyncPluginLoader::enqueueLoad(
     double sampleRate,
     uint32_t maxBlockSize,
     bool openGuiWhenDone,
-    std::function<void(bool success)> callback
+    std::function<void(bool success)> callback,
+    std::vector<std::pair<uint32_t, float>> initialParams
 ) {
     if (!m_running.load(std::memory_order_relaxed)) {
         init(2);
@@ -89,6 +90,7 @@ uint64_t AsyncPluginLoader::enqueueLoad(
     task.name = name;
     task.vendor = vendor;
     task.initialState = std::move(initialState);
+    task.initialParams = std::move(initialParams);
     task.sampleRate = sampleRate;
     task.maxBlockSize = maxBlockSize;
     task.openGuiWhenDone = openGuiWhenDone;
@@ -149,8 +151,7 @@ size_t AsyncPluginLoader::pendingTaskCount() const {
 void AsyncPluginLoader::workerLoop() {
     // Initialize COM on worker thread for VST3/system interop
 #if defined(_WIN32)
-    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    (void)hr;
+    const HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 #endif
 
     while (m_running.load(std::memory_order_relaxed)) {
@@ -214,6 +215,11 @@ void AsyncPluginLoader::workerLoop() {
                 if (!task.initialState.empty()) {
                     inst->loadState(task.initialState);
                 }
+                for (const auto& [paramId, paramVal] : task.initialParams) {
+                    if (std::isfinite(paramVal)) {
+                        inst->setParameterValue(paramId, paramVal);
+                    }
+                }
             }
         }, &exCode);
 
@@ -252,7 +258,9 @@ void AsyncPluginLoader::workerLoop() {
     }
 
 #if defined(_WIN32)
-    CoUninitialize();
+    if (SUCCEEDED(hr)) {
+        CoUninitialize();
+    }
 #endif
 }
 

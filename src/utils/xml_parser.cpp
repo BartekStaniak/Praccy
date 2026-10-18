@@ -203,12 +203,18 @@ std::shared_ptr<XmlNode> XmlParser::parse(std::string_view xml) {
             continue;
         }
 
-        // 3. DOCTYPE and ENTITY defense (SecOps Invariant 3: completely ignore)
+        // 3. DOCTYPE and ENTITY defense (SecOps Invariant 3: completely ignore, including internal DTD subsets)
         if (xml.substr(i, 9) == "<!DOCTYPE" || xml.substr(i, 8) == "<!ENTITY") {
-            // Skip until closing '>'
-            size_t endDoc = xml.find('>', i);
-            if (endDoc == std::string_view::npos) break;
-            i = endDoc + 1;
+            size_t cur = i + 2;
+            int bracketDepth = 0;
+            while (cur < len) {
+                if (xml[cur] == '[') ++bracketDepth;
+                else if (xml[cur] == ']' && bracketDepth > 0) --bracketDepth;
+                else if (xml[cur] == '>' && bracketDepth == 0) break;
+                ++cur;
+            }
+            if (cur >= len) break;
+            i = cur + 1;
             continue;
         }
 

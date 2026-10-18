@@ -164,6 +164,13 @@ bool PluginWindowManager::openPluginWindowAsync(IPluginInstance* plugin, std::fu
     m_pendingWindows[plugin] = hwnd;
 
     plugin->openGuiAsync(hwnd, [this, plugin, hwnd, onComplete = std::move(onComplete)](bool success) {
+        if (m_openingPlugins.find(plugin) == m_openingPlugins.end() || !IsWindow(hwnd)) {
+            m_openingPlugins.erase(plugin);
+            m_pendingWindows.erase(plugin);
+            if (hwnd && IsWindow(hwnd)) DestroyWindow(hwnd);
+            if (onComplete) onComplete(false);
+            return;
+        }
         m_openingPlugins.erase(plugin);
         m_pendingWindows.erase(plugin);
 

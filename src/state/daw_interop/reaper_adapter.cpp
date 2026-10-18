@@ -159,9 +159,15 @@ std::optional<ScenePreset> ReaperAdapter::parseToScene(const std::filesystem::pa
         std::string n = getVal("name=");
         if (!n.empty()) meta.name = n;
         std::string g = getVal("gainDb=");
-        if (!g.empty()) meta.gainDb = std::strtof(g.c_str(), nullptr);
+        if (!g.empty()) {
+            const float v = std::strtof(g.c_str(), nullptr);
+            if (std::isfinite(v)) meta.gainDb = std::clamp(v, -60.0f, 24.0f);
+        }
         std::string p = getVal("pan=");
-        if (!p.empty()) meta.pan = std::strtof(p.c_str(), nullptr);
+        if (!p.empty()) {
+            const float v = std::strtof(p.c_str(), nullptr);
+            if (std::isfinite(v)) meta.pan = std::clamp(v, -1.0f, 1.0f);
+        }
         std::string m = getVal("muted=");
         if (!m.empty()) meta.muted = (m == "1" || m == "true");
         std::string s = getVal("solo=");

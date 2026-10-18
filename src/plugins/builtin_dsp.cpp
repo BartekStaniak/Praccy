@@ -30,6 +30,7 @@ PluginParameterDesc OverdriveEffect::getParameterDesc(size_t index) const {
 }
 
 void OverdriveEffect::setParameterValue(uint32_t paramId, float value) {
+    if (!std::isfinite(value)) return;
     switch (paramId) {
         case 0: m_drive.store(std::clamp(value, 1.0f, 15.0f), std::memory_order_relaxed); break;
         case 1: m_tone.store(std::clamp(value, 0.0f, 1.0f), std::memory_order_relaxed); break;
@@ -126,6 +127,7 @@ PluginParameterDesc TubeAmpEffect::getParameterDesc(size_t index) const {
 }
 
 void TubeAmpEffect::setParameterValue(uint32_t paramId, float value) {
+    if (!std::isfinite(value)) return;
     switch (paramId) {
         case 0: m_gain.store(std::clamp(value, 1.0f, 20.0f), std::memory_order_relaxed); break;
         case 1: m_bass.store(std::clamp(value, 0.0f, 1.0f), std::memory_order_relaxed); break;
@@ -237,6 +239,7 @@ PluginParameterDesc StereoDelayEffect::getParameterDesc(size_t index) const {
 }
 
 void StereoDelayEffect::setParameterValue(uint32_t paramId, float value) {
+    if (!std::isfinite(value)) return;
     switch (paramId) {
         case 0: m_timeMs.store(std::clamp(value, 20.0f, 1500.0f), std::memory_order_relaxed); break;
         case 1: m_feedback.store(std::clamp(value, 0.0f, 0.95f), std::memory_order_relaxed); break;

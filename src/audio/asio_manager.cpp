@@ -16,13 +16,17 @@ AsioManager::AsioManager() {
     if (s_instance == nullptr) {
         s_instance = this;
     }
-    CoInitialize(nullptr);
+    const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    m_comInitialized = SUCCEEDED(hr);
 }
 
 AsioManager::~AsioManager() {
     stop();
     unloadDriver();
-    CoUninitialize();
+    if (m_comInitialized) {
+        CoUninitialize();
+        m_comInitialized = false;
+    }
     if (s_instance == this) {
         s_instance = nullptr;
     }

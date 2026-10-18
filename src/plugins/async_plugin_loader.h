@@ -30,6 +30,7 @@ struct AsyncLoadTask {
     std::string name;
     std::string vendor;
     std::vector<uint8_t> initialState;
+    std::vector<std::pair<uint32_t, float>> initialParams;
     double sampleRate{48000.0};
     uint32_t maxBlockSize{256};
     bool openGuiWhenDone{false};
@@ -67,7 +68,8 @@ public:
         double sampleRate = 48000.0,
         uint32_t maxBlockSize = 256,
         bool openGuiWhenDone = false,
-        std::function<void(bool success)> callback = nullptr
+        std::function<void(bool success)> callback = nullptr,
+        std::vector<std::pair<uint32_t, float>> initialParams = {}
     );
 
     /// Cancel any pending or in-flight background load for a slot (e.g. when slot is deleted)

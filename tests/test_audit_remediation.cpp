@@ -82,6 +82,8 @@ void ClapPluginInstance::setParameterFromAudioThread(uint32_t, float) noexcept {
 float ClapPluginInstance::getParameterValue(uint32_t) const { return 0.0f; }
 bool ClapPluginInstance::hasCustomGui() const noexcept { return false; }
 bool ClapPluginInstance::openGui(HWND) { return false; }
+void ClapPluginInstance::openGuiAsync(HWND, std::function<void(bool)> cb) { if (cb) cb(false); }
+void ClapPluginInstance::pollAsyncGuiResults() {}
 void ClapPluginInstance::closeGui() {}
 void ClapPluginInstance::getPreferredSize(int& w, int& h) const { w = 800; h = 600; }
 void ClapPluginInstance::onGuiResize(int, int) {}

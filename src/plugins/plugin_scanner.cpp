@@ -134,7 +134,7 @@ size_t PluginScanner::numPlugins() const {
 void PluginScanner::addPlugin(const PluginDescriptor& desc) {
     std::lock_guard<std::mutex> lock(m_mutex);
     auto it = std::find_if(m_plugins.begin(), m_plugins.end(), [&](const PluginDescriptor& d) {
-        return d.name == desc.name;
+        return d.name == desc.name && d.type == desc.type;
     });
     if (it == m_plugins.end()) {
         if (m_plugins.size() == m_plugins.capacity()) {
@@ -740,7 +740,7 @@ void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vec
                     for (const auto& fd : foundDescs) {
                         const std::string name = fd.name.empty() ? stemName : fd.name;
                         auto itExists = std::find_if(outPlugins.begin(), outPlugins.end(), [&](const PluginDescriptor& d) {
-                            return d.name == name;
+                            return d.name == name && d.type == PluginType::CLAP;
                         });
                         if (itExists == outPlugins.end()) {
                             PluginDescriptor desc;
@@ -760,7 +760,7 @@ void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vec
                     }
                 } else {
                     auto itExists = std::find_if(outPlugins.begin(), outPlugins.end(), [&](const PluginDescriptor& d) {
-                        return d.name == stemName;
+                        return d.name == stemName && d.type == PluginType::CLAP;
                     });
                     if (itExists == outPlugins.end()) {
                         PluginDescriptor desc;
@@ -780,7 +780,7 @@ void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vec
             } else if (ext == ".vst3") {
                 const std::string name = path.stem().string();
                 auto itExists = std::find_if(outPlugins.begin(), outPlugins.end(), [&](const PluginDescriptor& d) {
-                    return d.name == name;
+                    return d.name == name && d.type == PluginType::VST3;
                 });
                 if (itExists == outPlugins.end()) {
                     PluginDescriptor desc;
@@ -1058,9 +1058,18 @@ const PluginDescriptor* PluginScanner::resolvePlugin(
     const std::string& name,
     const std::string& bundleFileName,
     const std::string& guidOrClapId,
-    PluginType /*preferredType*/
+    PluginType preferredType
 ) const {
     std::lock_guard<std::mutex> lock(m_mutex);
+
+    std::string effectiveBundle = bundleFileName;
+    if (bundleFileName == "CLAP" || bundleFileName == "clap") {
+        preferredType = PluginType::CLAP;
+        effectiveBundle.clear();
+    } else if (bundleFileName == "VST3" || bundleFileName == "vst3") {
+        preferredType = PluginType::VST3;
+        effectiveBundle.clear();
+    }
 
     // Normalize input GUID
     std::string normGuid = utils::GuidUtils::normalizeToCanonicalGuid(guidOrClapId);
@@ -1078,10 +1087,10 @@ const PluginDescriptor* PluginScanner::resolvePlugin(
     }
 
     // Tier 2 (Bundle Filename Match): Match against bundleFileName
-    if (!bundleFileName.empty()) {
-        std::string bundleLower = bundleFileName;
+    if (!effectiveBundle.empty()) {
+        std::string bundleLower = effectiveBundle;
         std::transform(bundleLower.begin(), bundleLower.end(), bundleLower.begin(), [](unsigned char c){ return std::tolower(c); });
-        std::string bundleStem = std::filesystem::path(bundleFileName).stem().string();
+        std::string bundleStem = std::filesystem::path(effectiveBundle).stem().string();
         std::transform(bundleStem.begin(), bundleStem.end(), bundleStem.begin(), [](unsigned char c){ return std::tolower(c); });
 
         for (const auto& p : m_plugins) {
@@ -1117,10 +1126,19 @@ const PluginDescriptor* PluginScanner::resolvePlugin(
 
         std::string cleanInput = normalizeName(name);
         if (!cleanInput.empty()) {
+            const PluginDescriptor* fallbackMatch = nullptr;
             for (const auto& p : m_plugins) {
                 if (normalizeName(p.name) == cleanInput) {
-                    return &p;
+                    if (p.type == preferredType) {
+                        return &p;
+                    }
+                    if (!fallbackMatch) {
+                        fallbackMatch = &p;
+                    }
                 }
+            }
+            if (fallbackMatch) {
+                return fallbackMatch;
             }
         }
     }

@@ -163,19 +163,23 @@ static BranchPreset parseAbletonBranch(const std::shared_ptr<utils::XmlNode>& br
 
     auto getFloatVal = [](const std::shared_ptr<utils::XmlNode>& parent, std::string_view tag, std::string_view attr, float defaultVal) -> float {
         if (!parent) return defaultVal;
+        auto parseSafeFloat = [defaultVal](const std::string& s) -> float {
+            const float v = std::strtof(s.c_str(), nullptr);
+            return std::isfinite(v) ? v : defaultVal;
+        };
         if (parent->hasAttribute(attr)) {
-            return std::strtof(parent->attribute(attr).c_str(), nullptr);
+            return parseSafeFloat(parent->attribute(attr));
         }
         if (parent->hasAttribute(tag)) {
-            return std::strtof(parent->attribute(tag).c_str(), nullptr);
+            return parseSafeFloat(parent->attribute(tag));
         }
         auto child = parent->firstChild(tag);
         if (child) {
             if (child->hasAttribute("Value")) {
-                return std::strtof(child->attribute("Value").c_str(), nullptr);
+                return parseSafeFloat(child->attribute("Value"));
             }
             if (!child->text.empty()) {
-                return std::strtof(child->text.c_str(), nullptr);
+                return parseSafeFloat(child->text);
             }
         }
         return defaultVal;

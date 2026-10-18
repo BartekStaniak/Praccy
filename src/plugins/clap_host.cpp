@@ -870,7 +870,26 @@ void ClapPluginInstance::onGuiResize(int width, int height) {
     }
 }
 
+void ClapPluginInstance::openGuiAsync(HWND parentHwnd, std::function<void(bool success)> onComplete) {
+    m_hasPendingAsyncGui = true;
+    m_pendingAsyncGuiHwnd = parentHwnd;
+    m_pendingAsyncGuiCallback = std::move(onComplete);
+}
+
+void ClapPluginInstance::pollAsyncGuiResults() {
+    if (!m_hasPendingAsyncGui) return;
+    m_hasPendingAsyncGui = false;
+    HWND hwnd = m_pendingAsyncGuiHwnd;
+    m_pendingAsyncGuiHwnd = nullptr;
+    auto cb = std::move(m_pendingAsyncGuiCallback);
+    const bool ok = openGui(hwnd);
+    if (cb) cb(ok);
+}
+
 void ClapPluginInstance::closeGui() {
+    m_hasPendingAsyncGui = false;
+    m_pendingAsyncGuiHwnd = nullptr;
+    m_pendingAsyncGuiCallback = nullptr;
     if (m_guiExt && m_plugin && m_guiCreated) {
         safeCallPluginGui([&]() {
             m_guiExt->hide(m_plugin);

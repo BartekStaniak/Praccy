@@ -87,6 +87,7 @@ private:
 
     static AsioManager* s_instance;
 
+    bool m_comInitialized{false};
     IASIO* m_driver{nullptr};
     AsioDriverInfo m_info;
     std::vector<ASIOBufferInfo> m_bufferInfos;

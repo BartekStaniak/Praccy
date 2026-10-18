@@ -44,13 +44,22 @@ public:
     [[nodiscard]] NodeType type() const noexcept override { return NodeType::Plugin; }
     [[nodiscard]] const std::string& name() const noexcept override;
 
-    void setDryWet(float mix) noexcept { m_dryWet.store(std::clamp(mix, 0.0f, 1.0f), std::memory_order_relaxed); }
+    void setDryWet(float mix) noexcept {
+        if (!std::isfinite(mix)) return;
+        m_dryWet.store(std::clamp(mix, 0.0f, 1.0f), std::memory_order_relaxed);
+    }
     [[nodiscard]] float dryWet() const noexcept { return m_dryWet.load(std::memory_order_relaxed); }
 
-    void setInputGainDb(float db) noexcept { m_inputGainDb.store(db, std::memory_order_relaxed); }
+    void setInputGainDb(float db) noexcept {
+        if (!std::isfinite(db)) return;
+        m_inputGainDb.store(std::clamp(db, -60.0f, 24.0f), std::memory_order_relaxed);
+    }
     [[nodiscard]] float inputGainDb() const noexcept { return m_inputGainDb.load(std::memory_order_relaxed); }
 
-    void setOutputGainDb(float db) noexcept { m_outputGainDb.store(db, std::memory_order_relaxed); }
+    void setOutputGainDb(float db) noexcept {
+        if (!std::isfinite(db)) return;
+        m_outputGainDb.store(std::clamp(db, -60.0f, 24.0f), std::memory_order_relaxed);
+    }
     [[nodiscard]] float outputGainDb() const noexcept { return m_outputGainDb.load(std::memory_order_relaxed); }
 
     void setBypassed(bool bypassed) noexcept override;

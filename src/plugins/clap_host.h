@@ -96,6 +96,8 @@ public:
 
     [[nodiscard]] bool hasCustomGui() const noexcept override;
     bool openGui(HWND parentHwnd) override;
+    void openGuiAsync(HWND parentHwnd, std::function<void(bool success)> onComplete) override;
+    void pollAsyncGuiResults() override;
     void closeGui() override;
     void getPreferredSize(int& width, int& height) const override;
     void onGuiResize(int width, int height) override;
@@ -173,6 +175,9 @@ private:
 
     HWND m_guiParentHwnd{nullptr};
     bool m_guiCreated{false};
+    bool m_hasPendingAsyncGui{false};
+    HWND m_pendingAsyncGuiHwnd{nullptr};
+    std::function<void(bool success)> m_pendingAsyncGuiCallback;
 
     DWORD m_mainThreadId{0};
     double m_sampleRate{48000.0};

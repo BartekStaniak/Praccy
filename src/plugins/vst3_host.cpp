@@ -90,10 +90,16 @@ public:
 
     Steinberg::tresult PLUGIN_API read(void* dest, Steinberg::int32 numBytes, Steinberg::int32* numBytesRead) override {
         if (!dest || numBytes < 0) return Steinberg::kInvalidArgument;
-        Steinberg::int32 available = static_cast<Steinberg::int32>(buffer.size() - pos);
+        if (pos < 0 || static_cast<size_t>(pos) >= buffer.size()) {
+            if (numBytesRead) *numBytesRead = 0;
+            return Steinberg::kResultOk;
+        }
+        const size_t avail = buffer.size() - static_cast<size_t>(pos);
+        const Steinberg::int32 available = static_cast<Steinberg::int32>(
+            std::min<size_t>(avail, static_cast<size_t>(std::numeric_limits<Steinberg::int32>::max())));
         Steinberg::int32 toRead = (std::min)(numBytes, available);
         if (toRead > 0) {
-            memcpy(dest, buffer.data() + pos, toRead);
+            memcpy(dest, buffer.data() + pos, static_cast<size_t>(toRead));
             pos += toRead;
         }
         if (numBytesRead) *numBytesRead = toRead;
@@ -101,21 +107,26 @@ public:
     }
 
     Steinberg::tresult PLUGIN_API write(void* src, Steinberg::int32 numBytes, Steinberg::int32* numBytesWritten) override {
-        if (!src || numBytes < 0) return Steinberg::kInvalidArgument;
-        if (pos + numBytes > static_cast<Steinberg::int64>(buffer.size())) {
-            buffer.resize(pos + numBytes);
+        if (!src || numBytes < 0 || pos < 0) return Steinberg::kInvalidArgument;
+        const size_t endPos = static_cast<size_t>(pos) + static_cast<size_t>(numBytes);
+        if (endPos > buffer.size()) {
+            buffer.resize(endPos);
         }
-        memcpy(buffer.data() + pos, src, numBytes);
-        pos += numBytes;
+        if (numBytes > 0) {
+            memcpy(buffer.data() + pos, src, static_cast<size_t>(numBytes));
+            pos += numBytes;
+        }
         if (numBytesWritten) *numBytesWritten = numBytes;
         return Steinberg::kResultOk;
     }
 
     Steinberg::tresult PLUGIN_API seek(Steinberg::int64 offset, Steinberg::int32 mode, Steinberg::int64* result) override {
+        const auto bufSize = static_cast<Steinberg::int64>(buffer.size());
         if (mode == kIBSeekSet) pos = offset;
         else if (mode == kIBSeekCur) pos += offset;
-        else if (mode == kIBSeekEnd) pos = buffer.size() + offset;
+        else if (mode == kIBSeekEnd) pos = bufSize + offset;
         if (pos < 0) pos = 0;
+        if (pos > bufSize) pos = bufSize;
         if (result) *result = pos;
         return Steinberg::kResultOk;
     }
@@ -776,20 +787,27 @@ void Vst3PluginInstance::prepare(double sampleRate, uint32_t maxBlockSize) {
         return;
     }
 
-    m_component->activateBus(Steinberg::Vst::kAudio, Steinberg::Vst::kInput, 0, true);
-    m_component->activateBus(Steinberg::Vst::kAudio, Steinberg::Vst::kOutput, 0, true);
+    invokeOnHostThread([&]() {
+        safeCallPlugin([&]() {
+            m_processor->setProcessing(false);
+            m_component->setActive(false);
 
-    Steinberg::Vst::ProcessSetup setup{};
-    setup.processMode = Steinberg::Vst::kRealtime;
-    setup.symbolicSampleSize = Steinberg::Vst::kSample32;
-    setup.maxSamplesPerBlock = maxBlockSize;
-    setup.sampleRate = sampleRate;
+            m_component->activateBus(Steinberg::Vst::kAudio, Steinberg::Vst::kInput, 0, true);
+            m_component->activateBus(Steinberg::Vst::kAudio, Steinberg::Vst::kOutput, 0, true);
 
-    m_processor->setupProcessing(setup);
-    m_component->setActive(true);
-    m_processor->setProcessing(true);
+            Steinberg::Vst::ProcessSetup setup{};
+            setup.processMode = Steinberg::Vst::kRealtime;
+            setup.symbolicSampleSize = Steinberg::Vst::kSample32;
+            setup.maxSamplesPerBlock = static_cast<Steinberg::int32>(maxBlockSize);
+            setup.sampleRate = sampleRate;
 
-    m_latencySamples = m_processor->getLatencySamples();
+            m_processor->setupProcessing(setup);
+            m_component->setActive(true);
+            m_processor->setProcessing(true);
+
+            m_latencySamples = m_processor->getLatencySamples();
+        });
+    });
 
     m_impl->processContext.state = Steinberg::Vst::ProcessContext::kPlaying |
                                    Steinberg::Vst::ProcessContext::kTempoValid |

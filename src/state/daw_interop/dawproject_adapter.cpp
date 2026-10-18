@@ -126,6 +126,39 @@ std::optional<ScenePreset> DawprojectAdapter::parseToScene(const std::filesystem
             std::transform(fmt.begin(), fmt.end(), fmt.begin(), [](unsigned char c){ return std::tolower(c); });
             if (fmt == "clap") slot.type = "CLAP";
             else if (fmt == "vst3") slot.type = "VST3";
+            else if (fmt == "builtin") slot.type = "BuiltIn";
+        }
+
+        const std::string inGainAttr = plugNode->attribute("inputGainDb");
+        if (!inGainAttr.empty()) {
+            float v = std::strtof(inGainAttr.c_str(), nullptr);
+            if (std::isfinite(v)) slot.inputGainDb = std::clamp(v, -60.0f, 24.0f);
+        }
+        const std::string outGainAttr = plugNode->attribute("outputGainDb");
+        if (!outGainAttr.empty()) {
+            float v = std::strtof(outGainAttr.c_str(), nullptr);
+            if (std::isfinite(v)) slot.outputGainDb = std::clamp(v, -60.0f, 24.0f);
+        }
+        const std::string dryWetAttr = plugNode->attribute("dryWet");
+        if (!dryWetAttr.empty()) {
+            float v = std::strtof(dryWetAttr.c_str(), nullptr);
+            if (std::isfinite(v)) slot.dryWet = std::clamp(v, 0.0f, 1.0f);
+        }
+        const std::string bypassedAttr = plugNode->attribute("bypassed");
+        if (bypassedAttr == "true" || bypassedAttr == "1") {
+            slot.bypassed = true;
+        }
+        for (const auto& pNode : plugNode->childrenNamed("param")) {
+            if (!pNode) continue;
+            const std::string pidStr = pNode->attribute("id");
+            const std::string pvalStr = pNode->attribute("value");
+            if (!pidStr.empty() && !pvalStr.empty()) {
+                uint32_t pid = static_cast<uint32_t>(std::strtoul(pidStr.c_str(), nullptr, 10));
+                float pval = std::strtof(pvalStr.c_str(), nullptr);
+                if (std::isfinite(pval)) {
+                    slot.paramValues.push_back({pid, pval});
+                }
+            }
         }
 
         auto idNode = plugNode->firstChild("identifier");
@@ -274,9 +307,18 @@ bool DawprojectAdapter::exportFromScene(const ScenePreset& scene, const std::fil
         std::string stateDirRel = "plugins/" + instanceId;
 
         px << "          <plugin id=\"" << instanceId << "\" name=\""
-           << utils::XmlParser::encodeEntities(slot.name) << "\" deviceRole=\"audioEffect\">\n";
-        px << "            <pluginFormat>" << (slot.type == "CLAP" ? "clap" : "vst3") << "</pluginFormat>\n";
+           << utils::XmlParser::encodeEntities(slot.name) << "\" deviceRole=\"audioEffect\""
+           << " bypassed=\"" << (slot.bypassed ? "true" : "false") << "\""
+           << " inputGainDb=\"" << slot.inputGainDb << "\""
+           << " outputGainDb=\"" << slot.outputGainDb << "\""
+           << " dryWet=\"" << slot.dryWet << "\">\n";
+        px << "            <pluginFormat>" << (slot.type == "CLAP" ? "clap" : (slot.type == "BuiltIn" ? "builtin" : "vst3")) << "</pluginFormat>\n";
         px << "            <identifier>" << utils::XmlParser::encodeEntities(identifierStr) << "</identifier>\n";
+        for (const auto& pv : slot.paramValues) {
+            if (std::isfinite(pv.value)) {
+                px << "            <param id=\"" << pv.paramId << "\" value=\"" << pv.value << "\" />\n";
+            }
+        }
 
         if (!slot.state.empty()) {
             auto slotPlugDir = tempDir / stateDirRel;

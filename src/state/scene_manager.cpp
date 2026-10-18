@@ -294,7 +294,7 @@ std::unique_ptr<audio::PluginSlot> SceneManager::createSlotFromPreset(
         slot->setInputGainDb(p.inputGainDb);
         slot->setOutputGainDb(p.outputGainDb);
 
-        // Copy macros
+        // Copy macros preserving min/max/default ranges
         for (size_t m = 0; m < p.macros.size() && m < 4; ++m) {
             slot->macros()[m] = audio::PluginSlot::Macro{
                 .label = p.macros[m].label,
@@ -302,10 +302,10 @@ std::unique_ptr<audio::PluginSlot> SceneManager::createSlotFromPreset(
                 .bound = p.macros[m].bound,
                 .isSlotMix = p.macros[m].isSlotMix,
                 .isSlotTrim = p.macros[m].isSlotTrim,
-                .currentValue = p.macros[m].value,
-                .defaultValue = p.macros[m].value,
-                .minValue = 0.0f,
-                .maxValue = 1.0f
+                .currentValue = std::isfinite(p.macros[m].value) ? p.macros[m].value : 0.0f,
+                .defaultValue = std::isfinite(p.macros[m].defaultValue) ? p.macros[m].defaultValue : p.macros[m].value,
+                .minValue = std::isfinite(p.macros[m].minValue) ? p.macros[m].minValue : 0.0f,
+                .maxValue = std::isfinite(p.macros[m].maxValue) ? p.macros[m].maxValue : 1.0f
             };
         }
         slot->setMacrosInitialized(true);
@@ -313,6 +313,14 @@ std::unique_ptr<audio::PluginSlot> SceneManager::createSlotFromPreset(
         plugins::PluginType pType = (p.type == "CLAP" || p.path.find(".clap") != std::string::npos)
                                     ? plugins::PluginType::CLAP
                                     : plugins::PluginType::VST3;
+
+        std::vector<std::pair<uint32_t, float>> initParams;
+        initParams.reserve(p.paramValues.size());
+        for (const auto& pv : p.paramValues) {
+            if (std::isfinite(pv.value)) {
+                initParams.emplace_back(pv.paramId, pv.value);
+            }
+        }
 
         plugins::AsyncPluginLoader::instance().enqueueLoad(
             slot.get(),
@@ -323,7 +331,9 @@ std::unique_ptr<audio::PluginSlot> SceneManager::createSlotFromPreset(
             p.state,
             effectiveSampleRate,
             effectiveMaxBlockSize,
-            false // Option 1.A: do not auto-open GUI for scene load
+            false, // Option 1.A: do not auto-open GUI for scene load
+            nullptr,
+            std::move(initParams)
         );
 
         return slot;
