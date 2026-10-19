@@ -4,6 +4,7 @@
 #include <string>
 #include <functional>
 #include "../../audio/asio_manager.h"
+#include "../../state/app_config.h"
 
 namespace praccy::plugins {
     class PluginScanner;
@@ -38,6 +39,11 @@ public:
         m_onOpenPluginBrowser = std::move(callback);
     }
 
+    /// Event handler for driver load / re-prepare
+    void setOnDriverChanged(std::function<void(double, uint32_t)> callback) {
+        m_onDriverChanged = std::move(callback);
+    }
+
 private:
     void renderAudioTab();
     void renderPluginsTab();
@@ -48,10 +54,12 @@ private:
     audio::AsioManager& m_asio;
     plugins::PluginScanner& m_scanner;
     std::function<void()> m_onOpenPluginBrowser;
+    std::function<void(double, uint32_t)> m_onDriverChanged;
 
     bool m_isOpen{false};
     std::vector<audio::AsioDriverDesc> m_cachedDrivers;
     int m_selectedDriverIdx{0};
+    state::AppConfig m_cachedConfig;
 };
 
 } // namespace praccy::ui

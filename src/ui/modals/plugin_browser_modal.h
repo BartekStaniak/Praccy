@@ -18,6 +18,8 @@ enum class PaletteScope : uint8_t {
 
 struct PaletteItem {
     const plugins::PluginDescriptor* descriptor{nullptr};
+    std::string displayName;
+    std::string categoryName;
     int score{0};
     bool isRecent{false};
     bool isFavorite{false};
@@ -75,14 +77,17 @@ private:
     std::function<void(const std::string&)> m_onPluginInserted;
 
     bool m_isOpen{false};
+    bool m_justOpened{false};
     bool m_needsFocus{false};
     bool m_scrollSelectionIntoView{false};
     bool m_tabHandledThisFrame{false};
+    bool m_filterDirty{false};
 
     PaletteScope m_currentScope{PaletteScope::All};
     char m_searchQuery[128]{0};
     char m_lastSearchQuery[128]{0};
     int m_selectedIndex{0};
+    int m_hoveredIndex{-1};
     std::vector<PaletteItem> m_filteredItems;
     std::vector<plugins::PluginDescriptor> m_allPlugins;
 

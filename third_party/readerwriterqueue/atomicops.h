@@ -228,6 +228,9 @@ AE_FORCEINLINE void compiler_fence(memory_order order) AE_NO_TSAN
 
 AE_FORCEINLINE void fence(memory_order order) AE_NO_TSAN
 {
+#if defined(__SANITIZE_THREAD__)
+	(void)order;
+#else
 	switch (order) {
 		case memory_order_relaxed: break;
 		case memory_order_acquire: AE_TSAN_ANNOTATE_ACQUIRE(); std::atomic_thread_fence(std::memory_order_acquire); break;
@@ -236,6 +239,7 @@ AE_FORCEINLINE void fence(memory_order order) AE_NO_TSAN
 		case memory_order_seq_cst: AE_TSAN_ANNOTATE_ACQUIRE(); AE_TSAN_ANNOTATE_RELEASE(); std::atomic_thread_fence(std::memory_order_seq_cst); break;
 		default: assert(false);
 	}
+#endif
 }
 
 }    // end namespace moodycamel

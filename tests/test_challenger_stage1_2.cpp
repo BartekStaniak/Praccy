@@ -6,6 +6,7 @@
 #include <deque>
 #include <chrono>
 #include <thread>
+#undef NDEBUG
 #include <cassert>
 #include <cmath>
 #include <cstring>
@@ -20,13 +21,7 @@
 #include "utils/archive_utils.h"
 #include "state/undo_manager.h"
 #include "state/scene_manager.h"
-
-// Stubs for external references required by undo_manager.cpp
-namespace praccy::state {
-    std::unique_ptr<audio::PluginSlot> SceneManager::createSlotFromPreset(const PluginSlotPreset&) {
-        return nullptr;
-    }
-}
+#include "audio/graph_engine.h"
 
 using namespace praccy;
 
@@ -199,7 +194,7 @@ void test_Spotlight_ListClipper_Scroll_Boundaries() {
 
             ImGui::BeginChild("##ScrollList", ImVec2(0.0f, listHeight), false, ImGuiWindowFlags_AlwaysVerticalScrollbar);
 
-            float targetScrollY = targetIdx * rowH;
+            float targetScrollY = static_cast<float>(targetIdx) * rowH;
             ImGui::SetScrollY(targetScrollY);
 
             ImGuiListClipper clipper;
@@ -566,6 +561,100 @@ void test_UndoManager_Capacity64_Eviction_Stress() {
     assert(!undoMgr.canRedo());
 }
 
+void test_SceneManager_UndoManager_CanApplyInPlace_StateTransitionGuards() {
+    audio::GraphEngine engine;
+    engine.prepare(48000.0, 256);
+
+    // 1. Create slots via production SceneManager::createSlotFromPreset
+    state::PluginSlotPreset pDrive;
+    pDrive.type = "BuiltIn";
+    pDrive.path = "builtin://drive";
+    pDrive.name = "Praccy Drive";
+    pDrive.inputGainDb = 2.5f;
+    pDrive.outputGainDb = -1.0f;
+    pDrive.dryWet = 0.8f;
+    pDrive.bypassed = false;
+
+    auto slot1 = state::SceneManager::createSlotFromPreset(pDrive);
+    assert(slot1 != nullptr);
+    assert(std::abs(slot1->inputGainDb() - 2.5f) < 1e-4f);
+    assert(std::abs(slot1->dryWet() - 0.8f) < 1e-4f);
+    engine.addSerialNode(std::move(slot1));
+
+    state::PluginSlotPreset pAmp;
+    pAmp.type = "BuiltIn";
+    pAmp.path = "builtin://amp";
+    pAmp.name = "Praccy Amp Sim";
+    pAmp.inputGainDb = 0.0f;
+    auto slot2 = state::SceneManager::createSlotFromPreset(pAmp);
+    assert(slot2 != nullptr);
+    engine.addSerialNode(std::move(slot2));
+
+    assert(engine.numNodes() == 2);
+
+    // 2. Capture baseline graph snapshot
+    const auto snapshotBase = state::SceneManager::captureGraphSnapshot(engine, "Base");
+    assert(snapshotBase.nodes.size() == 2);
+
+    // 3. Verify canApplyInPlace returns true for identical topology with tweaked scalar params
+    auto snapshotTweaked = snapshotBase;
+    snapshotTweaked.nodes[0].slot.inputGainDb = 6.0f;
+    snapshotTweaked.nodes[0].slot.dryWet = 0.5f;
+    assert(state::SceneManager::canApplyInPlace(snapshotTweaked, engine));
+
+    // Apply in place without tearing down the audio node graph
+    bool okInPlace = state::SceneManager::applyGraphSnapshotInPlace(snapshotTweaked, engine);
+    assert(okInPlace);
+    auto* curSlot0 = dynamic_cast<audio::PluginSlot*>(engine.getNode(0));
+    assert(curSlot0 != nullptr);
+    assert(std::abs(curSlot0->inputGainDb() - 6.0f) < 1e-4f);
+    assert(std::abs(curSlot0->dryWet() - 0.5f) < 1e-4f);
+
+    // 4. State transition guards: Topology mismatch MUST NOT apply in place
+    state::ScenePreset emptyPreset;
+    assert(!state::SceneManager::canApplyInPlace(emptyPreset, engine));
+
+    state::ScenePreset mismatchedNodes = snapshotBase;
+    mismatchedNodes.nodes.pop_back(); // 1 node vs 2 nodes
+    assert(!state::SceneManager::canApplyInPlace(mismatchedNodes, engine));
+
+    state::ScenePreset extraNodes = snapshotBase;
+    extraNodes.nodes.push_back(snapshotBase.nodes[0]); // 3 nodes vs 2 nodes
+    assert(!state::SceneManager::canApplyInPlace(extraNodes, engine));
+
+    // 5. State transition guards: Third-party VST3/CLAP with differing binary state (F-02)
+    // Live UI-thread loadState() while audio is active is strictly prevented by canApplyInPlace
+    state::ScenePreset vstStateMismatch = snapshotBase;
+    vstStateMismatch.nodes[0].slot.type = "VST3";
+    vstStateMismatch.nodes[0].slot.state = {0x01, 0x02, 0x03, 0x04};
+    assert(!state::SceneManager::canApplyInPlace(vstStateMismatch, engine));
+
+    // 6. Verification with UndoManager coupling
+    state::UndoManager undoMgr;
+    undoMgr.pushSnapshot(snapshotBase, "Base State", state::UndoActionType::StructuralMutation);
+    undoMgr.pushSnapshot(snapshotTweaked, "Tweak Drive", state::UndoActionType::ParameterTweak, "slot0_gain");
+
+    state::ScenePreset undoTarget;
+    assert(undoMgr.canUndo());
+    assert(undoMgr.undo(undoTarget));
+
+    // Check if undone preset can be applied in place
+    assert(state::SceneManager::canApplyInPlace(undoTarget, engine));
+    bool applied = state::SceneManager::applyGraphSnapshotInPlace(undoTarget, engine);
+    assert(applied);
+    assert(std::abs(curSlot0->inputGainDb() - 2.5f) < 1e-4f);
+
+    // Now push a structural mutation to UndoManager
+    undoMgr.pushSnapshot(extraNodes, "Add Extra Slot", state::UndoActionType::StructuralMutation);
+    assert(undoMgr.undo(undoTarget));
+    // Since extraNodes had 3 nodes and engine has 2 nodes, canApplyInPlace is false
+    assert(!state::SceneManager::canApplyInPlace(extraNodes, engine));
+    // Fall back to full production applyGraphSnapshot (crossfade)
+    bool appliedCrossfade = state::SceneManager::applyGraphSnapshot(extraNodes, engine);
+    assert(appliedCrossfade);
+    assert(engine.numNodes() == 3);
+}
+
 // ============================================================================
 // MODULE 4: ARCHIVE DECOMPRESSION BOMB DEFENSE & ZIP SLIP REJECTION
 // ============================================================================
@@ -857,6 +946,7 @@ int main() {
     RUN_TEST(test_UndoManager_MouseRelease_DiscreteSnapshot);
     RUN_TEST(test_UndoManager_TargetSwitching_And_Structural_NoCoalesce);
     RUN_TEST(test_UndoManager_Capacity64_Eviction_Stress);
+    RUN_TEST(test_SceneManager_UndoManager_CanApplyInPlace_StateTransitionGuards);
 
     std::cout << "\n[MODULE 4] Archive Decompression Bomb Defense & Zip Slip Rejection\n";
     RUN_TEST(test_Archive_DecompressionBomb_30MB_Xml_Rejection);

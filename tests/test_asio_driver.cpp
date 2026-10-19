@@ -11,6 +11,7 @@
 #include <numbers>
 #include <random>
 #include <cstring>
+#undef NDEBUG
 #include <cassert>
 #include <cstdlib>
 
@@ -21,10 +22,6 @@
 #include "plugins/builtin_dsp.h"
 #include "tools/tuner.h"
 
-#if defined(__GNUC__)
-#pragma GCC diagnostic ignored "-Wmismatched-new-delete"
-#endif
-
 // ============================================================================
 // REAL-TIME AUDIO THREAD HEAP ALLOCATION MONITORING HOOKS
 // ============================================================================
@@ -32,85 +29,209 @@ static thread_local bool t_isAudioThread = false;
 static std::atomic<uint64_t> g_audioThreadAllocations{0};
 static std::atomic<uint64_t> g_audioThreadDeallocations{0};
 
-void* operator new(std::size_t size) {
-    if (t_isAudioThread) {
-        g_audioThreadAllocations.fetch_add(1, std::memory_order_relaxed);
-    }
-    void* p = std::malloc(size ? size : 1);
-    if (!p) throw std::bad_alloc();
-    return p;
-}
-
-void operator delete(void* p) noexcept {
-    if (t_isAudioThread) {
-        g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
-    }
-    std::free(p);
-}
-
-void operator delete(void* p, std::size_t size) noexcept {
-    (void)size;
-    if (t_isAudioThread) {
-        g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
-    }
-    std::free(p);
-}
-
-void* operator new[](std::size_t size) {
-    if (t_isAudioThread) {
-        g_audioThreadAllocations.fetch_add(1, std::memory_order_relaxed);
-    }
-    void* p = std::malloc(size ? size : 1);
-    if (!p) throw std::bad_alloc();
-    return p;
-}
-
-void operator delete[](void* p) noexcept {
-    if (t_isAudioThread) {
-        g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
-    }
-    std::free(p);
-}
-
-void operator delete[](void* p, std::size_t size) noexcept {
-    (void)size;
-    if (t_isAudioThread) {
-        g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
-    }
-    std::free(p);
-}
-
-void* operator new(std::size_t size, const std::nothrow_t&) noexcept {
-    if (t_isAudioThread) {
-        g_audioThreadAllocations.fetch_add(1, std::memory_order_relaxed);
-    }
-    return std::malloc(size ? size : 1);
-}
-
-void* operator new[](std::size_t size, const std::nothrow_t&) noexcept {
-    if (t_isAudioThread) {
-        g_audioThreadAllocations.fetch_add(1, std::memory_order_relaxed);
-    }
-    return std::malloc(size ? size : 1);
-}
-
-void operator delete(void* p, const std::nothrow_t&) noexcept {
-    if (t_isAudioThread) {
-        g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
-    }
-    std::free(p);
-}
-
-void operator delete[](void* p, const std::nothrow_t&) noexcept {
-    if (t_isAudioThread) {
-        g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
-    }
-    std::free(p);
-}
-
 #if defined(__GNUC__)
-#pragma GCC diagnostic pop
+#define PRACCY_NOINLINE __attribute__((noinline))
+#else
+#define PRACCY_NOINLINE
 #endif
+
+PRACCY_NOINLINE void* operator new(std::size_t size) {
+    if (t_isAudioThread) {
+        g_audioThreadAllocations.fetch_add(1, std::memory_order_relaxed);
+    }
+    void* p = std::malloc(size ? size : 1);
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+PRACCY_NOINLINE void operator delete(void* p) noexcept {
+    if (t_isAudioThread) {
+        g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
+    }
+    std::free(p);
+}
+
+PRACCY_NOINLINE void operator delete(void* p, std::size_t size) noexcept {
+    (void)size;
+    if (t_isAudioThread) {
+        g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
+    }
+    std::free(p);
+}
+
+PRACCY_NOINLINE void* operator new[](std::size_t size) {
+    if (t_isAudioThread) {
+        g_audioThreadAllocations.fetch_add(1, std::memory_order_relaxed);
+    }
+    void* p = std::malloc(size ? size : 1);
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+PRACCY_NOINLINE void operator delete[](void* p) noexcept {
+    if (t_isAudioThread) {
+        g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
+    }
+    std::free(p);
+}
+
+PRACCY_NOINLINE void operator delete[](void* p, std::size_t size) noexcept {
+    (void)size;
+    if (t_isAudioThread) {
+        g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
+    }
+    std::free(p);
+}
+
+PRACCY_NOINLINE void* operator new(std::size_t size, const std::nothrow_t&) noexcept {
+    if (t_isAudioThread) {
+        g_audioThreadAllocations.fetch_add(1, std::memory_order_relaxed);
+    }
+    return std::malloc(size ? size : 1);
+}
+
+PRACCY_NOINLINE void* operator new[](std::size_t size, const std::nothrow_t&) noexcept {
+    if (t_isAudioThread) {
+        g_audioThreadAllocations.fetch_add(1, std::memory_order_relaxed);
+    }
+    return std::malloc(size ? size : 1);
+}
+
+PRACCY_NOINLINE void operator delete(void* p, const std::nothrow_t&) noexcept {
+    if (t_isAudioThread) {
+        g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
+    }
+    std::free(p);
+}
+
+PRACCY_NOINLINE void operator delete[](void* p, const std::nothrow_t&) noexcept {
+    if (t_isAudioThread) {
+        g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
+    }
+    std::free(p);
+}
+
+PRACCY_NOINLINE void* operator new(std::size_t size, std::align_val_t al) {
+    if (t_isAudioThread) {
+        g_audioThreadAllocations.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    void* p = _aligned_malloc(size ? size : 1, static_cast<std::size_t>(al));
+#else
+    void* p = std::aligned_alloc(static_cast<std::size_t>(al), ((size ? size : 1) + static_cast<std::size_t>(al) - 1) & ~(static_cast<std::size_t>(al) - 1));
+#endif
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+PRACCY_NOINLINE void* operator new[](std::size_t size, std::align_val_t al) {
+    if (t_isAudioThread) {
+        g_audioThreadAllocations.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    void* p = _aligned_malloc(size ? size : 1, static_cast<std::size_t>(al));
+#else
+    void* p = std::aligned_alloc(static_cast<std::size_t>(al), ((size ? size : 1) + static_cast<std::size_t>(al) - 1) & ~(static_cast<std::size_t>(al) - 1));
+#endif
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+PRACCY_NOINLINE void* operator new(std::size_t size, std::align_val_t al, const std::nothrow_t&) noexcept {
+    if (t_isAudioThread) {
+        g_audioThreadAllocations.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    return _aligned_malloc(size ? size : 1, static_cast<std::size_t>(al));
+#else
+    return std::aligned_alloc(static_cast<std::size_t>(al), ((size ? size : 1) + static_cast<std::size_t>(al) - 1) & ~(static_cast<std::size_t>(al) - 1));
+#endif
+}
+
+PRACCY_NOINLINE void* operator new[](std::size_t size, std::align_val_t al, const std::nothrow_t&) noexcept {
+    if (t_isAudioThread) {
+        g_audioThreadAllocations.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    return _aligned_malloc(size ? size : 1, static_cast<std::size_t>(al));
+#else
+    return std::aligned_alloc(static_cast<std::size_t>(al), ((size ? size : 1) + static_cast<std::size_t>(al) - 1) & ~(static_cast<std::size_t>(al) - 1));
+#endif
+}
+
+PRACCY_NOINLINE void operator delete(void* p, std::align_val_t al) noexcept {
+    (void)al;
+    if (t_isAudioThread) {
+        g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+PRACCY_NOINLINE void operator delete[](void* p, std::align_val_t al) noexcept {
+    (void)al;
+    if (t_isAudioThread) {
+        g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+PRACCY_NOINLINE void operator delete(void* p, std::size_t size, std::align_val_t al) noexcept {
+    (void)size;
+    (void)al;
+    if (t_isAudioThread) {
+        g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+PRACCY_NOINLINE void operator delete[](void* p, std::size_t size, std::align_val_t al) noexcept {
+    (void)size;
+    (void)al;
+    if (t_isAudioThread) {
+        g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+PRACCY_NOINLINE void operator delete(void* p, std::align_val_t al, const std::nothrow_t&) noexcept {
+    (void)al;
+    if (t_isAudioThread) {
+        g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+PRACCY_NOINLINE void operator delete[](void* p, std::align_val_t al, const std::nothrow_t&) noexcept {
+    (void)al;
+    if (t_isAudioThread) {
+        g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
 
 using namespace praccy;
 using namespace praccy::audio;
@@ -121,6 +242,10 @@ using namespace praccy::tools;
 // HEADLESS MOCK ASIO DRIVER IMPLEMENTATION (IASIO COM INTERFACE)
 // ============================================================================
 
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wnon-virtual-dtor"
+#endif
 class MockAsioDriver : public IASIO {
 public:
     MockAsioDriver() = default;
@@ -296,6 +421,9 @@ private:
     ASIOCallbacks* m_callbacks{nullptr};
     std::vector<float> m_rawDoubleBuffers;
 };
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 // ============================================================================
 // HEADLESS MOCK ASIO ENGINE

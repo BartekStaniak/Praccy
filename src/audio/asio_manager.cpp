@@ -1,23 +1,33 @@
 #include "asio_manager.h"
+#include "dsp_utils.h"
 #include <iostream>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <avrt.h>
+#if defined(_M_X64) || defined(__x86_64__)
+#include <xmmintrin.h>
+#endif
 
 namespace praccy::audio {
 
 AsioManager* AsioManager::s_instance = nullptr;
 
 AsioManager::AsioManager() {
-    s_instance = this;
-    CoInitialize(nullptr);
+    if (s_instance == nullptr) {
+        s_instance = this;
+    }
+    const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    m_comInitialized = SUCCEEDED(hr);
 }
 
 AsioManager::~AsioManager() {
     stop();
     unloadDriver();
-    CoUninitialize();
+    if (m_comInitialized) {
+        CoUninitialize();
+        m_comInitialized = false;
+    }
     if (s_instance == this) {
         s_instance = nullptr;
     }
@@ -96,9 +106,15 @@ bool AsioManager::loadDriver(const AsioDriverDesc& desc, HWND windowHandle) {
 
     int32_t granularity = 0;
     m_driver->getBufferSize(&m_info.minBufferSize, &m_info.maxBufferSize, &m_info.preferredBufferSize, &granularity);
+    if (m_info.preferredBufferSize <= 0) {
+        m_info.preferredBufferSize = 256;
+    }
     m_info.currentBufferSize = m_info.preferredBufferSize;
 
     m_driver->getSampleRate(&m_info.sampleRate);
+    if (m_info.sampleRate <= 0.0) {
+        m_info.sampleRate = 48000.0;
+    }
 
     // Query channel info
     m_info.inputChannels.resize(inCh);
@@ -115,6 +131,7 @@ bool AsioManager::loadDriver(const AsioDriverDesc& desc, HWND windowHandle) {
         m_driver->getChannelInfo(&m_info.outputChannels[i]);
     }
 
+    s_instance = this;
     return true;
 }
 
@@ -130,17 +147,25 @@ void AsioManager::unloadDriver() {
 
 bool AsioManager::start(int32_t bufferSize) {
     if (!m_driver) return false;
-    if (m_isRunning.load()) return true;
-
-    // Register MMCSS "Pro Audio" priority for calling control thread up front
-    if (!m_mmcssHandle) {
-        m_mmcssTaskIndex = 0;
-        m_mmcssHandle = AvSetMmThreadCharacteristicsW(L"Pro Audio", &m_mmcssTaskIndex);
-    }
 
     if (bufferSize <= 0) {
-        bufferSize = m_info.preferredBufferSize;
+        bufferSize = (m_info.currentBufferSize > 0) ? m_info.currentBufferSize
+                   : (m_info.preferredBufferSize > 0 ? m_info.preferredBufferSize : 256);
     }
+    if (m_info.minBufferSize > 0 && bufferSize < m_info.minBufferSize) {
+        bufferSize = m_info.minBufferSize;
+    }
+    if (m_info.maxBufferSize > 0 && bufferSize > m_info.maxBufferSize) {
+        bufferSize = m_info.maxBufferSize;
+    }
+
+    if (m_isRunning.load(std::memory_order_relaxed)) {
+        if (m_info.currentBufferSize == bufferSize) {
+            return true;
+        }
+        stop();
+    }
+
     m_info.currentBufferSize = bufferSize;
 
     const int32_t totalChannels = m_info.numInputChannels + m_info.numOutputChannels;
@@ -169,61 +194,128 @@ bool AsioManager::start(int32_t bufferSize) {
     ASIOError err = m_driver->createBuffers(m_bufferInfos.data(), totalChannels, bufferSize, &m_callbacks);
     if (err != ASE_OK) {
         std::cerr << "createBuffers failed with error: " << err << "\n";
-        if (m_mmcssHandle) {
-            AvRevertMmThreadCharacteristics(m_mmcssHandle);
-            m_mmcssHandle = nullptr;
-            m_mmcssTaskIndex = 0;
-        }
         return false;
     }
 
     m_inputFloatBuffer.resize(std::max(1, m_info.numInputChannels), bufferSize);
     m_outputFloatBuffer.resize(std::max(1, m_info.numOutputChannels), bufferSize);
 
+    m_atomicBufferSize.store(bufferSize, std::memory_order_release);
+    m_atomicSampleRate.store(m_info.sampleRate, std::memory_order_release);
+
     err = m_driver->start();
     if (err != ASE_OK) {
         std::cerr << "driver start failed with error: " << err << "\n";
         m_driver->disposeBuffers();
-        if (m_mmcssHandle) {
-            AvRevertMmThreadCharacteristics(m_mmcssHandle);
-            m_mmcssHandle = nullptr;
-            m_mmcssTaskIndex = 0;
-        }
         return false;
     }
 
-    m_isRunning.store(true);
+    m_isRunning.store(true, std::memory_order_release);
     return true;
 }
 
 void AsioManager::stop() {
-    if (!m_driver || !m_isRunning.load()) return;
+    if (!m_driver || !m_isRunning.load(std::memory_order_acquire)) return;
 
-    m_isRunning.store(false);
+    m_isRunning.store(false, std::memory_order_release);
     m_driver->stop();
     m_driver->disposeBuffers();
-
-    // Cleanly revert MMCSS association on the same calling control thread
-    if (m_mmcssHandle) {
-        AvRevertMmThreadCharacteristics(m_mmcssHandle);
-        m_mmcssHandle = nullptr;
-        m_mmcssTaskIndex = 0;
-    }
 }
 
 void AsioManager::openControlPanel() {
     if (m_driver) {
         m_driver->controlPanel();
+        checkHardwareChanges();
     }
 }
 
-void AsioManager::bufferSwitchCallback(int32_t doubleBufferIndex, ASIOBool directProcess) {
+bool AsioManager::setBufferSize(int32_t bufferSize) {
+    if (!m_driver || bufferSize <= 0) return false;
+    if (m_info.currentBufferSize == bufferSize && m_isRunning.load(std::memory_order_relaxed)) {
+        return true;
+    }
+    bool wasRunning = m_isRunning.load(std::memory_order_relaxed);
+    if (wasRunning) {
+        stop();
+    }
+    m_info.currentBufferSize = bufferSize;
+    if (wasRunning) {
+        return start(bufferSize);
+    }
+    return true;
+}
+
+bool AsioManager::setSampleRate(double sampleRate) {
+    if (!m_driver || sampleRate <= 0.0) return false;
+    if (m_driver->canSampleRate(sampleRate) != ASE_OK) return false;
+    if (std::abs(m_info.sampleRate - sampleRate) < 1.0) return true;
+
+    bool wasRunning = m_isRunning.load(std::memory_order_relaxed);
+    if (wasRunning) {
+        stop();
+    }
+    ASIOError err = m_driver->setSampleRate(sampleRate);
+    if (err == ASE_OK) {
+        m_info.sampleRate = sampleRate;
+    }
+    if (wasRunning) {
+        start(m_info.currentBufferSize);
+    }
+    return err == ASE_OK;
+}
+
+bool AsioManager::canSampleRate(double sampleRate) const noexcept {
+    if (!m_driver || sampleRate <= 0.0) return false;
+    return m_driver->canSampleRate(sampleRate) == ASE_OK;
+}
+
+bool AsioManager::checkHardwareChanges() {
+    if (!m_driver) return false;
+
+    bool changed = false;
+    double currentSr = m_info.sampleRate;
+    if (m_driver->getSampleRate(&currentSr) == ASE_OK && currentSr > 0.0) {
+        if (std::abs(currentSr - m_info.sampleRate) > 1.0) {
+            m_info.sampleRate = currentSr;
+            changed = true;
+        }
+    }
+
+    int32_t minSz = 0, maxSz = 0, prefSz = 0, gran = 0;
+    if (m_driver->getBufferSize(&minSz, &maxSz, &prefSz, &gran) == ASE_OK) {
+        m_info.minBufferSize = minSz;
+        m_info.maxBufferSize = maxSz;
+        if (prefSz > 0 && prefSz != m_info.preferredBufferSize) {
+            m_info.preferredBufferSize = prefSz;
+            m_info.currentBufferSize = prefSz;
+            changed = true;
+        }
+    }
+
+    if (m_resetRequested.exchange(false, std::memory_order_acq_rel)) {
+        int32_t pending = m_pendingBufferSize.exchange(0, std::memory_order_acq_rel);
+        if (pending > 0) {
+            m_info.currentBufferSize = pending;
+            m_info.preferredBufferSize = pending;
+            m_atomicBufferSize.store(pending, std::memory_order_release);
+        } else if (prefSz > 0 && m_info.currentBufferSize != prefSz) {
+            m_info.currentBufferSize = prefSz;
+            m_info.preferredBufferSize = prefSz;
+            m_atomicBufferSize.store(prefSz, std::memory_order_release);
+        }
+        changed = true;
+    }
+
+    return changed;
+}
+
+void AsioManager::bufferSwitchCallback(int32_t doubleBufferIndex, ASIOBool /*directProcess*/) {
     if (s_instance) {
         s_instance->processAudio(doubleBufferIndex);
     }
 }
 
-ASIOTime* AsioManager::bufferSwitchTimeInfoCallback(ASIOTime* params, int32_t doubleBufferIndex, ASIOBool directProcess) {
+ASIOTime* AsioManager::bufferSwitchTimeInfoCallback(ASIOTime* /*params*/, int32_t doubleBufferIndex, ASIOBool /*directProcess*/) {
     if (s_instance) {
         s_instance->processAudio(doubleBufferIndex);
     }
@@ -231,18 +323,36 @@ ASIOTime* AsioManager::bufferSwitchTimeInfoCallback(ASIOTime* params, int32_t do
 }
 
 void AsioManager::sampleRateDidChangeCallback(double sRate) {
-    if (s_instance) {
+    if (s_instance && sRate > 0.0) {
         s_instance->m_info.sampleRate = sRate;
+        s_instance->m_atomicSampleRate.store(sRate, std::memory_order_release);
+        s_instance->m_resetRequested.store(true, std::memory_order_release);
     }
 }
 
-int32_t AsioManager::asioMessageCallback(int32_t selector, int32_t value, void* message, double* opt) {
+int32_t AsioManager::asioMessageCallback(int32_t selector, int32_t value, void* /*message*/, double* /*opt*/) {
     switch (selector) {
         case 1: // kAsioSelectorSupported
             if (value == 2) return 1; // kAsioEngineVersion
+            if (value == 3) return 1; // kAsioResetRequest
+            if (value == 4) return 1; // kAsioBufferSizeChange
+            if (value == 7) return 1; // kAsioSupportsTimeInfo
             return 0;
         case 2: // kAsioEngineVersion
             return 2; // Host ASIO version 2.0
+        case 3: // kAsioResetRequest
+            if (s_instance) {
+                s_instance->m_resetRequested.store(true, std::memory_order_release);
+            }
+            return 1;
+        case 4: // kAsioBufferSizeChange
+            if (s_instance) {
+                if (value > 0) {
+                    s_instance->m_pendingBufferSize.store(value, std::memory_order_release);
+                }
+                s_instance->m_resetRequested.store(true, std::memory_order_release);
+            }
+            return 0; // Host requires asioResetRequest / buffer recreation
         case 7: // kAsioSupportsTimeInfo
             return 1;
         default:
@@ -314,7 +424,12 @@ void AsioManager::unpackSamples(ASIOSampleType type, const void* src, float* dst
             break;
         }
         case ASIOSTFloat32LSB: {
-            std::memcpy(dst, src, numSamples * sizeof(float));
+            const auto* s = static_cast<const float*>(src);
+            for (uint32_t i = 0; i < numSamples; ++i) {
+                float val = s[i];
+                if (!std::isfinite(val)) val = 0.0f;
+                dst[i] = val;
+            }
             break;
         }
         case ASIOSTInt16LSB: {
@@ -337,26 +452,45 @@ void AsioManager::unpackSamples(ASIOSampleType type, const void* src, float* dst
     }
 }
 
+void AsioManager::packInt32LSB(const float* src, int32_t* dst, uint32_t numSamples) noexcept {
+    if (!src || !dst || numSamples == 0) return;
+
+    for (uint32_t i = 0; i < numSamples; ++i) {
+        float sample = src[i];
+        if (!std::isfinite(sample)) sample = 0.0f;
+        const double scaled = std::clamp(static_cast<double>(sample), -1.0, 1.0) * 2147483647.0;
+        dst[i] = static_cast<int32_t>(std::lrint(scaled));
+    }
+}
+
+void AsioManager::packFloat32LSB(const float* src, float* dst, uint32_t numSamples) noexcept {
+    if (!src || !dst || numSamples == 0) return;
+
+    for (uint32_t i = 0; i < numSamples; ++i) {
+        float s = src[i];
+        if (!std::isfinite(s)) s = 0.0f;
+        dst[i] = std::clamp(s, -1.0f, 1.0f);
+    }
+}
+
 void AsioManager::packSamples(ASIOSampleType type, const float* src, void* dst, uint32_t numSamples) noexcept {
     if (!src || !dst || numSamples == 0) return;
 
     switch (type) {
         case ASIOSTInt32LSB: {
-            auto* d = static_cast<int32_t*>(dst);
-            for (uint32_t i = 0; i < numSamples; ++i) {
-                float sample = std::clamp(src[i], -1.0f, 1.0f);
-                d[i] = static_cast<int32_t>(sample * 2147483647.0f);
-            }
+            packInt32LSB(src, static_cast<int32_t*>(dst), numSamples);
             break;
         }
         case ASIOSTFloat32LSB: {
-            std::memcpy(dst, src, numSamples * sizeof(float));
+            packFloat32LSB(src, static_cast<float*>(dst), numSamples);
             break;
         }
         case ASIOSTInt16LSB: {
             auto* d = static_cast<int16_t*>(dst);
             for (uint32_t i = 0; i < numSamples; ++i) {
-                float sample = std::clamp(src[i], -1.0f, 1.0f);
+                float sample = src[i];
+                if (!std::isfinite(sample)) sample = 0.0f;
+                sample = std::clamp(sample, -1.0f, 1.0f);
                 d[i] = static_cast<int16_t>(sample * 32767.0f);
             }
             break;
@@ -374,17 +508,42 @@ void AsioManager::packSamples(ASIOSampleType type, const float* src, void* dst, 
     }
 }
 
+namespace {
+
+struct ThreadLocalMmcssGuard {
+    HANDLE handle{nullptr};
+    DWORD taskIndex{0};
+
+    ThreadLocalMmcssGuard() {
+        taskIndex = 0;
+        handle = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
+    }
+
+    ~ThreadLocalMmcssGuard() {
+        if (handle) {
+            AvRevertMmThreadCharacteristics(handle);
+            handle = nullptr;
+        }
+    }
+
+    ThreadLocalMmcssGuard(const ThreadLocalMmcssGuard&) = delete;
+    ThreadLocalMmcssGuard& operator=(const ThreadLocalMmcssGuard&) = delete;
+};
+
+} // namespace
+
 void AsioManager::processAudio(int32_t doubleBufferIndex) {
     if (!m_isRunning.load(std::memory_order_relaxed)) return;
 
-    // Optional thread-local MMCSS registration on driver streaming thread (no cross-thread handle sharing)
-    thread_local HANDLE tl_driverMmcss = nullptr;
-    thread_local DWORD tl_driverTaskIdx = 0;
-    if (!tl_driverMmcss) {
-        tl_driverMmcss = AvSetMmThreadCharacteristicsW(L"Pro Audio", &tl_driverTaskIdx);
-    }
+    thread_local ThreadLocalMmcssGuard mmcssGuard;
 
-    const uint32_t bufferSize = static_cast<uint32_t>(m_info.currentBufferSize);
+    DspUtils::ScopedDenormalGuard denormalGuard;
+
+    const uint32_t maxBuf = static_cast<uint32_t>(m_inputFloatBuffer.maxSamples());
+    const int32_t reqSize = m_atomicBufferSize.load(std::memory_order_relaxed);
+    const uint32_t bufferSize = (maxBuf > 0 && reqSize > 0)
+        ? std::min<uint32_t>(static_cast<uint32_t>(reqSize), maxBuf)
+        : static_cast<uint32_t>(std::max(0, reqSize));
     const int32_t inCh = m_info.numInputChannels;
     const int32_t outCh = m_info.numOutputChannels;
 

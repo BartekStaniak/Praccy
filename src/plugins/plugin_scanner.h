@@ -3,10 +3,16 @@
 #include <string>
 #include <vector>
 #include <unordered_set>
+#include <unordered_map>
 #include <filesystem>
 #include <mutex>
 #include <atomic>
 #include <thread>
+#include <optional>
+
+namespace praccy::state {
+struct AppConfig;
+}
 
 namespace praccy::plugins {
 
@@ -36,6 +42,8 @@ struct PluginDescriptor {
     }
 };
 
+std::string detectPluginCategory(const std::string& name, const std::string& vendor);
+
 enum class PluginSortMode {
     NameAscending = 0,
     NameDescending,
@@ -45,7 +53,7 @@ enum class PluginSortMode {
 
 class PluginScanner {
 public:
-    PluginScanner();
+    explicit PluginScanner(const std::string& configPath = "");
     ~PluginScanner();
 
     void scanAll();
@@ -53,16 +61,36 @@ public:
     void addCustomSearchPath(const std::string& path);
     void removeCustomSearchPath(size_t index);
     [[nodiscard]] std::vector<std::string> searchPaths() const;
+    [[nodiscard]] bool isSystemDefaultPath(const std::string& path) const;
 
     [[nodiscard]] std::vector<PluginDescriptor> scannedPlugins() const;
     [[nodiscard]] size_t numPlugins() const;
     [[nodiscard]] bool isScanning() const noexcept { return m_isScanning.load(); }
 
+    void addPlugin(const PluginDescriptor& desc);
+    void saveToAppConfig(const std::string& customPath = "") const;
+    void loadFromAppConfig(const std::string& customPath = "");
+    void exportToConfig(state::AppConfig& cfg) const;
+    void loadFromConfig(const state::AppConfig& cfg);
+
     [[nodiscard]] bool isFavorite(const std::string& nameOrPath) const;
     void toggleFavorite(const std::string& nameOrPath);
     [[nodiscard]] size_t numFavorites() const;
+    [[nodiscard]] std::vector<std::string> favorites() const;
+    void setFavorites(const std::vector<std::string>& favs);
+
+    void setCustomCategory(const std::string& pluginName, const std::string& category);
+    void resetCustomCategory(const std::string& pluginName);
+    [[nodiscard]] std::string getPluginCategory(const std::string& pluginName, const std::string& vendor = "") const;
 
     [[nodiscard]] const PluginDescriptor* resolvePlugin(
+        const std::string& name,
+        const std::string& bundleFileName = "",
+        const std::string& guidOrClapId = "",
+        PluginType preferredType = PluginType::VST3
+    ) const;
+
+    [[nodiscard]] std::optional<PluginDescriptor> resolvePluginCopy(
         const std::string& name,
         const std::string& bundleFileName = "",
         const std::string& guidOrClapId = "",
@@ -81,16 +109,24 @@ public:
 private:
     void addDefaultPaths();
     void runScan();
-    void scanDirectory(const std::filesystem::path& dirPath, std::vector<PluginDescriptor>& outPlugins);
+    void scanDirectory(
+        const std::filesystem::path& dirPath,
+        std::vector<PluginDescriptor>& outPlugins,
+        const std::unordered_map<std::string, std::vector<PluginDescriptor>>& cachedByPath
+    );
     static std::string detectVendor(const std::filesystem::path& path, const std::string& name);
 
     std::vector<std::string> m_searchPaths;
     std::vector<PluginDescriptor> m_plugins;
-    std::unordered_set<std::string> m_favorites;
+    mutable std::vector<std::vector<PluginDescriptor>> m_retiredPluginSnapshots;
+    std::vector<std::string> m_favorites;
+    bool m_favoritesInitialized{false};
+    std::unordered_map<std::string, std::string> m_categoryOverrides;
     mutable std::mutex m_mutex;
     std::atomic<bool> m_isScanning{false};
     std::atomic<bool> m_shouldStop{false};
     std::thread m_scanThread;
+    std::string m_configPath;
 };
 
 } // namespace praccy::plugins

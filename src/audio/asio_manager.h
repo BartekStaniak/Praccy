@@ -49,12 +49,19 @@ public:
 
     [[nodiscard]] bool isLoaded() const noexcept { return m_driver != nullptr; }
     [[nodiscard]] bool isRunning() const noexcept { return m_isRunning.load(std::memory_order_relaxed); }
+    [[nodiscard]] double currentSampleRate() const noexcept { return m_atomicSampleRate.load(std::memory_order_relaxed); }
+    [[nodiscard]] int32_t currentBufferSize() const noexcept { return m_atomicBufferSize.load(std::memory_order_relaxed); }
     [[nodiscard]] const AsioDriverInfo& driverInfo() const noexcept { return m_info; }
-    [[nodiscard]] double currentSampleRate() const noexcept { return m_info.sampleRate; }
-    [[nodiscard]] int32_t currentBufferSize() const noexcept { return m_info.currentBufferSize; }
+
+    bool setSampleRate(double sampleRate);
+    bool setBufferSize(int32_t bufferSize);
+    [[nodiscard]] bool canSampleRate(double sampleRate) const noexcept;
+    bool checkHardwareChanges();
 
     void setAudioCallback(AudioCallbackFn callback) {
-        m_callback = std::move(callback);
+        if (!m_isRunning.load(std::memory_order_acquire)) {
+            m_callback = std::move(callback);
+        }
     }
 
     // Sample format conversion routines (public for real-time engine & unit tests)
@@ -67,6 +74,9 @@ public:
     static void unpackInt32LSB24(const void* src, float* dst, uint32_t numSamples) noexcept;
     static void packInt32LSB24(const float* src, void* dst, uint32_t numSamples) noexcept;
 
+    static void packInt32LSB(const float* src, int32_t* dst, uint32_t numSamples) noexcept;
+    static void packFloat32LSB(const float* src, float* dst, uint32_t numSamples) noexcept;
+
 private:
     static void bufferSwitchCallback(int32_t doubleBufferIndex, ASIOBool directProcess);
     static ASIOTime* bufferSwitchTimeInfoCallback(ASIOTime* params, int32_t doubleBufferIndex, ASIOBool directProcess);
@@ -77,20 +87,22 @@ private:
 
     static AsioManager* s_instance;
 
+    bool m_comInitialized{false};
     IASIO* m_driver{nullptr};
     AsioDriverInfo m_info;
     std::vector<ASIOBufferInfo> m_bufferInfos;
     ASIOCallbacks m_callbacks{};
     std::atomic<bool> m_isRunning{false};
+    std::atomic<bool> m_resetRequested{false};
+    std::atomic<double> m_atomicSampleRate{48000.0};
+    std::atomic<int32_t> m_atomicBufferSize{256};
+    std::atomic<int32_t> m_pendingBufferSize{0};
 
     AudioCallbackFn m_callback;
 
     // Pre-allocated conversion buffers for zero-allocation realtime streaming
     OwnedAudioBuffer m_inputFloatBuffer;
     OwnedAudioBuffer m_outputFloatBuffer;
-
-    HANDLE m_mmcssHandle{nullptr};
-    DWORD m_mmcssTaskIndex{0};
 };
 
 } // namespace praccy::audio

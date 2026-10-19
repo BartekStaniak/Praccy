@@ -5,6 +5,7 @@
 #include <string_view>
 #include <array>
 #include <cmath>
+#undef NDEBUG
 #include <cassert>
 #include <thread>
 #include <atomic>
@@ -20,7 +21,6 @@
 #include <random>
 
 #if defined(__GNUC__)
-#pragma GCC diagnostic ignored "-Wmismatched-new-delete"
 #pragma GCC diagnostic ignored "-Wunused-function"
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #endif
@@ -40,11 +40,17 @@ using namespace praccy::utils;
 // ============================================================================
 // Real-Time Memory Allocation & Thread Monitoring Hooks
 // ============================================================================
+#if defined(__GNUC__)
+#define PRACCY_NOINLINE __attribute__((noinline))
+#else
+#define PRACCY_NOINLINE
+#endif
+
 static thread_local bool t_isAudioThread = false;
 static std::atomic<uint64_t> g_audioThreadAllocations{0};
 static std::atomic<uint64_t> g_audioThreadDeallocations{0};
 
-void* operator new(std::size_t size) {
+PRACCY_NOINLINE void* operator new(std::size_t size) {
     if (t_isAudioThread) {
         g_audioThreadAllocations.fetch_add(1, std::memory_order_relaxed);
     }
@@ -53,14 +59,14 @@ void* operator new(std::size_t size) {
     return p;
 }
 
-void operator delete(void* p) noexcept {
+PRACCY_NOINLINE void operator delete(void* p) noexcept {
     if (t_isAudioThread) {
         g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
     }
     std::free(p);
 }
 
-void* operator new[](std::size_t size) {
+PRACCY_NOINLINE void* operator new[](std::size_t size) {
     if (t_isAudioThread) {
         g_audioThreadAllocations.fetch_add(1, std::memory_order_relaxed);
     }
@@ -69,25 +75,101 @@ void* operator new[](std::size_t size) {
     return p;
 }
 
-void operator delete[](void* p) noexcept {
+PRACCY_NOINLINE void operator delete[](void* p) noexcept {
     if (t_isAudioThread) {
         g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
     }
     std::free(p);
 }
 
-void operator delete(void* p, std::size_t) noexcept {
+PRACCY_NOINLINE void operator delete(void* p, std::size_t) noexcept {
     if (t_isAudioThread) {
         g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
     }
     std::free(p);
 }
 
-void operator delete[](void* p, std::size_t) noexcept {
+PRACCY_NOINLINE void operator delete[](void* p, std::size_t) noexcept {
     if (t_isAudioThread) {
         g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
     }
     std::free(p);
+}
+
+PRACCY_NOINLINE void* operator new(std::size_t size, std::align_val_t al) {
+    if (t_isAudioThread) {
+        g_audioThreadAllocations.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    void* p = _aligned_malloc(size ? size : 1, static_cast<std::size_t>(al));
+#else
+    void* p = std::aligned_alloc(static_cast<std::size_t>(al), ((size ? size : 1) + static_cast<std::size_t>(al) - 1) & ~(static_cast<std::size_t>(al) - 1));
+#endif
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+PRACCY_NOINLINE void* operator new[](std::size_t size, std::align_val_t al) {
+    if (t_isAudioThread) {
+        g_audioThreadAllocations.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    void* p = _aligned_malloc(size ? size : 1, static_cast<std::size_t>(al));
+#else
+    void* p = std::aligned_alloc(static_cast<std::size_t>(al), ((size ? size : 1) + static_cast<std::size_t>(al) - 1) & ~(static_cast<std::size_t>(al) - 1));
+#endif
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+PRACCY_NOINLINE void operator delete(void* p, std::align_val_t al) noexcept {
+    (void)al;
+    if (t_isAudioThread) {
+        g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+PRACCY_NOINLINE void operator delete[](void* p, std::align_val_t al) noexcept {
+    (void)al;
+    if (t_isAudioThread) {
+        g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+PRACCY_NOINLINE void operator delete(void* p, std::size_t size, std::align_val_t al) noexcept {
+    (void)size;
+    (void)al;
+    if (t_isAudioThread) {
+        g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+PRACCY_NOINLINE void operator delete[](void* p, std::size_t size, std::align_val_t al) noexcept {
+    (void)size;
+    (void)al;
+    if (t_isAudioThread) {
+        g_audioThreadDeallocations.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
 }
 
 // ============================================================================
@@ -569,14 +651,20 @@ void test_RT_ParamAutomation_Concurrent_ZeroAlloc() {
     std::atomic<uint64_t> totalDrains{0};
 
     // Thread 1 & Thread 2: Simulating UI and MIDI threads rapidly setting parameters
+    // Stresses both direct indices (0..1023) and CAS overflow table (>= 1024 up to UINT32_MAX)
     auto writerFn = [&](uint32_t seed) {
         std::mt19937 rng(seed);
-        std::uniform_int_distribution<uint32_t> paramDist(0, ParamAutomationRegister::MAX_PARAMS - 1);
+        std::uniform_int_distribution<uint32_t> paramDist(0, 4096);
+        std::uniform_int_distribution<int> categoryDist(0, 7);
         std::uniform_real_distribution<float> valDist(-1.0f, 1.0f);
 
         while (!stop.load(std::memory_order_relaxed)) {
             for (int i = 0; i < 64; ++i) {
-                reg.setParameter(paramDist(rng), valDist(rng));
+                uint32_t id = paramDist(rng);
+                if (categoryDist(rng) == 0) {
+                    id = UINT32_MAX - (id % 64);
+                }
+                reg.setParameter(id, valDist(rng));
                 totalWrites.fetch_add(1, std::memory_order_relaxed);
             }
             std::this_thread::yield();
@@ -606,6 +694,16 @@ void test_RT_ParamAutomation_Concurrent_ZeroAlloc() {
     uiThread.join();
     midiThread.join();
 
+    // Final clean drain on audio thread: ensure all parameters drain cleanly without loss
+    t_isAudioThread = true;
+    reg.drainDirty([&](uint32_t id, float val) {
+        (void)id;
+        (void)val;
+        totalDrains.fetch_add(1, std::memory_order_relaxed);
+    });
+    t_isAudioThread = false;
+
+    assert(!reg.isDirty());
     assert(g_audioThreadAllocations.load() == 0);
     assert(g_audioThreadDeallocations.load() == 0);
     assert(totalWrites.load() > 0);
@@ -617,7 +715,27 @@ void test_RT_GraphEngine_Concurrent_StructuralMutations_ZeroAlloc() {
     GraphEngine engine;
     engine.prepare(48000.0, 256);
 
-    // Pre-populate with initial serial nodes
+    // Pre-populate with a permanent ParallelSplitMergeBlock at index 0 containing initial branches
+    auto splitBlock = std::make_unique<ParallelSplitMergeBlock>("RT_SplitBlock");
+    splitBlock->prepare(48000.0, 256);
+    splitBlock->addBranch("Branch_A");
+    splitBlock->addBranch("Branch_B");
+
+    // Warm up ParallelSplitMergeBlock branch vector capacity on UI thread prior to audio start
+    for (int b = 0; b < 16; ++b) {
+        splitBlock->addBranch("WarmupBranch_" + std::to_string(b));
+    }
+    for (int b = 0; b < 16; ++b) {
+        splitBlock->removeBranch(splitBlock->numBranches() - 1);
+    }
+    splitBlock->addBranch("Branch_A");
+    splitBlock->addBranch("Branch_B");
+    splitBlock->collectReclaimedBranches();
+
+    auto* splitBlockPtr = splitBlock.get();
+    engine.addSerialNode(std::move(splitBlock));
+
+    // Pre-populate with initial serial nodes at indices 1..4
     for (int i = 0; i < 4; ++i) {
         auto node = std::make_unique<MockLatencyNode>(i * 10);
         auto slot = std::make_unique<PluginSlot>(std::move(node));
@@ -627,15 +745,16 @@ void test_RT_GraphEngine_Concurrent_StructuralMutations_ZeroAlloc() {
     std::atomic<bool> stop{false};
     std::atomic<uint64_t> structuralMutationsCount{0};
 
-    // UI Thread: Rapidly adding, removing, swapping, and reordering nodes
+    // UI Thread: Rapidly adding, removing, swapping, reordering nodes,
+    // mutating ParallelSplitMergeBlock branches, and performing >64 rapid slot removals
     std::thread uiWorker([&]() {
         std::mt19937 rng(777);
-        std::uniform_int_distribution<int> opDist(0, 4);
+        std::uniform_int_distribution<int> opDist(0, 6);
 
         while (!stop.load(std::memory_order_relaxed)) {
             const int op = opDist(rng);
             switch (op) {
-                case 0: { // Add
+                case 0: { // Add serial slot
                     if (engine.numNodes() < 16) {
                         auto n = std::make_unique<MockLatencyNode>(16);
                         auto s = std::make_unique<PluginSlot>(std::move(n));
@@ -644,23 +763,23 @@ void test_RT_GraphEngine_Concurrent_StructuralMutations_ZeroAlloc() {
                     }
                     break;
                 }
-                case 1: { // Remove
+                case 1: { // Remove serial slot (never remove index 0)
                     if (engine.numNodes() > 2) {
                         engine.removeSerialNode(engine.numNodes() - 1);
                         structuralMutationsCount.fetch_add(1, std::memory_order_relaxed);
                     }
                     break;
                 }
-                case 2: { // Swap
-                    if (engine.numNodes() >= 2) {
-                        engine.swapNodes(0, 1);
+                case 2: { // Swap (among serial slots > 0)
+                    if (engine.numNodes() >= 3) {
+                        engine.swapNodes(1, 2);
                         structuralMutationsCount.fetch_add(1, std::memory_order_relaxed);
                     }
                     break;
                 }
-                case 3: { // Reorder
-                    if (engine.numNodes() >= 3) {
-                        engine.reorderNodes(0, 2);
+                case 3: { // Reorder (among serial slots > 0)
+                    if (engine.numNodes() >= 4) {
+                        engine.reorderNodes(1, 3);
                         structuralMutationsCount.fetch_add(1, std::memory_order_relaxed);
                     }
                     break;
@@ -675,15 +794,51 @@ void test_RT_GraphEngine_Concurrent_StructuralMutations_ZeroAlloc() {
                     }
                     break;
                 }
+                case 5: { // ParallelSplitMergeBlock branch additions and deletions
+                    if (splitBlockPtr) {
+                        if (splitBlockPtr->numBranches() < 8) {
+                            splitBlockPtr->addBranch("DynamicBranch");
+                            structuralMutationsCount.fetch_add(1, std::memory_order_relaxed);
+                        } else if (splitBlockPtr->numBranches() > 2) {
+                            splitBlockPtr->removeBranch(splitBlockPtr->numBranches() - 1);
+                            structuralMutationsCount.fetch_add(1, std::memory_order_relaxed);
+                        }
+                        splitBlockPtr->collectReclaimedBranches();
+                    }
+                    break;
+                }
+                case 6: { // Stress >64 rapid slot removals to verify bounded reclamation ring buffers (1024)
+                    if (engine.numNodes() < 10) {
+                        for (int k = 0; k < 68; ++k) {
+                            auto n = std::make_unique<MockLatencyNode>(4);
+                            auto s = std::make_unique<PluginSlot>(std::move(n));
+                            engine.addSerialNode(std::move(s));
+                        }
+                        int removed = 0;
+                        while (engine.numNodes() > 2 && removed < 66) {
+                            engine.removeSerialNode(engine.numNodes() - 1);
+                            structuralMutationsCount.fetch_add(1, std::memory_order_relaxed);
+                            removed++;
+                        }
+                    }
+                    engine.processReclamation();
+                    break;
+                }
             }
 
             // UI thread regularly collects reclaimed retired nodes
             engine.processReclamation();
+            if (splitBlockPtr) {
+                splitBlockPtr->collectReclaimedBranches();
+            }
             std::this_thread::sleep_for(std::chrono::microseconds(50));
         }
 
         // Final reclamation
         engine.processReclamation();
+        if (splitBlockPtr) {
+            splitBlockPtr->collectReclaimedBranches();
+        }
     });
 
     // Audio Thread: pumping 5,000 blocks with memory allocation tracking active

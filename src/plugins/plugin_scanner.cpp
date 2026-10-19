@@ -1,4 +1,6 @@
 #include "plugin_scanner.h"
+#include "plugin_base.h"
+#include "crash_isolation.h"
 #include "../state/app_config.h"
 #include "../utils/guid_utils.h"
 #include <cstdlib>
@@ -7,22 +9,84 @@
 #include <algorithm>
 #include <set>
 #include <unordered_set>
+#if defined(_WIN32)
 #include <windows.h>
+#else
+#include <strings.h>
+#define _stricmp strcasecmp
+using HMODULE = void*;
+#endif
 #include <pluginterfaces/base/ipluginbase.h>
+#include <clap/clap.h>
+#include <fstream>
 
 namespace praccy::plugins {
 
 using GetFactoryProc = Steinberg::IPluginFactory* (PLUGIN_API *)();
 
-PluginScanner::PluginScanner() {
-    addDefaultPaths();
-    // Load favorites from app config
-    state::AppConfig cfg;
-    if (cfg.load()) {
-        for (const auto& fav : cfg.favoritePlugins) {
-            m_favorites.insert(fav);
+namespace {
+
+std::string toLowerString(std::string_view str) {
+    std::string out(str);
+    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return out;
+}
+
+std::string cleanName(std::string_view rawName) {
+    std::string name(rawName);
+    if (name.size() >= 5) {
+        std::string ext = name.substr(name.size() - 5);
+        std::string extLower = toLowerString(ext);
+        if (extLower == ".vst3" || extLower == ".clap") {
+            name.resize(name.size() - 5);
         }
     }
+    while (!name.empty() && name.back() == ' ') {
+        name.pop_back();
+    }
+    return name;
+}
+
+bool matchesFavoriteString(const std::string& fav, const std::string& target) {
+    if (fav.empty() || target.empty()) return false;
+    if (fav == target) return true;
+
+    std::filesystem::path pFav(fav);
+    std::filesystem::path pTarget(target);
+    std::string favStem = pFav.stem().string();
+    std::string targetStem = pTarget.stem().string();
+
+    if (favStem == target || fav == targetStem || favStem == targetStem) return true;
+
+    std::string cleanFav = toLowerString(cleanName(favStem));
+    std::string cleanTarget = toLowerString(cleanName(targetStem));
+    return !cleanFav.empty() && cleanFav == cleanTarget;
+}
+
+bool isValidPeBinary(const std::filesystem::path& p) {
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(p, ec)) return false;
+    auto sz = std::filesystem::file_size(p, ec);
+    if (ec || sz < 64) return false;
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return false;
+    char magic[2] = {0};
+    f.read(magic, 2);
+    return (f.gcount() == 2 && magic[0] == 'M' && magic[1] == 'Z');
+}
+
+} // namespace
+
+PluginScanner::PluginScanner(const std::string& configPath)
+    : m_configPath(configPath)
+{
+#if defined(_WIN32)
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+    SetThreadErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX, nullptr);
+#endif
+    addDefaultPaths();
 
     // Register built-in effects immediately so they are available right away
     m_plugins.push_back(PluginDescriptor{
@@ -55,6 +119,12 @@ PluginScanner::PluginScanner() {
         .classGuid = "",
         .clapId = ""
     });
+
+    // Load favorites, custom categories, custom paths, and cached scanned plugins
+    state::AppConfig cfg;
+    if (cfg.load(m_configPath)) {
+        loadFromConfig(cfg);
+    }
 }
 
 PluginScanner::~PluginScanner() {
@@ -79,6 +149,135 @@ size_t PluginScanner::numPlugins() const {
     return m_plugins.size();
 }
 
+void PluginScanner::addPlugin(const PluginDescriptor& desc) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = std::find_if(m_plugins.begin(), m_plugins.end(), [&](const PluginDescriptor& d) {
+        return d.name == desc.name && d.type == desc.type;
+    });
+    if (it == m_plugins.end()) {
+        if (m_plugins.size() == m_plugins.capacity()) {
+            std::vector<PluginDescriptor> updated = m_plugins;
+            updated.push_back(desc);
+            { if (m_retiredPluginSnapshots.size() >= 2) m_retiredPluginSnapshots.erase(m_retiredPluginSnapshots.begin()); m_retiredPluginSnapshots.push_back(std::move(m_plugins)); }
+            m_plugins = std::move(updated);
+        } else {
+            m_plugins.push_back(desc);
+        }
+    } else {
+        *it = desc;
+    }
+}
+
+void PluginScanner::loadFromConfig(const state::AppConfig& cfg) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_favorites.clear();
+    for (const auto& fav : cfg.favoritePlugins) {
+        if (!fav.empty() && std::find(m_favorites.begin(), m_favorites.end(), fav) == m_favorites.end()) {
+            m_favorites.push_back(fav);
+        }
+    }
+    m_favoritesInitialized = true;
+    for (const auto& [name, cat] : cfg.customPluginCategories) {
+        m_categoryOverrides[name] = cat;
+    }
+    for (const auto& cp : cfg.customPluginPaths) {
+        if (!cp.empty() && std::find(m_searchPaths.begin(), m_searchPaths.end(), cp) == m_searchPaths.end()) {
+            m_searchPaths.push_back(cp);
+        }
+    }
+    for (const auto& sp : cfg.scannedPlugins) {
+        PluginDescriptor desc;
+        desc.name = sp.name;
+        desc.path = sp.path;
+        if (sp.type == "CLAP" || sp.type == "clap" || sp.type == "1") {
+            desc.type = PluginType::CLAP;
+        } else if (sp.type == "VST3" || sp.type == "vst3" || sp.type == "2") {
+            desc.type = PluginType::VST3;
+        } else {
+            desc.type = PluginType::BuiltIn;
+        }
+        desc.vendor = sp.vendor;
+        auto catIt = m_categoryOverrides.find(sp.name);
+        if (catIt != m_categoryOverrides.end()) {
+            desc.category = catIt->second;
+        } else {
+            desc.category = detectPluginCategory(sp.name, sp.vendor);
+        }
+        desc.bundleFileName = sp.bundleFileName;
+        desc.classGuid = sp.classGuid;
+        desc.clapId = sp.clapId;
+
+        auto it = std::find_if(m_plugins.begin(), m_plugins.end(), [&](const PluginDescriptor& existing) {
+            return existing.name == desc.name && existing.type == desc.type;
+        });
+        if (it == m_plugins.end()) {
+            if (m_plugins.size() == m_plugins.capacity()) {
+                std::vector<PluginDescriptor> updated = m_plugins;
+                updated.push_back(std::move(desc));
+                { if (m_retiredPluginSnapshots.size() >= 2) m_retiredPluginSnapshots.erase(m_retiredPluginSnapshots.begin()); m_retiredPluginSnapshots.push_back(std::move(m_plugins)); }
+                m_plugins = std::move(updated);
+            } else {
+                m_plugins.push_back(std::move(desc));
+            }
+        } else {
+            it->path = desc.path;
+            it->category = desc.category;
+            it->vendor = desc.vendor;
+            if (!desc.bundleFileName.empty()) it->bundleFileName = desc.bundleFileName;
+            if (!desc.classGuid.empty()) it->classGuid = desc.classGuid;
+            if (!desc.clapId.empty()) it->clapId = desc.clapId;
+        }
+    }
+    for (auto& p : m_plugins) {
+        auto catIt = m_categoryOverrides.find(p.name);
+        if (catIt != m_categoryOverrides.end()) {
+            p.category = catIt->second;
+        }
+    }
+}
+
+void PluginScanner::exportToConfig(state::AppConfig& cfg) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    cfg.scannedPlugins.clear();
+    for (const auto& p : m_plugins) {
+        if (p.type == PluginType::BuiltIn || p.path.starts_with("builtin://")) {
+            continue;
+        }
+        state::ScannedPluginEntry entry;
+        entry.name = p.name;
+        entry.path = p.path;
+        entry.type = p.typeString();
+        entry.vendor = p.vendor;
+        entry.category = p.category;
+        entry.bundleFileName = p.bundleFileName;
+        entry.classGuid = p.classGuid;
+        entry.clapId = p.clapId;
+        cfg.scannedPlugins.push_back(std::move(entry));
+    }
+    if (m_favoritesInitialized) {
+        cfg.favoritePlugins = m_favorites;
+    } else if (!m_favorites.empty()) {
+        cfg.favoritePlugins = m_favorites;
+    }
+    cfg.customPluginCategories = m_categoryOverrides;
+}
+
+void PluginScanner::saveToAppConfig(const std::string& customPath) const {
+    std::string target = customPath.empty() ? m_configPath : customPath;
+    state::AppConfig cfg;
+    cfg.load(target);
+    exportToConfig(cfg);
+    cfg.save(target);
+}
+
+void PluginScanner::loadFromAppConfig(const std::string& customPath) {
+    std::string target = customPath.empty() ? m_configPath : customPath;
+    state::AppConfig cfg;
+    if (cfg.load(target)) {
+        loadFromConfig(cfg);
+    }
+}
+
 void PluginScanner::addDefaultPaths() {
     m_searchPaths.clear();
 
@@ -95,6 +294,29 @@ void PluginScanner::addDefaultPaths() {
         m_searchPaths.push_back(lap + "\\Programs\\Common\\VST3");
         m_searchPaths.push_back(lap + "\\Programs\\Common\\CLAP");
     }
+}
+
+bool PluginScanner::isSystemDefaultPath(const std::string& path) const {
+    static const std::vector<std::string> defaultRoots = []() {
+        std::vector<std::string> defaults = {
+            "C:\\Program Files\\Common Files\\VST3",
+            "C:\\Program Files\\Common Files\\CLAP",
+            "C:\\Program Files\\VstPlugins",
+            "C:\\Program Files\\Steinberg\\VstPlugins"
+        };
+        const char* localApp = std::getenv("LOCALAPPDATA");
+        if (localApp) {
+            std::string lap(localApp);
+            defaults.push_back(lap + "\\Programs\\Common\\VST3");
+            defaults.push_back(lap + "\\Programs\\Common\\CLAP");
+        }
+        return defaults;
+    }();
+
+    for (const auto& def : defaultRoots) {
+        if (_stricmp(path.c_str(), def.c_str()) == 0) return true;
+    }
+    return false;
 }
 
 void PluginScanner::addCustomSearchPath(const std::string& path) {
@@ -261,34 +483,118 @@ std::string PluginScanner::detectVendor(const std::filesystem::path& path, const
         parent = parent.parent_path();
     }
 
-    // 3. Query VST3 factory metadata only if parent folder was generic
+    // 3. Query VST3 factory metadata only if parent folder was generic (wrapped in SEH/VEH guard)
     std::filesystem::path dllPath = path;
     if (std::filesystem::is_directory(path)) {
         auto candidate = path / "Contents" / "x86_64-win" / (path.stem().string() + ".vst3");
         if (std::filesystem::exists(candidate)) dllPath = candidate;
     }
 
-    HMODULE hLib = LoadLibraryExW(dllPath.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-    if (!hLib) {
-        hLib = LoadLibraryW(dllPath.wstring().c_str());
+#if defined(_WIN32)
+    HMODULE hLib = nullptr;
+    const std::wstring wDllPath = dllPath.wstring();
+    if (isValidPeBinary(dllPath)) {
+        safeCallPlugin([&]() {
+            std::lock_guard<std::recursive_mutex> lock(pluginDllMutex());
+            hLib = LoadLibraryExW(wDllPath.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+            if (!hLib) {
+                hLib = LoadLibraryW(wDllPath.c_str());
+            }
+        });
     }
     if (hLib) {
         auto* getFactory = reinterpret_cast<GetFactoryProc>(reinterpret_cast<void*>(GetProcAddress(hLib, "GetPluginFactory")));
+        std::string fVendor;
+        bool hadFactory = false;
         if (getFactory) {
-            auto* factory = getFactory();
-            if (factory) {
-                Steinberg::PFactoryInfo fInfo{};
-                if (factory->getFactoryInfo(&fInfo) == Steinberg::kResultOk && fInfo.vendor[0] != '\0') {
-                    std::string fVendor = fInfo.vendor;
-                    FreeLibrary(hLib);
-                    if (!fVendor.empty()) return fVendor;
+            char vendorBuf[128] = {0};
+            safeCallPlugin([&]() {
+                if (auto* factory = getFactory()) {
+                    hadFactory = true;
+                    Steinberg::PFactoryInfo fInfo{};
+                    if (factory->getFactoryInfo(&fInfo) == Steinberg::kResultOk && fInfo.vendor[0] != '\0') {
+                        std::strncpy(vendorBuf, fInfo.vendor, sizeof(vendorBuf) - 1);
+                    }
+                    factory->release();
                 }
+            });
+            if (vendorBuf[0] != '\0') {
+                fVendor = vendorBuf;
             }
         }
-        FreeLibrary(hLib);
+        safeCallPlugin([&]() { FreeLibrary(hLib); });
+        if (!fVendor.empty()) return fVendor;
+        if (hadFactory) return "Other";
     }
+#else
+    (void)dllPath;
+#endif
 
     return "Other";
+}
+
+std::string detectPluginCategory(const std::string& name, const std::string& vendor) {
+    std::string lower = name + " " + vendor;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    // Check metering/utility first so "MetricAB" does not match "cab" under Amp Emulation
+    if (lower.find("metricab") != std::string::npos || lower.find("meter") != std::string::npos ||
+        lower.find("scope") != std::string::npos || lower.find("util") != std::string::npos) {
+        return "Utility/Metering";
+    }
+
+    if (lower.find("tune") != std::string::npos || lower.find("tuner") != std::string::npos ||
+        lower.find("pitch") != std::string::npos || lower.find("scale") != std::string::npos ||
+        lower.find("autotune") != std::string::npos || lower.find("vocod") != std::string::npos ||
+        lower.find("harmon") != std::string::npos) {
+        return "Pitch/Tuning";
+    }
+    if (lower.find("drive") != std::string::npos || lower.find("overdrive") != std::string::npos ||
+        lower.find("dist") != std::string::npos || lower.find("fuzz") != std::string::npos ||
+        lower.find("screamer") != std::string::npos || lower.find("boost") != std::string::npos ||
+        lower.find("muff") != std::string::npos || lower.find("rat") != std::string::npos ||
+        lower.find("klon") != std::string::npos || lower.find("od") != std::string::npos) {
+        return "Distortion";
+    }
+    if (lower.find("amp") != std::string::npos || lower.find("archetype") != std::string::npos ||
+        lower.find("neural dsp") != std::string::npos || lower.find("head") != std::string::npos ||
+        lower.find("cab") != std::string::npos || lower.find("marshall") != std::string::npos ||
+        lower.find("fender") != std::string::npos || lower.find("mesa") != std::string::npos ||
+        lower.find("recto") != std::string::npos || lower.find("soldano") != std::string::npos ||
+        lower.find("lead") != std::string::npos || lower.find("crunch") != std::string::npos ||
+        lower.find("ampeg") != std::string::npos || lower.find("svt") != std::string::npos ||
+        lower.find("ir") != std::string::npos) {
+        return "Amp Emulation";
+    }
+    if (lower.find("comp") != std::string::npos || lower.find("limit") != std::string::npos ||
+        lower.find("gate") != std::string::npos || lower.find("level") != std::string::npos ||
+        lower.find("dynamic") != std::string::npos || lower.find("1176") != std::string::npos ||
+        lower.find("la2a") != std::string::npos || lower.find("opticom") != std::string::npos) {
+        return "Dynamics";
+    }
+    if (lower.find("eq") != std::string::npos || lower.find("filter") != std::string::npos ||
+        lower.find("curve") != std::string::npos || lower.find("graphic") != std::string::npos ||
+        lower.find("param") != std::string::npos) {
+        return "Equalizer";
+    }
+    if (lower.find("delay") != std::string::npos || lower.find("echo") != std::string::npos ||
+        lower.find("tape") != std::string::npos || lower.find("space") != std::string::npos ||
+        lower.find("repeat") != std::string::npos || lower.find("bbd") != std::string::npos) {
+        return "Delay/Echo";
+    }
+    if (lower.find("verb") != std::string::npos || lower.find("reverb") != std::string::npos ||
+        lower.find("hall") != std::string::npos || lower.find("room") != std::string::npos ||
+        lower.find("plate") != std::string::npos || lower.find("spring") != std::string::npos ||
+        lower.find("shimmer") != std::string::npos) {
+        return "Reverb";
+    }
+    if (lower.find("chorus") != std::string::npos || lower.find("flang") != std::string::npos ||
+        lower.find("phas") != std::string::npos || lower.find("trem") != std::string::npos ||
+        lower.find("vibe") != std::string::npos || lower.find("rotary") != std::string::npos ||
+        lower.find("mod") != std::string::npos) {
+        return "Modulation";
+    }
+    return "Audio FX";
 }
 
 void PluginScanner::scanAll() {
@@ -351,9 +657,21 @@ void PluginScanner::runScan() {
     });
 
     std::vector<std::string> pathsCopy;
+    std::unordered_map<std::string, std::vector<PluginDescriptor>> cachedByPath;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         pathsCopy = m_searchPaths;
+        for (const auto& p : m_plugins) {
+            if (!p.path.empty() && p.type != PluginType::BuiltIn) {
+                std::filesystem::path fp(p.path);
+                std::string norm = fp.lexically_normal().string();
+                for (char& c : norm) {
+                    if (c == '/') c = '\\';
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                }
+                cachedByPath[norm].push_back(p);
+            }
+        }
     }
 
     for (const auto& dirStr : pathsCopy) {
@@ -361,86 +679,380 @@ void PluginScanner::runScan() {
         std::error_code ec;
         std::filesystem::path p(dirStr);
         if (std::filesystem::exists(p, ec) && std::filesystem::is_directory(p, ec)) {
-            scanDirectory(p, found);
+            scanDirectory(p, found, cachedByPath);
         }
     }
 
     if (!m_shouldStop.load()) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_plugins = std::move(found);
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            for (auto& newPlug : found) {
+                auto existingIt = std::find_if(m_plugins.begin(), m_plugins.end(), [&](const PluginDescriptor& old) {
+                    return old.name == newPlug.name && old.path == newPlug.path;
+                });
+                if (existingIt != m_plugins.end()) {
+                    if (newPlug.classGuid.empty() && !existingIt->classGuid.empty()) {
+                        newPlug.classGuid = existingIt->classGuid;
+                    }
+                    if (newPlug.clapId.empty() && !existingIt->clapId.empty()) {
+                        newPlug.clapId = existingIt->clapId;
+                    }
+                }
+            }
+            if (!m_plugins.empty()) {
+                { if (m_retiredPluginSnapshots.size() >= 2) m_retiredPluginSnapshots.erase(m_retiredPluginSnapshots.begin()); m_retiredPluginSnapshots.push_back(std::move(m_plugins)); }
+            }
+            m_plugins = std::move(found);
+        }
+        saveToAppConfig();
     }
 
     m_isScanning = false;
 }
 
-void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vector<PluginDescriptor>& outPlugins) {
+void PluginScanner::scanDirectory(
+    const std::filesystem::path& dirPath,
+    std::vector<PluginDescriptor>& outPlugins,
+    const std::unordered_map<std::string, std::vector<PluginDescriptor>>& cachedByPath
+) {
     std::error_code ec;
-    for (auto iter = std::filesystem::recursive_directory_iterator(dirPath, std::filesystem::directory_options::skip_permission_denied, ec);
-         iter != std::filesystem::recursive_directory_iterator(); ++iter) {
-        if (m_shouldStop.load() || ec) break;
+    try {
+        for (auto iter = std::filesystem::recursive_directory_iterator(dirPath, std::filesystem::directory_options::skip_permission_denied, ec);
+             iter != std::filesystem::recursive_directory_iterator(); ++iter) {
+            if (m_shouldStop.load() || ec) break;
 
-        const auto& path = iter->path();
-        const std::string ext = path.extension().string();
+            const auto& path = iter->path();
+            std::string ext = path.extension().string();
+            for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
-        if (ext == ".clap") {
-            const std::string name = path.stem().string();
-            auto itExists = std::find_if(outPlugins.begin(), outPlugins.end(), [&](const PluginDescriptor& d) {
-                return d.name == name;
-            });
-            if (itExists == outPlugins.end()) {
-                PluginDescriptor desc;
-                desc.name = name;
-                desc.path = path.string();
-                desc.bundleFileName = path.filename().string();
-                desc.type = PluginType::CLAP;
-                desc.vendor = detectVendor(path, name);
-                desc.category = "CLAP";
-                outPlugins.push_back(std::move(desc));
+            std::string norm = path.lexically_normal().string();
+            for (char& c : norm) {
+                if (c == '/') c = '\\';
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             }
-        } else if (ext == ".vst3") {
-            const std::string name = path.stem().string();
-            auto itExists = std::find_if(outPlugins.begin(), outPlugins.end(), [&](const PluginDescriptor& d) {
-                return d.name == name;
-            });
-            if (itExists == outPlugins.end()) {
-                PluginDescriptor desc;
-                desc.name = name;
-                desc.path = path.string();
-                desc.bundleFileName = path.filename().string();
-                desc.type = PluginType::VST3;
-                desc.vendor = detectVendor(path, name);
-                desc.category = "VST3";
-                outPlugins.push_back(std::move(desc));
-            }
-            if (iter->is_directory()) {
-                iter.disable_recursion_pending();
+
+            if (ext == ".clap") {
+                const std::string stemName = path.stem().string();
+                auto cacheIt = cachedByPath.find(norm);
+                bool foundCached = false;
+                if (cacheIt != cachedByPath.end() && !cacheIt->second.empty()) {
+                    for (const auto& cd : cacheIt->second) {
+                        if (cd.type == PluginType::CLAP) {
+                            foundCached = true;
+                            auto itExists = std::find_if(outPlugins.begin(), outPlugins.end(), [&](const PluginDescriptor& d) {
+                                return d.name == cd.name && d.type == PluginType::CLAP;
+                            });
+                            if (itExists == outPlugins.end()) {
+                                outPlugins.push_back(cd);
+                            }
+                        }
+                    }
+                }
+                if (foundCached) {
+                    continue;
+                }
+
+                struct ScannedClapDesc {
+                    std::string id;
+                    std::string name;
+                    std::string vendor;
+                };
+                std::vector<ScannedClapDesc> foundDescs;
+                bool inspected = false;
+
+#if defined(_WIN32)
+                try {
+                    HMODULE hLib = nullptr;
+                    if (isValidPeBinary(path)) {
+                        std::lock_guard<std::recursive_mutex> lock(pluginDllMutex());
+                        hLib = LoadLibraryExW(path.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+                    }
+                    if (hLib) {
+                        const auto* entry = reinterpret_cast<const clap_plugin_entry_t*>(
+                            reinterpret_cast<void*>(GetProcAddress(hLib, "clap_entry")));
+                        const std::string pathStr = path.string();
+                        bool initSuccess = false;
+                        DWORD exCode = 0;
+                        const bool ok = safeCallPlugin([&]() {
+                            if (entry && entry->init && entry->init(pathStr.c_str())) {
+                                initSuccess = true;
+                                if (entry->get_factory) {
+                                    const auto* fac = static_cast<const clap_plugin_factory_t*>(
+                                        entry->get_factory(CLAP_PLUGIN_FACTORY_ID));
+                                    if (fac && fac->get_plugin_count && fac->get_plugin_descriptor) {
+                                        const uint32_t count = fac->get_plugin_count(fac);
+                                        for (uint32_t cIdx = 0; cIdx < count; ++cIdx) {
+                                            if (const auto* cDesc = fac->get_plugin_descriptor(fac, cIdx)) {
+                                                ScannedClapDesc cd;
+                                                if (cDesc->id) cd.id = cDesc->id;
+                                                if (cDesc->name) cd.name = cDesc->name;
+                                                if (cDesc->vendor && cDesc->vendor[0] != '\0') cd.vendor = cDesc->vendor;
+                                                foundDescs.push_back(std::move(cd));
+                                            }
+                                        }
+                                    }
+                                }
+                                if (entry->deinit) entry->deinit();
+                            }
+                        }, &exCode);
+                        FreeLibrary(hLib);
+                        inspected = ok && initSuccess;
+                    }
+                } catch (...) {
+                    inspected = false;
+                }
+#endif
+
+                if (inspected && !foundDescs.empty()) {
+                    for (const auto& fd : foundDescs) {
+                        const std::string name = fd.name.empty() ? stemName : fd.name;
+                        auto itExists = std::find_if(outPlugins.begin(), outPlugins.end(), [&](const PluginDescriptor& d) {
+                            return d.name == name && d.type == PluginType::CLAP;
+                        });
+                        if (itExists == outPlugins.end()) {
+                            PluginDescriptor desc;
+                            desc.name = name;
+                            desc.path = path.string();
+                            desc.bundleFileName = path.filename().string();
+                            desc.type = PluginType::CLAP;
+                            desc.clapId = fd.id;
+                            desc.vendor = !fd.vendor.empty() ? fd.vendor : detectVendor(path, name);
+                            {
+                                std::lock_guard<std::mutex> lock(m_mutex);
+                                auto catIt = m_categoryOverrides.find(name);
+                                desc.category = (catIt != m_categoryOverrides.end()) ? catIt->second : detectPluginCategory(name, desc.vendor);
+                            }
+                            outPlugins.push_back(std::move(desc));
+                        }
+                    }
+                } else {
+                    auto itExists = std::find_if(outPlugins.begin(), outPlugins.end(), [&](const PluginDescriptor& d) {
+                        return d.name == stemName && d.type == PluginType::CLAP;
+                    });
+                    if (itExists == outPlugins.end()) {
+                        PluginDescriptor desc;
+                        desc.name = stemName;
+                        desc.path = path.string();
+                        desc.bundleFileName = path.filename().string();
+                        desc.type = PluginType::CLAP;
+                        desc.vendor = detectVendor(path, stemName);
+                        {
+                            std::lock_guard<std::mutex> lock(m_mutex);
+                            auto catIt = m_categoryOverrides.find(stemName);
+                            desc.category = (catIt != m_categoryOverrides.end()) ? catIt->second : detectPluginCategory(stemName, desc.vendor);
+                        }
+                        outPlugins.push_back(std::move(desc));
+                    }
+                }
+            } else if (ext == ".vst3") {
+                const std::string name = path.stem().string();
+                auto cacheIt = cachedByPath.find(norm);
+                bool foundCached = false;
+                if (cacheIt != cachedByPath.end() && !cacheIt->second.empty()) {
+                    for (const auto& cd : cacheIt->second) {
+                        if (cd.type == PluginType::VST3) {
+                            foundCached = true;
+                            auto itExists = std::find_if(outPlugins.begin(), outPlugins.end(), [&](const PluginDescriptor& d) {
+                                return d.name == cd.name && d.type == PluginType::VST3;
+                            });
+                            if (itExists == outPlugins.end()) {
+                                outPlugins.push_back(cd);
+                            }
+                        }
+                    }
+                }
+                if (foundCached) {
+                    if (iter->is_directory()) {
+                        iter.disable_recursion_pending();
+                    }
+                    continue;
+                }
+
+                auto itExists = std::find_if(outPlugins.begin(), outPlugins.end(), [&](const PluginDescriptor& d) {
+                    return d.name == name && d.type == PluginType::VST3;
+                });
+                if (itExists == outPlugins.end()) {
+                    PluginDescriptor desc;
+                    desc.name = name;
+                    desc.path = path.string();
+                    desc.bundleFileName = path.filename().string();
+                    desc.type = PluginType::VST3;
+                    std::string factoryVendor;
+
+                    // Extract canonical 32-char VST3 Class GUID for Tier-1 PluginResolver (guarded by SEH/VEH)
+#if defined(_WIN32)
+                    try {
+                        std::filesystem::path dllPath = path;
+                        if (std::filesystem::is_directory(path)) {
+                            auto candidate = path / "Contents" / "x86_64-win" / (path.stem().string() + ".vst3");
+                            if (std::filesystem::exists(candidate)) dllPath = candidate;
+                        }
+                        HMODULE hLib = nullptr;
+                        if (isValidPeBinary(dllPath)) {
+                            std::lock_guard<std::recursive_mutex> lock(pluginDllMutex());
+                            hLib = LoadLibraryExW(dllPath.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+                        }
+                        if (hLib) {
+                            auto* getFactory = reinterpret_cast<GetFactoryProc>(reinterpret_cast<void*>(GetProcAddress(hLib, "GetPluginFactory")));
+                            if (getFactory) {
+                                char hex[33] = {0};
+                                char vendorBuf[128] = {0};
+                                bool hadFactory = false;
+                                DWORD exCode = 0;
+                                const bool ok = safeCallPlugin([&]() {
+                                    if (auto* factory = getFactory()) {
+                                        hadFactory = true;
+                                        Steinberg::PFactoryInfo fInfo{};
+                                        if (factory->getFactoryInfo(&fInfo) == Steinberg::kResultOk && fInfo.vendor[0] != '\0') {
+                                            std::strncpy(vendorBuf, fInfo.vendor, sizeof(vendorBuf) - 1);
+                                        }
+                                        const int32_t nClasses = factory->countClasses();
+                                        Steinberg::PClassInfo ci{};
+                                        for (int32_t cIdx = 0; cIdx < nClasses; ++cIdx) {
+                                            if (factory->getClassInfo(cIdx, &ci) == Steinberg::kResultOk &&
+                                                std::strcmp(ci.category, "Audio Module Class") == 0) {
+                                                for (int b = 0; b < 16; ++b) {
+                                                    std::snprintf(hex + b * 2, 3, "%02X", static_cast<unsigned char>(ci.cid[b]));
+                                                }
+                                                break;
+                                            }
+                                        }
+                                        factory->release();
+                                    }
+                                }, &exCode);
+                                if (ok && hadFactory) {
+                                    if (hex[0] != '\0') desc.classGuid = hex;
+                                    if (vendorBuf[0] != '\0') factoryVendor = vendorBuf;
+                                } else {
+                                    std::cerr << "[PluginScanner] GetPluginFactory failed or returned nullptr for: " << dllPath.string() << "\n";
+                                }
+                            } else {
+                                std::cerr << "[PluginScanner] GetPluginFactory not found in: " << dllPath.string() << "\n";
+                            }
+                            FreeLibrary(hLib);
+                        } else {
+                            std::cerr << "[PluginScanner] Failed to load VST3 library: " << dllPath.string() << " (error: " << GetLastError() << ")\n";
+                        }
+                    } catch (const std::exception& ex) {
+                        std::cerr << "[PluginScanner] Exception inspecting VST3 " << path.string() << ": " << ex.what() << "\n";
+                    } catch (...) {
+                        std::cerr << "[PluginScanner] Unknown exception inspecting VST3 " << path.string() << "\n";
+                    }
+#endif
+
+                    desc.vendor = !factoryVendor.empty() ? factoryVendor : detectVendor(path, name);
+                    {
+                        std::lock_guard<std::mutex> lock(m_mutex);
+                        auto catIt = m_categoryOverrides.find(name);
+                        desc.category = (catIt != m_categoryOverrides.end()) ? catIt->second : detectPluginCategory(name, desc.vendor);
+                    }
+                    outPlugins.push_back(std::move(desc));
+                }
+                if (iter->is_directory()) {
+                    iter.disable_recursion_pending();
+                }
             }
         }
+    } catch (const std::exception& ex) {
+        std::cerr << "[PluginScanner] Error iterating directory " << dirPath.string() << ": " << ex.what() << "\n";
+    } catch (...) {
+        std::cerr << "[PluginScanner] Unknown error iterating directory " << dirPath.string() << "\n";
     }
 }
 
 bool PluginScanner::isFavorite(const std::string& nameOrPath) const {
     std::lock_guard<std::mutex> lock(m_mutex);
-    return m_favorites.find(nameOrPath) != m_favorites.end();
+    for (const auto& fav : m_favorites) {
+        if (matchesFavoriteString(fav, nameOrPath)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void PluginScanner::toggleFavorite(const std::string& nameOrPath) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_favorites.find(nameOrPath);
+    m_favoritesInitialized = true;
+    auto it = std::find_if(m_favorites.begin(), m_favorites.end(), [&](const std::string& f) {
+        return matchesFavoriteString(f, nameOrPath);
+    });
     if (it != m_favorites.end()) {
         m_favorites.erase(it);
     } else {
-        m_favorites.insert(nameOrPath);
+        m_favorites.push_back(nameOrPath);
     }
     state::AppConfig cfg;
-    cfg.load();
-    cfg.favoritePlugins.assign(m_favorites.begin(), m_favorites.end());
-    cfg.save();
+    cfg.load(m_configPath);
+    cfg.favoritePlugins = m_favorites;
+    cfg.save(m_configPath);
 }
 
 size_t PluginScanner::numFavorites() const {
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_favorites.size();
+}
+
+std::vector<std::string> PluginScanner::favorites() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_favorites;
+}
+
+void PluginScanner::setFavorites(const std::vector<std::string>& favs) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_favorites = favs;
+    m_favoritesInitialized = true;
+}
+
+void PluginScanner::setCustomCategory(const std::string& pluginName, const std::string& category) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_categoryOverrides[pluginName] = category;
+    for (auto& p : m_plugins) {
+        if (p.name == pluginName) {
+            p.category = category;
+        }
+    }
+    state::AppConfig cfg;
+    cfg.load(m_configPath);
+    cfg.customPluginCategories = m_categoryOverrides;
+    for (auto& sp : cfg.scannedPlugins) {
+        if (sp.name == pluginName) {
+            sp.category = category;
+        }
+    }
+    cfg.save(m_configPath);
+}
+
+void PluginScanner::resetCustomCategory(const std::string& pluginName) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_categoryOverrides.erase(pluginName);
+    for (auto& p : m_plugins) {
+        if (p.name == pluginName) {
+            p.category = detectPluginCategory(p.name, p.vendor);
+        }
+    }
+    state::AppConfig cfg;
+    cfg.load(m_configPath);
+    cfg.customPluginCategories = m_categoryOverrides;
+    for (auto& sp : cfg.scannedPlugins) {
+        if (sp.name == pluginName) {
+            sp.category = detectPluginCategory(sp.name, sp.vendor);
+        }
+    }
+    cfg.save(m_configPath);
+}
+
+std::string PluginScanner::getPluginCategory(const std::string& pluginName, const std::string& vendor) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_categoryOverrides.find(pluginName);
+    if (it != m_categoryOverrides.end()) {
+        return it->second;
+    }
+    for (const auto& p : m_plugins) {
+        if (p.name == pluginName && !p.category.empty() && p.category != "VST3" && p.category != "CLAP" && p.category != "DSP") {
+            return p.category;
+        }
+    }
+    return detectPluginCategory(pluginName, vendor);
 }
 
 std::vector<std::string> PluginScanner::getDevelopers() const {
@@ -470,7 +1082,14 @@ std::vector<PluginDescriptor> PluginScanner::getFilteredPlugins(
     for (const auto& p : m_plugins) {
         // Favorites filter
         if (favoritesOnly) {
-            if (m_favorites.find(p.name) == m_favorites.end() && m_favorites.find(p.path) == m_favorites.end()) {
+            bool isFav = false;
+            for (const auto& fav : m_favorites) {
+                if (matchesFavoriteString(fav, p.name) || matchesFavoriteString(fav, p.path)) {
+                    isFav = true;
+                    break;
+                }
+            }
+            if (!isFav) {
                 continue;
             }
         }
@@ -533,9 +1152,18 @@ const PluginDescriptor* PluginScanner::resolvePlugin(
     const std::string& name,
     const std::string& bundleFileName,
     const std::string& guidOrClapId,
-    PluginType /*preferredType*/
+    PluginType preferredType
 ) const {
     std::lock_guard<std::mutex> lock(m_mutex);
+
+    std::string effectiveBundle = bundleFileName;
+    if (bundleFileName == "CLAP" || bundleFileName == "clap") {
+        preferredType = PluginType::CLAP;
+        effectiveBundle.clear();
+    } else if (bundleFileName == "VST3" || bundleFileName == "vst3") {
+        preferredType = PluginType::VST3;
+        effectiveBundle.clear();
+    }
 
     // Normalize input GUID
     std::string normGuid = utils::GuidUtils::normalizeToCanonicalGuid(guidOrClapId);
@@ -553,10 +1181,10 @@ const PluginDescriptor* PluginScanner::resolvePlugin(
     }
 
     // Tier 2 (Bundle Filename Match): Match against bundleFileName
-    if (!bundleFileName.empty()) {
-        std::string bundleLower = bundleFileName;
+    if (!effectiveBundle.empty()) {
+        std::string bundleLower = effectiveBundle;
         std::transform(bundleLower.begin(), bundleLower.end(), bundleLower.begin(), [](unsigned char c){ return std::tolower(c); });
-        std::string bundleStem = std::filesystem::path(bundleFileName).stem().string();
+        std::string bundleStem = std::filesystem::path(effectiveBundle).stem().string();
         std::transform(bundleStem.begin(), bundleStem.end(), bundleStem.begin(), [](unsigned char c){ return std::tolower(c); });
 
         for (const auto& p : m_plugins) {
@@ -592,16 +1220,37 @@ const PluginDescriptor* PluginScanner::resolvePlugin(
 
         std::string cleanInput = normalizeName(name);
         if (!cleanInput.empty()) {
+            const PluginDescriptor* fallbackMatch = nullptr;
             for (const auto& p : m_plugins) {
                 if (normalizeName(p.name) == cleanInput) {
-                    return &p;
+                    if (p.type == preferredType) {
+                        return &p;
+                    }
+                    if (!fallbackMatch) {
+                        fallbackMatch = &p;
+                    }
                 }
+            }
+            if (fallbackMatch) {
+                return fallbackMatch;
             }
         }
     }
 
     // Tier 4 (Fallback): Return nullptr
     return nullptr;
+}
+
+std::optional<PluginDescriptor> PluginScanner::resolvePluginCopy(
+    const std::string& name,
+    const std::string& bundleFileName,
+    const std::string& guidOrClapId,
+    PluginType preferredType
+) const {
+    const PluginDescriptor* ptr = resolvePlugin(name, bundleFileName, guidOrClapId, preferredType);
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!ptr) return std::nullopt;
+    return *ptr;
 }
 
 } // namespace praccy::plugins

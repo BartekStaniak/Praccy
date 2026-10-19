@@ -8,6 +8,8 @@
 
 namespace praccy::state {
 
+inline constexpr uintmax_t kMaxPresetFileSize = 50ULL * 1024 * 1024; // 50 MB max preset file size guard (F-12)
+
 class IDawChainAdapter {
 public:
     virtual ~IDawChainAdapter() = default;

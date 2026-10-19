@@ -3,6 +3,19 @@
 #include <imgui.h>
 #include <cstdint>
 #include <atomic>
+#include <cstring>
+#include <cmath>
+#include <algorithm>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <dwmapi.h>
+#endif
 
 namespace praccy::ui {
 
@@ -38,6 +51,27 @@ struct ColorToken {
         , g(static_cast<float>(g8) / 255.0f)
         , b(static_cast<float>(b8) / 255.0f)
         , a(static_cast<float>(a8) / 255.0f) {}
+
+    constexpr ColorToken(int r8, int g8, int b8, int a8 = 255) noexcept
+        : ColorToken(static_cast<uint8_t>(r8),
+                     static_cast<uint8_t>(g8),
+                     static_cast<uint8_t>(b8),
+                     static_cast<uint8_t>(a8)) {}
+
+    constexpr ColorToken(float rf, float gf, float bf, float af = 1.0f) noexcept
+        : ColorToken(
+            static_cast<uint8_t>(std::clamp(rf, 0.0f, 1.0f) * 255.0f + 0.5f),
+            static_cast<uint8_t>(std::clamp(gf, 0.0f, 1.0f) * 255.0f + 0.5f),
+            static_cast<uint8_t>(std::clamp(bf, 0.0f, 1.0f) * 255.0f + 0.5f),
+            static_cast<uint8_t>(std::clamp(af, 0.0f, 1.0f) * 255.0f + 0.5f)) {}
+
+    [[nodiscard]] constexpr ColorToken withAlpha(float af) const noexcept {
+        return ColorToken(r, g, b, af);
+    }
+
+    [[nodiscard]] static constexpr ColorToken transparent() noexcept {
+        return ColorToken(0, 0, 0, 0);
+    }
 
     constexpr operator ImU32() const noexcept { return u32; }
     constexpr operator ImVec4() const noexcept { return vec4; }
@@ -76,6 +110,7 @@ struct SurfaceTokens {
     ColorToken branchBHeader;
     ColorToken combinerBg;
     ColorToken sceneActiveEmerald;
+    ColorToken cardShadow{0, 0, 0, 48};
 };
 
 struct BorderTokens {
@@ -190,7 +225,7 @@ inline const ThemeTokens kThemes[static_cast<size_t>(ThemeId::Count)] = {
         },
         // Text
         {
-            ColorToken(242, 244, 248), ColorToken(168, 175, 188), ColorToken(116, 124, 138),
+            ColorToken(242, 244, 248), ColorToken(168, 175, 188), ColorToken(140, 148, 162),
             ColorToken(255, 179, 38), ColorToken(18, 19, 22), ColorToken(65, 185, 255),
             ColorToken(220, 110, 240), ColorToken(255, 179, 38), ColorToken(52, 199, 89),
             ColorToken(255, 179, 38), ColorToken(235, 64, 52), ColorToken(156, 163, 175, 255)
@@ -241,7 +276,7 @@ inline const ThemeTokens kThemes[static_cast<size_t>(ThemeId::Count)] = {
         },
         // Text
         {
-            ColorToken(240, 248, 255), ColorToken(155, 185, 220), ColorToken(100, 125, 155),
+            ColorToken(240, 248, 255), ColorToken(155, 185, 220), ColorToken(135, 155, 185),
             ColorToken(0, 240, 255), ColorToken(10, 14, 23), ColorToken(0, 240, 255),
             ColorToken(255, 0, 128), ColorToken(255, 180, 40), ColorToken(0, 230, 160),
             ColorToken(255, 185, 30), ColorToken(255, 42, 85), ColorToken(156, 163, 175, 255)
@@ -292,7 +327,7 @@ inline const ThemeTokens kThemes[static_cast<size_t>(ThemeId::Count)] = {
         },
         // Text
         {
-            ColorToken(244, 248, 250), ColorToken(165, 185, 198), ColorToken(115, 132, 145),
+            ColorToken(244, 248, 250), ColorToken(165, 185, 198), ColorToken(145, 162, 175),
             ColorToken(88, 184, 216), ColorToken(22, 27, 34), ColorToken(88, 184, 216),
             ColorToken(185, 145, 225), ColorToken(226, 167, 98), ColorToken(69, 194, 154),
             ColorToken(230, 175, 80), ColorToken(224, 82, 82), ColorToken(156, 163, 175, 255)
@@ -323,54 +358,67 @@ inline const ThemeTokens kThemes[static_cast<size_t>(ThemeId::Count)] = {
             ColorToken(236, 230, 218), ColorToken(242, 237, 226), ColorToken(248, 245, 238),
             ColorToken(240, 234, 220), ColorToken(232, 224, 206), ColorToken(228, 222, 210),
             ColorToken(250, 226, 224), ColorToken(226, 218, 202), ColorToken(216, 206, 188),
-            ColorToken(204, 192, 172), ColorToken(245, 240, 230, 250), ColorToken(0, 0, 0, 191),
+            ColorToken(204, 192, 172), ColorToken(245, 240, 230, 250), ColorToken(45, 38, 30, 140),
             ColorToken(230, 222, 206), ColorToken(220, 210, 192), ColorToken(208, 196, 176),
             ColorToken(218, 208, 190), ColorToken(206, 194, 174), ColorToken(192, 178, 156),
             ColorToken(228, 220, 204), ColorToken(216, 206, 188), ColorToken(244, 240, 230),
             ColorToken(230, 224, 210), ColorToken(198, 186, 166), ColorToken(180, 166, 144),
             ColorToken(160, 146, 124), ColorToken(244, 238, 226, 240), ColorToken(230, 236, 242, 235),
             ColorToken(215, 226, 236), ColorToken(245, 235, 226, 235), ColorToken(238, 220, 206),
-            ColorToken(238, 232, 220, 250), ColorToken(16, 75, 45, 255)
+            ColorToken(238, 232, 220, 250), ColorToken(198, 228, 210, 255)
         },
         // Borders
         {
-            ColorToken(196, 184, 164), ColorToken(156, 142, 120), ColorToken(184, 75, 24),
-            ColorToken(185, 172, 152), ColorToken(184, 75, 24), ColorToken(150, 60, 18),
-            ColorToken(200, 192, 178, 200), ColorToken(195, 45, 35), ColorToken(184, 75, 24, 160),
-            ColorToken(38, 135, 68, 200), ColorToken(200, 188, 168), ColorToken(80, 65, 50, 60),
+            ColorToken(180, 168, 148), ColorToken(120, 108, 92), ColorToken(168, 64, 18),
+            ColorToken(140, 126, 110), ColorToken(168, 64, 18), ColorToken(140, 50, 14),
+            ColorToken(175, 162, 144, 200), ColorToken(195, 45, 35), ColorToken(168, 64, 18, 160),
+            ColorToken(32, 120, 58, 200), ColorToken(185, 172, 152), ColorToken(80, 65, 50, 60),
             ColorToken(130, 160, 190, 220), ColorToken(190, 130, 95, 220), ColorToken(160, 150, 135, 220),
             ColorToken(168, 85, 247, 255)
         },
         // Text
         {
-            ColorToken(36, 28, 22), ColorToken(95, 80, 68), ColorToken(145, 130, 115),
-            ColorToken(184, 75, 24), ColorToken(248, 245, 238), ColorToken(30, 105, 165),
-            ColorToken(145, 45, 140), ColorToken(184, 75, 24), ColorToken(38, 135, 68),
-            ColorToken(184, 75, 24), ColorToken(195, 45, 35), ColorToken(156, 163, 175, 255)
+            ColorToken(36, 28, 22), ColorToken(95, 80, 68), ColorToken(105, 92, 80),
+            ColorToken(168, 64, 18), ColorToken(248, 245, 238), ColorToken(24, 95, 155),
+            ColorToken(140, 40, 135), ColorToken(168, 64, 18), ColorToken(32, 120, 58),
+            ColorToken(168, 64, 18), ColorToken(195, 45, 35), ColorToken(105, 92, 80, 255)
         },
         // Signal
         {
-            ColorToken(38, 135, 68), ColorToken(150, 140, 128), ColorToken(195, 45, 35),
-            ColorToken(200, 40, 30), ColorToken(195, 95, 20), ColorToken(38, 135, 68),
-            ColorToken(150, 140, 128), ColorToken(38, 135, 68), ColorToken(38, 135, 68),
+            ColorToken(32, 120, 58), ColorToken(102, 90, 78), ColorToken(195, 45, 35),
+            ColorToken(200, 40, 30), ColorToken(195, 95, 20), ColorToken(32, 120, 58),
+            ColorToken(140, 130, 118), ColorToken(32, 120, 58), ColorToken(32, 120, 58),
             ColorToken(205, 135, 25), ColorToken(200, 40, 30), ColorToken(40, 115, 175),
-            ColorToken(195, 90, 30), ColorToken(38, 135, 68), ColorToken(40, 115, 175),
+            ColorToken(195, 90, 30), ColorToken(32, 120, 58), ColorToken(40, 115, 175),
             ColorToken(195, 90, 30)
         },
         // Cables
         {
-            ColorToken(210, 195, 175, 130), ColorToken(180, 80, 30, 240), ColorToken(215, 205, 190, 100),
+            ColorToken(210, 195, 175, 130), ColorToken(168, 64, 18, 240), ColorToken(215, 205, 190, 100),
             ColorToken(155, 145, 132, 200), ColorToken(100, 40, 10), ColorToken(155, 145, 132, 80),
-            ColorToken(195, 180, 160), ColorToken(180, 80, 30), ColorToken(195, 210, 225, 130),
+            ColorToken(195, 180, 160), ColorToken(168, 64, 18), ColorToken(195, 210, 225, 130),
             ColorToken(40, 115, 175, 240), ColorToken(225, 205, 190, 130), ColorToken(195, 90, 30, 240),
-            ColorToken(184, 75, 24, 120)
+            ColorToken(168, 64, 18, 120)
         }
     }
 };
 
 inline std::atomic<ThemeId> s_activeThemeId{ThemeId::ObsidianStudio};
+inline std::atomic<float> s_dpiScale{1.0f};
 
 } // namespace detail
+
+inline void setDpiScale(float scale) noexcept {
+    detail::s_dpiScale.store(std::clamp(scale, 1.0f, 4.0f), std::memory_order_relaxed);
+}
+
+inline float dpiScale() noexcept {
+    return detail::s_dpiScale.load(std::memory_order_relaxed);
+}
+
+[[nodiscard]] inline float px(float basePixels) noexcept {
+    return std::round(basePixels * dpiScale());
+}
 
 inline const ThemeTokens& getThemeTokens(ThemeId id) noexcept {
     const size_t idx = static_cast<size_t>(id);
@@ -399,8 +447,28 @@ inline void applyTheme(ThemeId id) {
         return;
     }
 
+#if defined(_WIN32)
+    if (const ImGuiViewport* vp = ImGui::GetMainViewport()) {
+        if (HWND hwnd = reinterpret_cast<HWND>(vp->PlatformHandleRaw ? vp->PlatformHandleRaw : vp->PlatformHandle)) {
+            BOOL useDark = tokens.isDark ? TRUE : FALSE;
+            if (FAILED(DwmSetWindowAttribute(hwnd, 20, &useDark, sizeof(useDark)))) {
+                DwmSetWindowAttribute(hwnd, 19, &useDark, sizeof(useDark));
+            }
+            // Force Windows non-client titlebar repaint on theme switch
+            SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        }
+    }
+#endif
+
     // Apply standard geometry according to 4px/8px design grid
     ImGuiStyle& style = ImGui::GetStyle();
+    style = ImGuiStyle(); // Reset to unscaled baseline so ScaleAllSizes never compounds on theme/DPI change
+    if (tokens.isDark) {
+        ImGui::StyleColorsDark(&style);
+    } else {
+        ImGui::StyleColorsLight(&style);
+    }
     style.WindowRounding    = 6.0f;
     style.ChildRounding     = 6.0f;
     style.FrameRounding     = 4.0f;
@@ -416,6 +484,11 @@ inline void applyTheme(ThemeId id) {
     style.IndentSpacing     = 16.0f;
     style.ScrollbarSize     = 12.0f;
     style.GrabMinSize       = 10.0f;
+
+    const float scale = dpiScale();
+    if (scale > 1.0f) {
+        style.ScaleAllSizes(scale);
+    }
 
     // Apply color tokens directly to ImGuiStyle Colors
     ImVec4* colors = style.Colors;
@@ -439,7 +512,7 @@ inline void applyTheme(ThemeId id) {
     colors[ImGuiCol_ScrollbarGrabActive]   = tokens.surfaces.scrollbarGrabActive;
     colors[ImGuiCol_CheckMark]             = tokens.signal.active;
     colors[ImGuiCol_SliderGrab]            = tokens.text.accent;
-    colors[ImGuiCol_SliderGrabActive]      = tokens.signal.active;
+    colors[ImGuiCol_SliderGrabActive]      = tokens.borders.focus;
     colors[ImGuiCol_Button]                = tokens.surfaces.buttonBg;
     colors[ImGuiCol_ButtonHovered]         = tokens.surfaces.buttonBgHovered;
     colors[ImGuiCol_ButtonActive]          = tokens.surfaces.buttonBgActive;
@@ -449,8 +522,8 @@ inline void applyTheme(ThemeId id) {
     colors[ImGuiCol_Separator]             = tokens.borders.separator;
     colors[ImGuiCol_SeparatorHovered]      = tokens.borders.strong;
     colors[ImGuiCol_SeparatorActive]       = tokens.borders.focus;
-    colors[ImGuiCol_ResizeGrip]            = tokens.borders.subtle;
-    colors[ImGuiCol_ResizeGripHovered]     = tokens.borders.strong;
+    colors[ImGuiCol_ResizeGrip]            = ColorToken::transparent();
+    colors[ImGuiCol_ResizeGripHovered]     = tokens.borders.subtle;
     colors[ImGuiCol_ResizeGripActive]      = tokens.borders.focus;
     colors[ImGuiCol_Tab]                   = tokens.surfaces.tabBg;
     colors[ImGuiCol_TabHovered]            = tokens.surfaces.tabBgHovered;
@@ -464,7 +537,7 @@ inline void applyTheme(ThemeId id) {
     colors[ImGuiCol_TableHeaderBg]         = tokens.surfaces.headerBg;
     colors[ImGuiCol_TableBorderStrong]     = tokens.borders.strong;
     colors[ImGuiCol_TableBorderLight]      = tokens.borders.subtle;
-    colors[ImGuiCol_TableRowBg]            = ImVec4(0, 0, 0, 0);
+    colors[ImGuiCol_TableRowBg]            = ColorToken::transparent();
     colors[ImGuiCol_TableRowBgAlt]         = tokens.surfaces.frameBg;
     colors[ImGuiCol_TextSelectedBg]        = tokens.borders.focus;
     colors[ImGuiCol_DragDropTarget]        = tokens.text.accent;
@@ -472,6 +545,13 @@ inline void applyTheme(ThemeId id) {
     colors[ImGuiCol_NavWindowingHighlight] = tokens.borders.focus;
     colors[ImGuiCol_NavWindowingDimBg]     = tokens.surfaces.modalOverlay;
     colors[ImGuiCol_ModalWindowDimBg]      = tokens.surfaces.modalOverlay;
+    colors[ImGuiCol_DockingEmptyBg]        = tokens.surfaces.windowBg;
 }
 
 } // namespace praccy::ui
+
+namespace praccy {
+namespace ui = praccy::ui;
+} // namespace praccy
+
+namespace ui = praccy::ui;

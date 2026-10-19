@@ -3,6 +3,7 @@
 #include <vector>
 #include <string>
 #include <cstring>
+#undef NDEBUG
 #include <cassert>
 #include <cmath>
 #include <algorithm>
@@ -12,6 +13,8 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
+#include <malloc.h>
+#include <new>
 
 #include "tools/quick_looper.h"
 #include "audio/dsp_utils.h"
@@ -20,6 +23,182 @@
 #include "ui/ui_helpers.h"
 
 using namespace praccy;
+
+// ============================================================================
+// REAL-TIME AUDIO HEAP ALLOCATION MONITOR (F-03, F-26)
+// ============================================================================
+
+#if defined(__GNUC__)
+#define PRACCY_NOINLINE __attribute__((noinline))
+#else
+#define PRACCY_NOINLINE
+#endif
+
+static thread_local bool t_isAudioThread = false;
+static std::atomic<size_t> g_audioThreadAllocCount{0};
+static std::atomic<size_t> g_audioThreadAllocBytes{0};
+static std::atomic<size_t> g_audioThreadFreeCount{0};
+
+PRACCY_NOINLINE void* operator new(std::size_t size) {
+    if (t_isAudioThread) {
+        g_audioThreadAllocCount.fetch_add(1, std::memory_order_relaxed);
+        g_audioThreadAllocBytes.fetch_add(size, std::memory_order_relaxed);
+    }
+    void* p = std::malloc(size);
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+PRACCY_NOINLINE void operator delete(void* p) noexcept {
+    if (t_isAudioThread && p != nullptr) {
+        g_audioThreadFreeCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    std::free(p);
+}
+
+PRACCY_NOINLINE void* operator new[](std::size_t size) {
+    if (t_isAudioThread) {
+        g_audioThreadAllocCount.fetch_add(1, std::memory_order_relaxed);
+        g_audioThreadAllocBytes.fetch_add(size, std::memory_order_relaxed);
+    }
+    void* p = std::malloc(size);
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+PRACCY_NOINLINE void operator delete[](void* p) noexcept {
+    if (t_isAudioThread && p != nullptr) {
+        g_audioThreadFreeCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    std::free(p);
+}
+
+PRACCY_NOINLINE void operator delete(void* p, std::size_t) noexcept {
+    if (t_isAudioThread && p != nullptr) {
+        g_audioThreadFreeCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    std::free(p);
+}
+
+PRACCY_NOINLINE void operator delete[](void* p, std::size_t) noexcept {
+    if (t_isAudioThread && p != nullptr) {
+        g_audioThreadFreeCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    std::free(p);
+}
+
+PRACCY_NOINLINE void* operator new(std::size_t size, std::align_val_t al) {
+    if (t_isAudioThread) {
+        g_audioThreadAllocCount.fetch_add(1, std::memory_order_relaxed);
+        g_audioThreadAllocBytes.fetch_add(size, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    void* p = _aligned_malloc(size ? size : 1, static_cast<std::size_t>(al));
+#else
+    void* p = std::aligned_alloc(static_cast<std::size_t>(al), ((size ? size : 1) + static_cast<std::size_t>(al) - 1) & ~(static_cast<std::size_t>(al) - 1));
+#endif
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+PRACCY_NOINLINE void* operator new[](std::size_t size, std::align_val_t al) {
+    if (t_isAudioThread) {
+        g_audioThreadAllocCount.fetch_add(1, std::memory_order_relaxed);
+        g_audioThreadAllocBytes.fetch_add(size, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    void* p = _aligned_malloc(size ? size : 1, static_cast<std::size_t>(al));
+#else
+    void* p = std::aligned_alloc(static_cast<std::size_t>(al), ((size ? size : 1) + static_cast<std::size_t>(al) - 1) & ~(static_cast<std::size_t>(al) - 1));
+#endif
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+PRACCY_NOINLINE void operator delete(void* p, std::align_val_t al) noexcept {
+    (void)al;
+    if (t_isAudioThread && p != nullptr) {
+        g_audioThreadFreeCount.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+PRACCY_NOINLINE void operator delete[](void* p, std::align_val_t al) noexcept {
+    (void)al;
+    if (t_isAudioThread && p != nullptr) {
+        g_audioThreadFreeCount.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+PRACCY_NOINLINE void operator delete(void* p, std::size_t size, std::align_val_t al) noexcept {
+    (void)size;
+    (void)al;
+    if (t_isAudioThread && p != nullptr) {
+        g_audioThreadFreeCount.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+PRACCY_NOINLINE void operator delete[](void* p, std::size_t size, std::align_val_t al) noexcept {
+    (void)size;
+    (void)al;
+    if (t_isAudioThread && p != nullptr) {
+        g_audioThreadFreeCount.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+static bool createTestPcmWav(const std::filesystem::path& path, uint32_t sampleRate, uint32_t numFrames) {
+    std::ofstream out(path, std::ios::binary);
+    if (!out.is_open()) return false;
+    const uint32_t dataBytes = numFrames * 2u * static_cast<uint32_t>(sizeof(int16_t));
+    const uint32_t riffBytes = 36u + dataBytes;
+
+    out.write("RIFF", 4);
+    out.write(reinterpret_cast<const char*>(&riffBytes), 4);
+    out.write("WAVE", 4);
+
+    out.write("fmt ", 4);
+    const uint32_t fmtSize = 16u;
+    out.write(reinterpret_cast<const char*>(&fmtSize), 4);
+    const uint16_t audioFormat = 1u; // PCM
+    const uint16_t numChannels = 2u;
+    const uint32_t byteRate = sampleRate * static_cast<uint32_t>(numChannels) * static_cast<uint32_t>(sizeof(int16_t));
+    const uint16_t blockAlign = static_cast<uint16_t>(numChannels * sizeof(int16_t));
+    const uint16_t bitsPerSample = 16u;
+    out.write(reinterpret_cast<const char*>(&audioFormat), 2);
+    out.write(reinterpret_cast<const char*>(&numChannels), 2);
+    out.write(reinterpret_cast<const char*>(&sampleRate), 4);
+    out.write(reinterpret_cast<const char*>(&byteRate), 4);
+    out.write(reinterpret_cast<const char*>(&blockAlign), 2);
+    out.write(reinterpret_cast<const char*>(&bitsPerSample), 2);
+
+    out.write("data", 4);
+    out.write(reinterpret_cast<const char*>(&dataBytes), 4);
+    for (uint32_t i = 0; i < numFrames * 2u; ++i) {
+        const double phase = static_cast<double>(i) * 0.05;
+        const auto s = static_cast<int16_t>(std::clamp(std::sin(phase) * 8000.0, -32767.0, 32767.0));
+        out.write(reinterpret_cast<const char*>(&s), sizeof(int16_t));
+    }
+    return true;
+}
 
 // Forward-declare the WAV path validator used in src/main.cpp
 inline bool isValidWavFile(const std::filesystem::path& path) noexcept {
@@ -268,6 +447,24 @@ static void testLooperConcurrentStressHarness() {
     tools::QuickLooper looper;
     looper.prepare(48000.0, 5);
 
+    // Create temporary WAV files for concurrent loadWavFile testing:
+    // tempWav48k exercises direct 48kHz loading without resampling
+    // tempWav44k exercises in-memory dynamic linear resampling from 44.1kHz to 48kHz
+    const std::filesystem::path tempWav48k = std::filesystem::current_path() / "test_looper_stress_48k.wav";
+    const std::filesystem::path tempWav44k = std::filesystem::current_path() / "test_looper_stress_44k.wav";
+    bool w1 = createTestPcmWav(tempWav48k, 48000, 2048);
+    bool w2 = createTestPcmWav(tempWav44k, 44100, 2048);
+    assert(w1 && w2 && "Failed to create temporary WAV files for looper stress test");
+
+    struct WavCleanupGuard {
+        std::filesystem::path p1, p2;
+        ~WavCleanupGuard() {
+            std::error_code ec;
+            std::filesystem::remove(p1, ec);
+            std::filesystem::remove(p2, ec);
+        }
+    } cleanupGuard{tempWav48k, tempWav44k};
+
     std::atomic<bool> running{true};
     std::atomic<uint64_t> audioBlocksProcessed{0};
     std::atomic<uint64_t> uiMutationsProcessed{0};
@@ -285,6 +482,11 @@ static void testLooperConcurrentStressHarness() {
             inView.channel(1)[s] = 0.25f;
         }
 
+        // Arm zero-allocation monitor strictly during real-time processing
+        g_audioThreadAllocCount.store(0, std::memory_order_relaxed);
+        g_audioThreadAllocBytes.store(0, std::memory_order_relaxed);
+        t_isAudioThread = true;
+
         while (running.load(std::memory_order_relaxed)) {
             outView.clear();
             looper.process(inView, outView);
@@ -299,20 +501,34 @@ static void testLooperConcurrentStressHarness() {
             }
             audioBlocksProcessed.fetch_add(1, std::memory_order_relaxed);
         }
+
+        t_isAudioThread = false;
     });
 
     // Thread 2: UI Interaction Mutator thread
     std::thread uiMutatorThread([&]() {
+        const std::string path48k = tempWav48k.string();
+        const std::string path44k = tempWav44k.string();
+
         for (int i = 0; i < 20000; ++i) {
-            int action = i % 5;
+            const int action = i % 8;
             switch (action) {
                 case 0: looper.triggerAction(); break;
                 case 1: looper.stop(); break;
-                case 2: looper.clear(); break;
-                case 3: looper.setVolume(0.8f + (i % 10) * 0.05f); break;
-                case 4: looper.triggerAction(); break;
+                case 2: (void)looper.undo(); break;
+                case 3: (void)looper.redo(); break;
+                case 4: looper.clear(); break;
+                case 5: looper.setVolume(0.8f + static_cast<float>(i % 10) * 0.05f); break;
+                case 6: (void)looper.loadWavFile(path48k); break;
+                case 7: (void)looper.loadWavFile(path44k); break;
+                default: break;
             }
             uiMutationsProcessed.fetch_add(1, std::memory_order_relaxed);
+
+            // Periodically yield to give audio thread time to advance playhead and process overdubs
+            if ((i & 0x3F) == 0) {
+                std::this_thread::yield();
+            }
         }
     });
 
@@ -343,19 +559,32 @@ static void testLooperConcurrentStressHarness() {
     // Wait for mutator to finish
     uiMutatorThread.join();
 
-    // Let audio run a bit more
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    // Ensure audio thread has processed at least 10,000 blocks under live conditions
+    while (audioBlocksProcessed.load(std::memory_order_relaxed) < 10000) {
+        std::this_thread::yield();
+    }
+
+    // Let audio run slightly more to drain any trailing state
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
     running.store(false, std::memory_order_relaxed);
 
     audioThread.join();
     uiPollerThread.join();
 
+    const size_t audioAllocCount = g_audioThreadAllocCount.load(std::memory_order_relaxed);
+    const size_t audioAllocBytes = g_audioThreadAllocBytes.load(std::memory_order_relaxed);
+
     std::cout << "  - Audio Blocks Processed:  " << audioBlocksProcessed.load() << "\n";
     std::cout << "  - UI Mutations Processed:  " << uiMutationsProcessed.load() << "\n";
     std::cout << "  - UI Telemetry Queries:    " << uiQueriesProcessed.load() << "\n";
     std::cout << "  - NaN/Inf Anomalies:       " << nanOrInfOutputs.load() << "\n";
-    assert(nanOrInfOutputs.load() == 0);
-    std::cout << "  - Concurrent Looper Stability: PASSED\n";
+    std::cout << "  - Audio Thread Heap Allocs:" << audioAllocCount << " (" << audioAllocBytes << " bytes)\n";
+
+    assert(nanOrInfOutputs.load() == 0 && "CRITICAL: Detected NaN/Inf outputs in audio stream!");
+    assert(audioBlocksProcessed.load() >= 10000 && "CRITICAL: Audio thread processed fewer than 10,000 blocks!");
+    assert(uiMutationsProcessed.load() >= 20000 && "CRITICAL: UI mutator did not complete full mutation cycle!");
+    assert(audioAllocCount == 0 && "CRITICAL: Audio thread allocated heap memory during QuickLooper concurrent stress!");
+    std::cout << "  - Concurrent Looper Stability & Zero Real-Time Heap Allocs: PASSED\n";
 }
 
 // ============================================================================

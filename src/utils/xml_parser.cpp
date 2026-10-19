@@ -4,6 +4,8 @@
 #include <stack>
 #include <cctype>
 #include <algorithm>
+#include <charconv>
+#include <cstdint>
 
 namespace praccy::utils {
 
@@ -49,7 +51,7 @@ std::string XmlParser::decodeEntities(std::string_view input) {
     for (size_t i = 0; i < input.size(); ++i) {
         if (input[i] == '&') {
             size_t semi = input.find(';', i);
-            if (semi != std::string_view::npos && semi - i <= 10) {
+            if (semi != std::string_view::npos && semi - i <= 16) {
                 std::string_view ent = input.substr(i + 1, semi - (i + 1));
                 if (ent == "amp") { out += '&'; i = semi; continue; }
                 if (ent == "lt") { out += '<'; i = semi; continue; }
@@ -57,17 +59,46 @@ std::string XmlParser::decodeEntities(std::string_view input) {
                 if (ent == "quot") { out += '"'; i = semi; continue; }
                 if (ent == "apos") { out += '\''; i = semi; continue; }
                 if (!ent.empty() && ent[0] == '#') {
-                    // Numeric entity
-                    unsigned long code = 0;
+                    // Numeric entity: &#...; (dec) or &#x...; (hex)
+                    bool isHex = false;
+                    std::string_view digits;
                     if (ent.size() > 1 && (ent[1] == 'x' || ent[1] == 'X')) {
-                        code = std::strtoul(ent.data() + 2, nullptr, 16);
+                        isHex = true;
+                        digits = ent.substr(2);
                     } else {
-                        code = std::strtoul(ent.data() + 1, nullptr, 10);
+                        digits = ent.substr(1);
                     }
-                    if (code > 0 && code <= 0x7F) {
-                        out += static_cast<char>(code);
-                        i = semi;
-                        continue;
+
+                    if (!digits.empty()) {
+                        uint32_t code = 0;
+                        auto [ptr, ec] = std::from_chars(
+                            digits.data(), digits.data() + digits.size(), code, isHex ? 16 : 10);
+                        if (ec == std::errc() && ptr == digits.data() + digits.size()) {
+                            if (code >= 0x0001 && code <= 0x007F) {
+                                out += static_cast<char>(code);
+                                i = semi;
+                                continue;
+                            } else if (code >= 0x0080 && code <= 0x07FF) {
+                                out += static_cast<char>(static_cast<unsigned char>(0xC0u | ((code >> 6) & 0x1Fu)));
+                                out += static_cast<char>(static_cast<unsigned char>(0x80u | (code & 0x3Fu)));
+                                i = semi;
+                                continue;
+                            } else if ((code >= 0x0800 && code <= 0xD7FF) || (code >= 0xE000 && code <= 0xFFFF)) {
+                                out += static_cast<char>(static_cast<unsigned char>(0xE0u | ((code >> 12) & 0x0Fu)));
+                                out += static_cast<char>(static_cast<unsigned char>(0x80u | ((code >> 6) & 0x3Fu)));
+                                out += static_cast<char>(static_cast<unsigned char>(0x80u | (code & 0x3Fu)));
+                                i = semi;
+                                continue;
+                            } else if (code >= 0x10000 && code <= 0x10FFFF) {
+                                out += static_cast<char>(static_cast<unsigned char>(0xF0u | ((code >> 18) & 0x07u)));
+                                out += static_cast<char>(static_cast<unsigned char>(0x80u | ((code >> 12) & 0x3Fu)));
+                                out += static_cast<char>(static_cast<unsigned char>(0x80u | ((code >> 6) & 0x3Fu)));
+                                out += static_cast<char>(static_cast<unsigned char>(0x80u | (code & 0x3Fu)));
+                                i = semi;
+                                continue;
+                            }
+                            // Surrogates (0xD800..0xDFFF) or > 0x10FFFF or code == 0 are rejected/skipped
+                        }
                     }
                 }
             }
@@ -172,12 +203,18 @@ std::shared_ptr<XmlNode> XmlParser::parse(std::string_view xml) {
             continue;
         }
 
-        // 3. DOCTYPE and ENTITY defense (SecOps Invariant 3: completely ignore)
+        // 3. DOCTYPE and ENTITY defense (SecOps Invariant 3: completely ignore, including internal DTD subsets)
         if (xml.substr(i, 9) == "<!DOCTYPE" || xml.substr(i, 8) == "<!ENTITY") {
-            // Skip until closing '>'
-            size_t endDoc = xml.find('>', i);
-            if (endDoc == std::string_view::npos) break;
-            i = endDoc + 1;
+            size_t cur = i + 2;
+            int bracketDepth = 0;
+            while (cur < len) {
+                if (xml[cur] == '[') ++bracketDepth;
+                else if (xml[cur] == ']' && bracketDepth > 0) --bracketDepth;
+                else if (xml[cur] == '>' && bracketDepth == 0) break;
+                ++cur;
+            }
+            if (cur >= len) break;
+            i = cur + 1;
             continue;
         }
 
@@ -206,7 +243,18 @@ std::shared_ptr<XmlNode> XmlParser::parse(std::string_view xml) {
         }
 
         // 6. Opening tag: <tag attr="val"...> or self-closing <tag ... />
-        size_t endTag = xml.find('>', i + 1);
+        size_t endTag = std::string_view::npos;
+        char inQuote = 0;
+        for (size_t scanIdx = i + 1; scanIdx < xml.size(); ++scanIdx) {
+            char c = xml[scanIdx];
+            if (c == '"' || c == '\'') {
+                if (inQuote == 0) inQuote = c;
+                else if (inQuote == c) inQuote = 0;
+            } else if (c == '>' && inQuote == 0) {
+                endTag = scanIdx;
+                break;
+            }
+        }
         if (endTag == std::string_view::npos) break;
 
         bool selfClosing = false;

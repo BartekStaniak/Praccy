@@ -3,6 +3,7 @@
 #include "../audio/audio_buffer.h"
 #include <atomic>
 #include <cstdint>
+#include <algorithm>
 
 namespace praccy::tools {
 
@@ -23,17 +24,17 @@ public:
     void setBeatsPerBar(int beats) noexcept { m_beatsPerBar.store(std::clamp(beats, 1, 16), std::memory_order_relaxed); }
     [[nodiscard]] int beatsPerBar() const noexcept { return m_beatsPerBar.load(std::memory_order_relaxed); }
 
+    void setTimeSigDenominator(int denom) noexcept {
+        if (denom != 2 && denom != 4 && denom != 8 && denom != 16) denom = 4;
+        m_timeSigDenominator.store(denom, std::memory_order_relaxed);
+    }
+    [[nodiscard]] int timeSigDenominator() const noexcept { return m_timeSigDenominator.load(std::memory_order_relaxed); }
+
     void setPlaying(bool playing) noexcept {
         if (playing) {
-            m_currentBeatSample = 0;
-            m_clickSamplePosition = 0; // Trigger downbeat click immediately
-            m_currentBeat.store(0, std::memory_order_relaxed);
-            m_isAccent = true;
-        } else {
-            m_currentBeatSample = 0;
-            m_clickSamplePosition = m_clickLengthSamples;
+            m_resetRequested.store(true, std::memory_order_release);
         }
-        m_playing.store(playing, std::memory_order_relaxed);
+        m_playing.store(playing, std::memory_order_release);
     }
     [[nodiscard]] bool isPlaying() const noexcept { return m_playing.load(std::memory_order_relaxed); }
 
@@ -43,10 +44,14 @@ public:
     [[nodiscard]] int currentBeat() const noexcept { return m_currentBeat.load(std::memory_order_relaxed); }
 
 private:
+    void triggerClick(bool isAccent) noexcept;
+
     double m_sampleRate{48000.0};
     std::atomic<float> m_bpm{120.0f};
     std::atomic<int> m_beatsPerBar{4};
+    std::atomic<int> m_timeSigDenominator{4};
     std::atomic<bool> m_playing{false};
+    std::atomic<bool> m_resetRequested{false};
     std::atomic<float> m_volumeDb{-6.0f};
     std::atomic<int> m_currentBeat{0};
 
@@ -54,6 +59,13 @@ private:
     uint32_t m_clickSamplePosition{0};
     uint32_t m_clickLengthSamples{0};
     bool m_isAccent{false};
+
+    float m_decay{0.0f};
+    float m_decayFactor{1.0f};
+    float m_phasorCos{1.0f};
+    float m_phasorSin{0.0f};
+    float m_rotCos{1.0f};
+    float m_rotSin{0.0f};
 };
 
 } // namespace praccy::tools

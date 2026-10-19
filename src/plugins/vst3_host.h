@@ -11,7 +11,20 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <atomic>
+#include <mutex>
+#include <unordered_map>
+#if defined(_WIN32)
 #include <windows.h>
+#else
+using HMODULE = void*;
+#endif
+#include <utility>
+#include <thread>
+#include <future>
+#include <functional>
+#include "vst3_param_queue.h"
+#include <readerwriterqueue/readerwriterqueue.h>
 
 namespace praccy::plugins {
 
@@ -30,33 +43,60 @@ public:
     [[nodiscard]] const std::string& vendor() const noexcept override { return m_vendor; }
     [[nodiscard]] const std::string& version() const noexcept override { return m_version; }
     [[nodiscard]] const std::string& path() const noexcept override { return m_path; }
+    [[nodiscard]] const std::string& bundleFileName() const noexcept override { return m_bundleFileName; }
+    [[nodiscard]] const std::string& classGuid() const noexcept override { return m_classGuid; }
 
     [[nodiscard]] size_t numParameters() const noexcept override;
     [[nodiscard]] PluginParameterDesc getParameterDesc(size_t index) const override;
     void setParameterValue(uint32_t paramId, float value) override;
+    void setParameterFromAudioThread(uint32_t paramId, float value) noexcept override;
     [[nodiscard]] float getParameterValue(uint32_t paramId) const override;
 
     [[nodiscard]] bool hasCustomGui() const noexcept override;
     bool openGui(HWND parentHwnd) override;
+    void openGuiAsync(HWND parentHwnd, std::function<void(bool success)> onComplete) override;
+    void pollAsyncGuiResults() override;
     void closeGui() override;
     void getPreferredSize(int& width, int& height) const override;
+    void onGuiResize(int width, int height) override;
+    bool adjustSize(int& width, int& height) override;
+    [[nodiscard]] float getParameterValueByIndex(size_t index) const override;
+    void getAllParameterValues(std::vector<float>& out) const override;
 
     [[nodiscard]] std::vector<uint8_t> saveState() const override;
     bool loadState(const std::vector<uint8_t>& state) override;
 
     [[nodiscard]] Steinberg::IPlugView* plugView() const noexcept { return m_plugView; }
 
-private:
+    bool ensureControllerInitialized();
+
+    void resetFault() noexcept override;
+
     Vst3PluginInstance();
+
+    void onGuiBeginEdit(Steinberg::Vst::ParamID paramId) noexcept;
+    void onGuiPerformEdit(Steinberg::Vst::ParamID paramId, Steinberg::Vst::ParamValue valueNormalized) noexcept;
+    void onGuiEndEdit(Steinberg::Vst::ParamID paramId) noexcept;
+    void onGuiRestartComponent(Steinberg::int32 flags) noexcept;
+
+private:
+    void suspendAndFenceAudio() noexcept;
+    void resumeAudio() noexcept;
+    void enqueueParamForAudio(Steinberg::Vst::ParamID paramId, double normVal) noexcept;
+    void drainAllParamQueues() noexcept;
+    void invokeOnHostThread(const std::function<void()>& fn, DWORD timeoutMs = 25000) const;
+    void postToHostThread(std::function<void()> fn) const;
 
     HMODULE m_module{nullptr};
     Steinberg::IPluginFactory* m_factory{nullptr};
-    Steinberg::Vst::IComponent* m_component{nullptr};
+    mutable Steinberg::Vst::IComponent* m_component{nullptr};
     Steinberg::Vst::IAudioProcessor* m_processor{nullptr};
-    Steinberg::Vst::IEditController* m_controller{nullptr};
-    Steinberg::IPlugView* m_plugView{nullptr};
+    mutable Steinberg::Vst::IEditController* m_controller{nullptr};
+    mutable Steinberg::IPlugView* m_plugView{nullptr};
 
     std::string m_path;
+    std::string m_bundleFileName;
+    std::string m_classGuid;
     std::string m_name{"VST3 Plugin"};
     std::string m_vendor{"Steinberg VST3"};
     std::string m_version{"1.0.0"};
@@ -64,6 +104,54 @@ private:
     HWND m_guiParentHwnd{nullptr};
     double m_sampleRate{48000.0};
     uint32_t m_maxBlockSize{256};
+    mutable int m_preferredWidth{850};
+    mutable int m_preferredHeight{600};
+
+    FastParameterChanges m_inputParamChanges;
+    // Dedicated SPSC queues per producer thread to preserve moodycamel::ReaderWriterQueue single-producer invariant:
+    // - m_uiParamQueue: written by UI/non-host threads (serialized by m_uiParamQueueMutex)
+    // - m_guiHostParamQueue: written exclusively by m_hostThread (onGuiPerformEdit / onGuiRestartComponent)
+    mutable std::mutex m_uiParamQueueMutex;
+    moodycamel::ReaderWriterQueue<std::pair<Steinberg::Vst::ParamID, double>> m_uiParamQueue{128};
+    moodycamel::ReaderWriterQueue<std::pair<Steinberg::Vst::ParamID, double>> m_guiHostParamQueue{128};
+
+    struct AudioThreadParamEvent {
+        Steinberg::Vst::ParamID id{0};
+        double value{0.0};
+    };
+    std::array<AudioThreadParamEvent, 256> m_audioThreadParamEvents{};
+    size_t m_audioThreadParamCount{0};
+
+    std::array<float*, 16> m_inChannelPtrs{};
+    std::array<float*, 16> m_outChannelPtrs{};
+
+    std::atomic<DWORD> m_audioThreadId{0};
+    std::atomic<bool> m_suppressHandlerCallbacks{false};
+    std::atomic<bool> m_suspendProcessing{false};
+    std::atomic<uint32_t> m_activeProcessCallbacks{0};
+
+    mutable std::mutex m_paramCacheMutex;
+    mutable std::vector<PluginParameterDesc> m_paramDescs;
+    mutable std::unordered_map<uint32_t, size_t> m_paramIdToIndex;
+    mutable std::unordered_map<uint32_t, float> m_paramCache;
+
+    mutable std::atomic<bool> m_controllerInitialized{false};
+    mutable std::mutex m_controllerInitMutex;
+
+    std::thread m_hostThread;
+    std::atomic<DWORD> m_hostThreadId{0};
+
+    bool initHostInternal(const std::string& path);
+    void teardownHostInternal();
+    bool openGuiInternal(HWND parentHwnd);
+    void closeGuiInternal();
+
+    struct AsyncGuiOpenResult {
+        HWND parentHwnd{nullptr};
+        bool success{false};
+        std::function<void(bool success)> callback;
+    };
+    moodycamel::ReaderWriterQueue<AsyncGuiOpenResult> m_asyncGuiResults{16};
 
     struct Impl;
     std::unique_ptr<Impl> m_impl;

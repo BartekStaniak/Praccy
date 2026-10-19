@@ -30,3 +30,21 @@ Thumbs.db
 imgui.ini
 third_party/pluginterfaces
 dist/
+
+# Python cache & test temp artifacts
+__pycache__/
+*.pyc
+test_extract_temp/
+test_archive_temp.zip
+temp_out/
+.agents/
+run_tool.py
+Testing/
+*.patch
+run_audio.log
+test_archive_sandbox_legit/
+
+# Internal audit/agent directives
+*swarm*directive*.md
+praccy*.md
+

@@ -6,7 +6,7 @@
 
 ### Ultra-lightweight ASIO VST3 & CLAP host for instant instrument practice, live jamming, and universal DAW preset exchange.
 
-[![Release](https://img.shields.io/badge/release-v2.4.0-brightgreen.svg)](https://github.com/BartekStaniak/Praccy/releases)
+[![Release](https://img.shields.io/badge/release-v2.8-brightgreen.svg)](https://github.com/BartekStaniak/Praccy/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64-blue.svg)](https://github.com/BartekStaniak/Praccy)
 [![Audio Architecture](https://img.shields.io/badge/audio-ASIO%20%7C%20VST3%20%7C%20CLAP-orange.svg)](https://github.com/BartekStaniak/Praccy)
 [![Graphics](https://img.shields.io/badge/gui-DirectX%2011%20%7C%20Dear%20ImGui-purple.svg)](https://github.com/BartekStaniak/Praccy)
@@ -29,11 +29,17 @@ Full digital audio workstations like REAPER, Ableton Live, Cubase, or Studio One
 
 **Praccy** was built from the ground up to solve this exact problem. It is an ultra-lean, native C++20 ASIO host designed specifically for practicing, noodling, and live pedalboard-style jamming. It bypasses all unnecessary DAW layers, communicates directly with your audio interface via native ASIO, renders a high-framerate hardware-accelerated interface via DirectX 11 and Dear ImGui, and gets you playing in seconds.
 
-With **Version 2.4**, Praccy bridges the gap between practice and professional studio production through the **Universal DAW Interop Matrix** and the **Musician Velocity Engine**.
+With **Version 2.8**, Praccy bridges the gap between practice and professional studio production through the **Universal DAW Interop Matrix**, the **Musician Velocity Engine**, and the **Non-Blocking Asynchronous Plugin & GUI Pipeline**.
 
 ---
 
-## What's New in Version 2.4
+## What's New in Version 2.8
+
+### ⚡ Non-Blocking Asynchronous Plugin Loading & GUI Initialization
+- **Zero-Block Asynchronous Plugin Loading**: Heavy plugins (e.g. Archetype Gojira X, large convolution reverbs) initialize entirely on a background thread pool without freezing the main UI or stalling the audio engine.
+- **Animated Loading & Opening Slot States**: Live arc-spinner and pulsing focus border while plugins and their heavy GPU interfaces compile and attach in the background.
+- **Asynchronous GUI View Attachment**: `openPluginWindowAsync` returns in `< 1 ms`, isolating VST3 Win32 view initialization to the plugin's dedicated STA host thread and deferring CLAP GUI attachment to the main-thread poll cycle, smoothly presenting the window when ready while guarding against mid-flight window cancellation.
+- **Bit-Exact Dry Audio Pass-Through**: Signal continues uninterrupted during loading and GUI opening with zero buffer dropouts and zero real-time audio thread allocations.
 
 ### 🌐 Universal DAW Interop Matrix (Stage 2)
 Exchange your complete plugin rigs and presets bidirectionally with the leading digital audio workstations:
@@ -54,7 +60,7 @@ Exchange your complete plugin rigs and presets bidirectionally with the leading 
 - **Horizontal Rack Drag-and-Drop**: Reorder pedalboard slots with live ghost previews and atomic SPSC audio-thread swap crossfades.
 - **Global Key & MIDI Map Mode (`Ctrl+K` / `Ctrl+M`)**: Ableton-style click-to-learn hardware mapping, strictly guarded with `!WantTextInput` so search boxes never trigger commands.
 - **Spotlight Command Palette Virtualization**: Search 1,500+ plugins at a locked 144 FPS powered by `ImGuiListClipper`, featuring `All`, `Favorites`, and `Recents` scope pills.
-- **DIN IEC 60268-10 PPM Ballistic Meters**: Multi-segment gradient level meters with exponential decay and audio-reactive cable glow.
+- **Dual-Mode Peak & DIN IEC 60268-10 PPM Ballistic Meters**: Multi-segment gradient level meters supporting both instantaneous Digital Peak (120 ms decay) and DIN IEC 60268-10 Type I PPM (5 ms integration, 20 dB / 1.5 s fallback) ballistics with 1.5 s peak hold and audio-reactive cable glow.
 - **WCAG 2.1 AA Production Themes**: Four hand-crafted color palettes (**Obsidian Studio**, **Cyber / Midnight**, **Nordic Slate**, and **Vintage Console**) with 100% design token purity.
 
 ---
@@ -135,7 +141,7 @@ Praccy is written in modern **C++20** and builds cleanly using CMake on Windows 
 
 ### Prerequisites
 - Windows 10 / 11 (64-bit)
-- CMake 3.25 or newer
+- CMake 3.20 or newer
 - **MSVC** (Visual Studio 2022 C++ Build Tools v143+) OR **MinGW-w64** (GCC 13+)
 - DirectX 11 runtime (standard in Windows 10/11)
 - An ASIO-compatible audio interface or driver
@@ -175,7 +181,7 @@ The resulting executable will be generated at `build/Praccy.exe`.
 Praccy enforces strict real-time safety, SecOps fuzzing, and cross-DAW roundtrip parity gates:
 
 ```powershell
-# 1. Run complete CTest regression suite (13 test targets)
+# 1. Run complete CTest regression suite (17 test targets)
 ctest --test-dir build -C Release --output-on-failure
 
 # 2. Gate 2.1: Interop SecOps Fuzzing (10,000 malformed inputs)

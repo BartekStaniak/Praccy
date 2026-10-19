@@ -1,4 +1,5 @@
 #include "dawproject_adapter.h"
+#include "../../version.h"
 #include "../../utils/archive_utils.h"
 #include "../../utils/xml_parser.h"
 #include "../../utils/guid_utils.h"
@@ -7,6 +8,7 @@
 #include <chrono>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 
 namespace praccy::state {
 
@@ -27,14 +29,15 @@ bool DawprojectAdapter::canHandle(const std::filesystem::path& path) const {
 }
 
 std::optional<ScenePreset> DawprojectAdapter::parseToScene(const std::filesystem::path& path) {
-    if (!std::filesystem::exists(path)) return std::nullopt;
+    std::error_code ec;
+    auto sz = std::filesystem::file_size(path, ec);
+    if (ec || sz == 0 || sz > kMaxPresetFileSize) return std::nullopt;
 
     // Generate safe unique temporary directory
     auto now = std::chrono::steady_clock::now().time_since_epoch().count();
     auto tempDir = std::filesystem::temp_directory_path() / ("dawproj_in_" + std::to_string(now));
     TempDirGuard guard{tempDir};
 
-    std::error_code ec;
     std::filesystem::create_directories(tempDir, ec);
     if (ec) return std::nullopt;
 
@@ -81,15 +84,20 @@ std::optional<ScenePreset> DawprojectAdapter::parseToScene(const std::filesystem
     if (transportNode) {
         std::string bpmStr = transportNode->attribute("tempo");
         if (!bpmStr.empty()) {
-            scene.tempoBpm = std::strtof(bpmStr.c_str(), nullptr);
+            float bpm = std::strtof(bpmStr.c_str(), nullptr);
+            if (std::isfinite(bpm)) {
+                scene.tempoBpm = std::clamp(bpm, 20.0f, 999.0f);
+            }
         }
         std::string numStr = transportNode->attribute("timeSignatureNumerator");
         if (!numStr.empty()) {
-            scene.timeSigNumerator = static_cast<uint8_t>(std::strtoul(numStr.c_str(), nullptr, 10));
+            unsigned long num = std::strtoul(numStr.c_str(), nullptr, 10);
+            scene.timeSigNumerator = static_cast<uint8_t>(std::clamp<unsigned long>(num, 1, 32));
         }
         std::string denStr = transportNode->attribute("timeSignatureDenominator");
         if (!denStr.empty()) {
-            scene.timeSigDenominator = static_cast<uint8_t>(std::strtoul(denStr.c_str(), nullptr, 10));
+            unsigned long den = std::strtoul(denStr.c_str(), nullptr, 10);
+            scene.timeSigDenominator = static_cast<uint8_t>(std::clamp<unsigned long>(den, 1, 32));
         }
     }
 
@@ -118,11 +126,48 @@ std::optional<ScenePreset> DawprojectAdapter::parseToScene(const std::filesystem
             std::transform(fmt.begin(), fmt.end(), fmt.begin(), [](unsigned char c){ return std::tolower(c); });
             if (fmt == "clap") slot.type = "CLAP";
             else if (fmt == "vst3") slot.type = "VST3";
+            else if (fmt == "builtin") slot.type = "BuiltIn";
+        }
+
+        const std::string inGainAttr = plugNode->attribute("inputGainDb");
+        if (!inGainAttr.empty()) {
+            float v = std::strtof(inGainAttr.c_str(), nullptr);
+            if (std::isfinite(v)) slot.inputGainDb = std::clamp(v, -60.0f, 24.0f);
+        }
+        const std::string outGainAttr = plugNode->attribute("outputGainDb");
+        if (!outGainAttr.empty()) {
+            float v = std::strtof(outGainAttr.c_str(), nullptr);
+            if (std::isfinite(v)) slot.outputGainDb = std::clamp(v, -60.0f, 24.0f);
+        }
+        const std::string dryWetAttr = plugNode->attribute("dryWet");
+        if (!dryWetAttr.empty()) {
+            float v = std::strtof(dryWetAttr.c_str(), nullptr);
+            if (std::isfinite(v)) slot.dryWet = std::clamp(v, 0.0f, 1.0f);
+        }
+        const std::string bypassedAttr = plugNode->attribute("bypassed");
+        if (bypassedAttr == "true" || bypassedAttr == "1") {
+            slot.bypassed = true;
+        }
+        for (const auto& pNode : plugNode->childrenNamed("param")) {
+            if (!pNode) continue;
+            const std::string pidStr = pNode->attribute("id");
+            const std::string pvalStr = pNode->attribute("value");
+            if (!pidStr.empty() && !pvalStr.empty()) {
+                uint32_t pid = static_cast<uint32_t>(std::strtoul(pidStr.c_str(), nullptr, 10));
+                float pval = std::strtof(pvalStr.c_str(), nullptr);
+                if (std::isfinite(pval)) {
+                    slot.paramValues.push_back({pid, pval});
+                }
+            }
         }
 
         auto idNode = plugNode->firstChild("identifier");
         if (idNode && !idNode->text.empty()) {
-            slot.classGuid = utils::GuidUtils::normalizeToCanonicalGuid(idNode->text, utils::DawGuidFormat::DawprojectUuid);
+            if (slot.type == "CLAP") {
+                slot.clapId = idNode->text;
+            } else {
+                slot.classGuid = utils::GuidUtils::normalizeToCanonicalGuid(idNode->text, utils::DawGuidFormat::DawprojectUuid);
+            }
         }
 
         // State file path: e.g. plugins/<uuid>/state.bin or attribute
@@ -138,11 +183,30 @@ std::optional<ScenePreset> DawprojectAdapter::parseToScene(const std::filesystem
         }
 
         if (!stateRelPath.empty()) {
-            auto fullStatePath = tempDir / stateRelPath;
-            if (std::filesystem::exists(fullStatePath)) {
-                std::ifstream sf(fullStatePath, std::ios::binary);
-                if (sf.is_open()) {
-                    slot.state.assign((std::istreambuf_iterator<char>(sf)), std::istreambuf_iterator<char>());
+            std::filesystem::path safeRel;
+            if (utils::sanitizeZipPath(stateRelPath, safeRel)) {
+                std::error_code ec1, ec2;
+                auto canTemp = std::filesystem::weakly_canonical(tempDir, ec1);
+                auto canTarget = std::filesystem::weakly_canonical(tempDir / safeRel, ec2);
+                if (!ec1 && !ec2) {
+                    auto tempIt = canTemp.begin();
+                    auto targetIt = canTarget.begin();
+                    bool isSubpath = true;
+                    for (; tempIt != canTemp.end(); ++tempIt, ++targetIt) {
+                        if (targetIt == canTarget.end() || *tempIt != *targetIt) {
+                            isSubpath = false;
+                            break;
+                        }
+                    }
+                    if (isSubpath && std::filesystem::exists(canTarget)) {
+                        auto stateSz = std::filesystem::file_size(canTarget, ec1);
+                        if (!ec1 && stateSz > 0 && stateSz <= kMaxPresetFileSize) {
+                            std::ifstream sf(canTarget, std::ios::binary);
+                            if (sf.is_open()) {
+                                slot.state.assign((std::istreambuf_iterator<char>(sf)), std::istreambuf_iterator<char>());
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -169,7 +233,7 @@ std::optional<ScenePreset> DawprojectAdapter::parseToScene(const std::filesystem
             } else if (child->tag == "parallelBlock" || child->tag == "split") {
                 NodePreset parBlock;
                 parBlock.kind = NodePreset::Kind::ParallelBlock;
-                parBlock.branchBlend = 0.5f;
+                parBlock.branchBlend = 0.0f;
 
                 auto branches = child->childrenNamed("branch");
                 for (size_t bIdx = 0; bIdx < branches.size() && bIdx < 2; ++bIdx) {
@@ -205,7 +269,7 @@ bool DawprojectAdapter::exportFromScene(const ScenePreset& scene, const std::fil
         std::ofstream mf(tempDir / "manifest.xml", std::ios::trunc);
         if (!mf.is_open()) return false;
         mf << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
-        mf << "<manifest formatVersion=\"1.0\" application=\"Praccy\" appVersion=\"2.4\" />\n";
+        mf << "<manifest formatVersion=\"1.0\" application=\"Praccy\" appVersion=\"" << praccy::kDawprojectAppVersion << "\" />\n";
     }
 
     // 2. project.xml and binary state files
@@ -215,7 +279,7 @@ bool DawprojectAdapter::exportFromScene(const ScenePreset& scene, const std::fil
     std::ostringstream px;
     px << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
     px << "<project version=\"1.0\">\n";
-    px << "  <application name=\"Praccy\" version=\"2.4\" />\n";
+    px << "  <application name=\"Praccy\" version=\"" << praccy::kDawprojectAppVersion << "\" />\n";
     px << "  <transport tempo=\"" << scene.tempoBpm << "\" timeSignatureNumerator=\""
        << static_cast<int>(scene.timeSigNumerator) << "\" timeSignatureDenominator=\""
        << static_cast<int>(scene.timeSigDenominator) << "\" />\n";
@@ -226,28 +290,45 @@ bool DawprojectAdapter::exportFromScene(const ScenePreset& scene, const std::fil
 
     int plugIdx = 0;
     auto writePluginXml = [&](const PluginSlotPreset& slot) {
-        std::string uuidStr = utils::GuidUtils::toDawprojectUuidString(slot.classGuid);
-        if (uuidStr.empty()) {
-            // Generate deterministic mock UUID if classGuid is empty
-            char buf[64];
-            std::snprintf(buf, sizeof(buf), "00000000-0000-0000-0000-%012d", ++plugIdx);
-            uuidStr = buf;
+        std::string identifierStr;
+        if (slot.type == "CLAP") {
+            identifierStr = slot.clapId.empty() ? ("clap." + slot.name) : slot.clapId;
+        } else {
+            identifierStr = utils::GuidUtils::toDawprojectUuidString(slot.classGuid);
+            if (identifierStr.empty()) {
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), "00000000-0000-0000-0000-%012d", plugIdx + 1);
+                identifierStr = buf;
+            }
         }
 
-        px << "          <plugin id=\"" << uuidStr << "\" name=\""
-           << utils::XmlParser::encodeEntities(slot.name) << "\" deviceRole=\"audioEffect\">\n";
-        px << "            <pluginFormat>" << (slot.type == "CLAP" ? "clap" : "vst3") << "</pluginFormat>\n";
-        px << "            <identifier>" << uuidStr << "</identifier>\n";
+        const int currentIdx = ++plugIdx;
+        std::string instanceId = "slot_" + std::to_string(currentIdx);
+        std::string stateDirRel = "plugins/" + instanceId;
+
+        px << "          <plugin id=\"" << instanceId << "\" name=\""
+           << utils::XmlParser::encodeEntities(slot.name) << "\" deviceRole=\"audioEffect\""
+           << " bypassed=\"" << (slot.bypassed ? "true" : "false") << "\""
+           << " inputGainDb=\"" << slot.inputGainDb << "\""
+           << " outputGainDb=\"" << slot.outputGainDb << "\""
+           << " dryWet=\"" << slot.dryWet << "\">\n";
+        px << "            <pluginFormat>" << (slot.type == "CLAP" ? "clap" : (slot.type == "BuiltIn" ? "builtin" : "vst3")) << "</pluginFormat>\n";
+        px << "            <identifier>" << utils::XmlParser::encodeEntities(identifierStr) << "</identifier>\n";
+        for (const auto& pv : slot.paramValues) {
+            if (std::isfinite(pv.value)) {
+                px << "            <param id=\"" << pv.paramId << "\" value=\"" << pv.value << "\" />\n";
+            }
+        }
 
         if (!slot.state.empty()) {
-            auto slotPlugDir = pluginsDir / uuidStr;
+            auto slotPlugDir = tempDir / stateDirRel;
             std::filesystem::create_directories(slotPlugDir, ec);
             auto stateFilePath = slotPlugDir / "state.bin";
             std::ofstream sf(stateFilePath, std::ios::binary | std::ios::trunc);
             if (sf.is_open()) {
                 sf.write(reinterpret_cast<const char*>(slot.state.data()), slot.state.size());
             }
-            px << "            <stateFile>plugins/" << uuidStr << "/state.bin</stateFile>\n";
+            px << "            <stateFile>" << stateDirRel << "/state.bin</stateFile>\n";
         }
         px << "          </plugin>\n";
     };
@@ -282,7 +363,6 @@ bool DawprojectAdapter::exportFromScene(const ScenePreset& scene, const std::fil
         pf << px.str();
     }
 
-    // 3. Zip into output path
     return utils::ArchiveUtils::zipDirectory(tempDir, outputPath);
 }
 

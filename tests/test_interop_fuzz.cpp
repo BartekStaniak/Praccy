@@ -10,6 +10,7 @@
 #include <vector>
 #include <string>
 #include <random>
+#undef NDEBUG
 #include <cassert>
 #include <filesystem>
 #include <fstream>

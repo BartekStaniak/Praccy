@@ -1,19 +1,71 @@
 #pragma once
 
+#if defined(_WIN32)
 #include <windows.h>
+#else
+#include <csignal>
 #include <cstdint>
+using DWORD = uint32_t;
+#define EXCEPTION_ACCESS_VIOLATION      ((DWORD)0xC0000005L)
+#define EXCEPTION_IN_PAGE_ERROR         ((DWORD)0xC0000006L)
+#define EXCEPTION_ILLEGAL_INSTRUCTION   ((DWORD)0xC000001DL)
+#define EXCEPTION_DATATYPE_MISALIGNMENT ((DWORD)0x80000002L)
+#define EXCEPTION_ARRAY_BOUNDS_EXCEEDED ((DWORD)0xC000008CL)
+#define EXCEPTION_FLT_DENORMAL_OPERAND  ((DWORD)0xC000008DL)
+#define EXCEPTION_FLT_DIVIDE_BY_ZERO    ((DWORD)0xC000008EL)
+#define EXCEPTION_FLT_INEXACT_RESULT    ((DWORD)0xC000008FL)
+#define EXCEPTION_FLT_INVALID_OPERATION ((DWORD)0xC0000090L)
+#define EXCEPTION_FLT_OVERFLOW          ((DWORD)0xC0000091L)
+#define EXCEPTION_FLT_STACK_CHECK       ((DWORD)0xC0000092L)
+#define EXCEPTION_FLT_UNDERFLOW         ((DWORD)0xC0000093L)
+#define EXCEPTION_INT_DIVIDE_BY_ZERO    ((DWORD)0xC0000094L)
+#define EXCEPTION_INT_OVERFLOW          ((DWORD)0xC0000095L)
+#define EXCEPTION_PRIV_INSTRUCTION      ((DWORD)0xC0000096L)
+#define EXCEPTION_STACK_OVERFLOW        ((DWORD)0xC00000FDL)
+#endif
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <csetjmp>
 #include <type_traits>
 #include <atomic>
 #include <mutex>
 #include <string>
 #include <malloc.h>
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
 #include <xmmintrin.h>
 #include <pmmintrin.h>
+#endif
+
+#ifndef STATUS_GUARD_PAGE_VIOLATION
+#define STATUS_GUARD_PAGE_VIOLATION ((DWORD)0x80000001L)
+#endif
+#ifndef EXCEPTION_BREAKPOINT
+#define EXCEPTION_BREAKPOINT ((DWORD)0x80000003L)
+#endif
+#ifndef EXCEPTION_SINGLE_STEP
+#define EXCEPTION_SINGLE_STEP ((DWORD)0x80000004L)
+#endif
 
 namespace praccy::plugins {
 
+inline bool isBenignFirstChanceException(DWORD code) noexcept {
+    switch (code) {
+        case 0xE06D7363u:                 // MSVC C++ exception
+        case 0x406D1388u:                 // MS_VC_EXCEPTION (SetThreadName)
+        case STATUS_GUARD_PAGE_VIOLATION: // DRM / stack growth guard page probe
+        case EXCEPTION_BREAKPOINT:        // Debugger / PACE / iLok anti-debug probe
+        case EXCEPTION_SINGLE_STEP:       // Debugger / DRM single-step trap
+            return true;
+        default:
+            return false;
+    }
+}
+
 inline bool isCrashException(DWORD code) noexcept {
+    if (isBenignFirstChanceException(code)) {
+        return false;
+    }
     switch (code) {
         case EXCEPTION_ACCESS_VIOLATION:
         case EXCEPTION_DATATYPE_MISALIGNMENT:
@@ -42,14 +94,42 @@ inline const char* getExceptionDescription(DWORD code) noexcept {
         case EXCEPTION_ACCESS_VIOLATION:        return "Access Violation (0xC0000005)";
         case EXCEPTION_DATATYPE_MISALIGNMENT:   return "Datatype Misalignment (0x80000002)";
         case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:   return "Array Bounds Exceeded (0xC000008C)";
+        case EXCEPTION_FLT_DENORMAL_OPERAND:    return "Floating Point Denormal Operand (0xC000008D)";
         case EXCEPTION_FLT_DIVIDE_BY_ZERO:      return "Floating Point Divide by Zero (0xC000008E)";
+        case EXCEPTION_FLT_INEXACT_RESULT:      return "Floating Point Inexact Result (0xC000008F)";
+        case EXCEPTION_FLT_INVALID_OPERATION:   return "Floating Point Invalid Operation (0xC0000090)";
         case EXCEPTION_FLT_OVERFLOW:            return "Floating Point Overflow (0xC0000091)";
+        case EXCEPTION_FLT_STACK_CHECK:         return "Floating Point Stack Check (0xC0000092)";
+        case EXCEPTION_FLT_UNDERFLOW:           return "Floating Point Underflow (0xC0000093)";
         case EXCEPTION_INT_DIVIDE_BY_ZERO:      return "Integer Divide by Zero (0xC0000094)";
-        case EXCEPTION_ILLEGAL_INSTRUCTION:     return "Illegal CPU Instruction (0xC000001D)";
+        case EXCEPTION_INT_OVERFLOW:            return "Integer Overflow (0xC0000095)";
+        case EXCEPTION_PRIV_INSTRUCTION:        return "Privileged Instruction (0xC0000096)";
         case EXCEPTION_IN_PAGE_ERROR:           return "In-Page Memory Error (0xC0000006)";
+        case EXCEPTION_ILLEGAL_INSTRUCTION:     return "Illegal CPU Instruction (0xC000001D)";
         case EXCEPTION_STACK_OVERFLOW:          return "Stack Overflow (0xC00000FD)";
         default:                                return "Unknown Hardware Exception";
     }
+}
+
+// Zero-allocation fault telemetry formatting helper (F-08)
+inline void formatFaultReason(char* buf, size_t bufSize, const char* prefix, uint32_t code) noexcept {
+    if (!buf || bufSize == 0) return;
+    const char* p = prefix ? prefix : "";
+    const char* desc = getExceptionDescription(static_cast<DWORD>(code));
+    if (std::strcmp(desc, "Unknown Hardware Exception") == 0) {
+        std::snprintf(buf, bufSize, "%sUnknown Hardware Exception (0x%08lX)", p, static_cast<unsigned long>(code));
+    } else {
+        std::snprintf(buf, bufSize, "%s%s", p, desc);
+    }
+}
+
+inline void formatFaultReason(char (&buf)[128], const char* prefix, uint32_t code) noexcept {
+    formatFaultReason(buf, sizeof(buf), prefix, code);
+}
+
+template <size_t N>
+inline void formatFaultReason(char (&buf)[N], const char* prefix, uint32_t code) noexcept {
+    formatFaultReason(buf, N, prefix, code);
 }
 
 namespace detail {
@@ -60,8 +140,7 @@ inline int filterSehException(DWORD code, DWORD* outExceptionCode) noexcept {
     if (outExceptionCode) {
         *outExceptionCode = code;
     }
-    // Do not intercept MSVC C++ exceptions (0xE06D7363)
-    if (code == 0xE06D7363) {
+    if (isBenignFirstChanceException(code)) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
     if (isCrashException(code)) {
@@ -71,12 +150,12 @@ inline int filterSehException(DWORD code, DWORD* outExceptionCode) noexcept {
 }
 
 // Leaf function: NO local variables with destructors, strictly complying with MSVC C2712
-inline bool sehExecuteLeaf(void (*fn)(void*), void* arg, DWORD* outCode) {
+inline bool sehTrampoline(void (*fnPtr)(void*) noexcept, void* fnCtx, DWORD* outExCode) noexcept {
     __try {
-        fn(arg);
+        fnPtr(fnCtx);
         return true;
     }
-    __except (detail::filterSehException(GetExceptionCode(), outCode)) {
+    __except (detail::filterSehException(GetExceptionCode(), outExCode)) {
         if (GetExceptionCode() == EXCEPTION_STACK_OVERFLOW) {
             _resetstkoflw();
         }
@@ -84,14 +163,21 @@ inline bool sehExecuteLeaf(void (*fn)(void*), void* arg, DWORD* outCode) {
     }
 }
 
-#else
+inline bool sehExecuteLeaf(void (*fn)(void*) noexcept, void* arg, DWORD* outCode) noexcept {
+    return sehTrampoline(fn, arg, outCode);
+}
+
+#elif defined(_WIN32)
 
 struct CrashContext {
     jmp_buf jmpBuf;
     CrashContext* prev{nullptr};
     DWORD exceptionCode{0};
     void* faultAddress{nullptr};
+    bool active{false};
 };
+
+static_assert(std::is_trivially_destructible_v<CrashContext>, "CrashContext must have trivial destructor for C-trampoline longjmp safety");
 
 inline thread_local CrashContext* t_currentCrashContext = nullptr;
 inline PVOID g_vehHandle = nullptr;
@@ -101,52 +187,133 @@ inline LONG WINAPI vehExceptionHandler(PEXCEPTION_POINTERS ep) {
     if (!ep || !ep->ExceptionRecord) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
-    CrashContext* ctx = t_currentCrashContext;
-    if (!ctx) {
+    const DWORD code = ep->ExceptionRecord->ExceptionCode;
+
+    // Explicitly pass C++ exceptions and benign first-chance DRM/guard-page exceptions through
+    if (isBenignFirstChanceException(code)) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
-    DWORD code = ep->ExceptionRecord->ExceptionCode;
+
+    CrashContext* ctx = t_currentCrashContext;
+    if (!ctx || !ctx->active) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
     if (isCrashException(code)) {
         ctx->exceptionCode = code;
         ctx->faultAddress = ep->ExceptionRecord->ExceptionAddress;
-        if (code == EXCEPTION_STACK_OVERFLOW) {
-            _resetstkoflw();
-        }
+        // Do NOT call _resetstkoflw() inside vehExceptionHandler before longjmp!
+        // Instead, invoke _resetstkoflw() immediately AFTER setjmp(ctx.jmpBuf) != 0
+        // on the restored stack frame when ctx.exceptionCode == EXCEPTION_STACK_OVERFLOW.
         longjmp(ctx->jmpBuf, 1);
     }
+
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-inline void ensureVehRegistered() {
+inline void ensureVehRegistered() noexcept {
     std::call_once(g_vehInitOnce, []() {
+        // Register with First=1 to intercept hardware crashes before external handlers
         g_vehHandle = AddVectoredExceptionHandler(1, vehExceptionHandler);
     });
 }
 
-inline bool vehLeafInvoke(void (*fn)(void*), void* ctxArg, DWORD* outExceptionCode) {
+// Pure C-compatible trampoline function containing zero C++ objects with non-trivial destructors (F-09)
+inline bool sehTrampoline(void (*fnPtr)(void*) noexcept, void* fnCtx, DWORD* outExCode) noexcept {
     ensureVehRegistered();
+
     CrashContext ctx;
     ctx.prev = t_currentCrashContext;
     ctx.exceptionCode = 0;
     ctx.faultAddress = nullptr;
+    ctx.active = true;
     t_currentCrashContext = &ctx;
 
     if (setjmp(ctx.jmpBuf) == 0) {
-        try {
-            fn(ctxArg);
-            t_currentCrashContext = ctx.prev;
-            return true;
-        } catch (...) {
-            t_currentCrashContext = ctx.prev;
-            throw;
-        }
-    } else {
+        fnPtr(fnCtx);
+        ctx.active = false;
         t_currentCrashContext = ctx.prev;
-        if (outExceptionCode) {
-            *outExceptionCode = ctx.exceptionCode;
+        return true;
+    } else {
+        // Restored stack frame after hardware exception unwinding
+        ctx.active = false;
+        t_currentCrashContext = ctx.prev;
+        if (ctx.exceptionCode == EXCEPTION_STACK_OVERFLOW) {
+            _resetstkoflw();
+        }
+        if (outExCode) {
+            *outExCode = ctx.exceptionCode;
         }
         return false;
     }
+}
+
+inline bool vehLeafInvoke(void (*fn)(void*) noexcept, void* ctxArg, DWORD* outExceptionCode) noexcept {
+    return sehTrampoline(fn, ctxArg, outExceptionCode);
+}
+
+#else
+
+struct CrashContext {
+    sigjmp_buf jmpBuf;
+    CrashContext* prev{nullptr};
+    DWORD exceptionCode{0};
+    bool active{false};
+};
+
+inline thread_local CrashContext* t_currentCrashContext = nullptr;
+inline std::once_flag g_vehInitOnce;
+
+inline void posixSignalHandler(int sig) noexcept {
+    CrashContext* ctx = t_currentCrashContext;
+    if (!ctx || !ctx->active) {
+        std::_Exit(128 + sig);
+    }
+    if (sig == SIGSEGV || sig == SIGBUS) ctx->exceptionCode = EXCEPTION_ACCESS_VIOLATION;
+    else if (sig == SIGFPE) ctx->exceptionCode = EXCEPTION_FLT_DIVIDE_BY_ZERO;
+    else if (sig == SIGILL) ctx->exceptionCode = EXCEPTION_ILLEGAL_INSTRUCTION;
+    else ctx->exceptionCode = EXCEPTION_ACCESS_VIOLATION;
+    siglongjmp(ctx->jmpBuf, 1);
+}
+
+inline void ensureVehRegistered() noexcept {
+    std::call_once(g_vehInitOnce, []() {
+        struct sigaction sa{};
+        sa.sa_handler = posixSignalHandler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = SA_NODEFER;
+        sigaction(SIGSEGV, &sa, nullptr);
+        sigaction(SIGFPE, &sa, nullptr);
+        sigaction(SIGILL, &sa, nullptr);
+        sigaction(SIGBUS, &sa, nullptr);
+    });
+}
+
+inline bool sehTrampoline(void (*fnPtr)(void*) noexcept, void* fnCtx, DWORD* outExCode) noexcept {
+    ensureVehRegistered();
+    CrashContext ctx{};
+    ctx.prev = t_currentCrashContext;
+    ctx.exceptionCode = 0;
+    ctx.active = true;
+    t_currentCrashContext = &ctx;
+
+    if (sigsetjmp(ctx.jmpBuf, 1) == 0) {
+        fnPtr(fnCtx);
+        ctx.active = false;
+        t_currentCrashContext = ctx.prev;
+        return true;
+    } else {
+        ctx.active = false;
+        t_currentCrashContext = ctx.prev;
+        if (outExCode) {
+            *outExCode = ctx.exceptionCode;
+        }
+        return false;
+    }
+}
+
+inline bool vehLeafInvoke(void (*fn)(void*) noexcept, void* ctxArg, DWORD* outExceptionCode) noexcept {
+    return sehTrampoline(fn, ctxArg, outExceptionCode);
 }
 
 #endif
@@ -161,15 +328,11 @@ inline void initCrashIsolation() {
 
 template <typename Func>
 inline bool safeCallPlugin(Func&& f, DWORD* outExceptionCode = nullptr) {
-    auto trampoline = [](void* context) {
+    auto trampoline = [](void* context) noexcept {
         auto* fn = static_cast<std::remove_reference_t<Func>*>(context);
         (*fn)();
     };
-#if defined(_MSC_VER)
-    return detail::sehExecuteLeaf(trampoline, const_cast<void*>(static_cast<const void*>(&f)), outExceptionCode);
-#else
-    return detail::vehLeafInvoke(trampoline, const_cast<void*>(static_cast<const void*>(&f)), outExceptionCode);
-#endif
+    return detail::sehTrampoline(trampoline, const_cast<void*>(static_cast<const void*>(&f)), outExceptionCode);
 }
 
 template <typename Func>
@@ -177,7 +340,9 @@ inline bool safeCallPluginAudio(Func&& f, DWORD* outExceptionCode = nullptr) {
     bool ok = safeCallPlugin(std::forward<Func>(f), outExceptionCode);
     if (!ok) {
         // Restore standard audio MXCSR control word after fault
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
         _mm_setcsr(0x1F80 | 0x8000 | 0x0040); // Standard masks + FTZ + DAZ
+#endif
     }
     return ok;
 }

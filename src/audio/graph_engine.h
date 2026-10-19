@@ -5,14 +5,19 @@
 #include "dsp_utils.h"
 #include "input_config.h"
 #include "param_automation.h"
+#include "../midi/midi_types.h"
 #include <vector>
 #include <memory>
 #include <string>
 #include <atomic>
 #include <mutex>
 #include <array>
-#include <algorithm>
+#include <thread>
 #include "readerwriterqueue/readerwriterqueue.h"
+
+namespace praccy::plugins {
+class IPluginInstance;
+}
 
 namespace praccy::audio {
 
@@ -22,6 +27,14 @@ namespace praccy::audio {
  */
 class PluginSlot : public AudioNode {
 public:
+    static constexpr size_t MAX_CACHED_PARAM_RANGES = 256;
+
+    struct CachedParamRange {
+        std::atomic<uint32_t> id{0};
+        std::atomic<float> minVal{0.0f};
+        std::atomic<float> maxVal{1.0f};
+    };
+
     explicit PluginSlot(std::unique_ptr<AudioNode> innerNode);
 
     void prepare(double sampleRate, uint32_t maxBlockSize) override;
@@ -31,32 +44,56 @@ public:
     [[nodiscard]] NodeType type() const noexcept override { return NodeType::Plugin; }
     [[nodiscard]] const std::string& name() const noexcept override;
 
-    void setDryWet(float mix) noexcept { m_dryWet.store(std::clamp(mix, 0.0f, 1.0f), std::memory_order_relaxed); }
+    void setDryWet(float mix) noexcept {
+        if (!std::isfinite(mix)) return;
+        m_dryWet.store(std::clamp(mix, 0.0f, 1.0f), std::memory_order_relaxed);
+    }
     [[nodiscard]] float dryWet() const noexcept { return m_dryWet.load(std::memory_order_relaxed); }
 
-    void setInputGainDb(float db) noexcept { m_inputGainDb.store(db, std::memory_order_relaxed); }
+    void setInputGainDb(float db) noexcept {
+        if (!std::isfinite(db)) return;
+        m_inputGainDb.store(std::clamp(db, -60.0f, 24.0f), std::memory_order_relaxed);
+    }
     [[nodiscard]] float inputGainDb() const noexcept { return m_inputGainDb.load(std::memory_order_relaxed); }
 
-    void setOutputGainDb(float db) noexcept { m_outputGainDb.store(db, std::memory_order_relaxed); }
+    void setOutputGainDb(float db) noexcept {
+        if (!std::isfinite(db)) return;
+        m_outputGainDb.store(std::clamp(db, -60.0f, 24.0f), std::memory_order_relaxed);
+    }
     [[nodiscard]] float outputGainDb() const noexcept { return m_outputGainDb.load(std::memory_order_relaxed); }
 
     void setBypassed(bool bypassed) noexcept override;
     [[nodiscard]] bool isBypassed() const noexcept override;
     [[nodiscard]] bool isFaulted() const noexcept override {
-        return m_innerNode ? m_innerNode->isFaulted() : false;
+        AudioNode* inner = m_rtInnerNode.load(std::memory_order_relaxed);
+        return inner ? inner->isFaulted() : false;
+    }
+    [[nodiscard]] bool isMissing() const noexcept override {
+        AudioNode* inner = m_rtInnerNode.load(std::memory_order_relaxed);
+        return inner ? inner->isMissing() : false;
+    }
+    [[nodiscard]] bool isLoading() const noexcept override {
+        AudioNode* inner = m_rtInnerNode.load(std::memory_order_relaxed);
+        return inner ? inner->isLoading() : false;
     }
 
+    void replaceInnerNode(std::unique_ptr<AudioNode> newInner, std::unique_ptr<AudioNode>& outOld) noexcept;
+
     [[nodiscard]] uint32_t latencySamples() const noexcept override {
-        if (isBypassed() || !m_innerNode || m_innerNode->isFaulted() || m_innerNode->isBypassed()) {
+        AudioNode* inner = m_rtInnerNode.load(std::memory_order_relaxed);
+        if (isBypassed() || !inner || inner->isFaulted() || inner->isBypassed()) {
             return 0;
         }
-        return m_innerNode->latencySamples();
+        return inner->latencySamples();
     }
 
     // Parameter automation registration (Wait-free, Lock-free)
     void setParameter(uint32_t paramId, float value) noexcept {
         m_automationRegister.setParameter(paramId, value);
     }
+    void setParameterNormalized(uint32_t paramId, float normalizedValue) noexcept;
+    void refreshCachedParameterRanges() noexcept;
+
     [[nodiscard]] float getParameter(uint32_t paramId) const noexcept {
         return m_automationRegister.getParameter(paramId);
     }
@@ -67,25 +104,60 @@ public:
         return m_automationRegister;
     }
 
-    [[nodiscard]] AudioNode* innerNode() const noexcept { return m_innerNode.get(); }
+    [[nodiscard]] AudioNode* innerNode() const noexcept {
+        AudioNode* node = m_rtInnerNode.load(std::memory_order_acquire);
+        return node ? node : m_innerNode.get();
+    }
     [[nodiscard]] LevelMeter& meter() noexcept { return m_meter; }
+
+    struct Macro {
+        std::string label;
+        uint32_t paramId{0};
+        bool bound{false};
+        bool isSlotMix{false};
+        bool isSlotTrim{false};
+        float currentValue{0.0f};
+        float defaultValue{0.0f};
+        float minValue{0.0f};
+        float maxValue{1.0f};
+    };
+
+    [[nodiscard]] std::array<Macro, 4>& macros() noexcept { return m_macros; }
+    [[nodiscard]] const std::array<Macro, 4>& macros() const noexcept { return m_macros; }
+    [[nodiscard]] bool hasMacrosInitialized() const noexcept { return m_macrosInitialized; }
+    void setMacrosInitialized(bool init) noexcept { m_macrosInitialized = init; }
 
 private:
     std::unique_ptr<AudioNode> m_innerNode;
+    std::atomic<AudioNode*> m_rtInnerNode{nullptr};
+    std::atomic<plugins::IPluginInstance*> m_rtPluginPtr{nullptr};
+    plugins::IPluginInstance* m_pluginPtr{nullptr};
+    std::atomic<uint32_t> m_slotSuspendDepth{0};
+    std::atomic<uint32_t> m_slotActiveCallbacks{0};
+    double m_sampleRate{0.0};
+    uint32_t m_maxBlockSize{0};
     std::atomic<float> m_dryWet{1.0f};      // 1.0 = 100% wet
     std::atomic<float> m_inputGainDb{0.0f};  // 0 dB
     std::atomic<float> m_outputGainDb{0.0f}; // 0 dB
+
+    std::array<CachedParamRange, MAX_CACHED_PARAM_RANGES> m_paramRanges{};
+    std::atomic<size_t> m_numParamRanges{0};
 
     ParamAutomationRegister m_automationRegister;
     EqualPowerRamp m_bypassRamp;
     OwnedAudioBuffer m_dryBuffer;
     OwnedAudioBuffer m_processBuffer;
+    OwnedAudioBuffer m_inputScaledBuffer;
     LevelMeter m_meter;
+    std::array<Macro, 4> m_macros{};
+    bool m_macrosInitialized{false};
 };
 
 enum class SlotCommandType : uint8_t {
     Add,
+    Insert,
     Remove,
+    Reorder,
     Clear
 };
 
@@ -96,12 +168,29 @@ struct SlotCommand {
     SlotCommandType type{SlotCommandType::Add};
     std::unique_ptr<PluginSlot> slot{nullptr};
     size_t index{0};
+    size_t targetIndex{0};
     PluginSlot* targetSlot{nullptr};
 
     static SlotCommand makeAdd(std::unique_ptr<PluginSlot> newSlot) noexcept {
         SlotCommand cmd;
         cmd.type = SlotCommandType::Add;
         cmd.slot = std::move(newSlot);
+        return cmd;
+    }
+
+    static SlotCommand makeInsert(size_t idx, std::unique_ptr<PluginSlot> newSlot) noexcept {
+        SlotCommand cmd;
+        cmd.type = SlotCommandType::Insert;
+        cmd.index = idx;
+        cmd.slot = std::move(newSlot);
+        return cmd;
+    }
+
+    static SlotCommand makeReorder(size_t fromIdx, size_t toIdx) noexcept {
+        SlotCommand cmd;
+        cmd.type = SlotCommandType::Reorder;
+        cmd.index = fromIdx;
+        cmd.targetIndex = toIdx;
         return cmd;
     }
 
@@ -131,23 +220,33 @@ public:
     static constexpr size_t QUEUE_CAPACITY = 64;
     static constexpr size_t PDC_BUFFER_SIZE = 16384;
     static constexpr size_t PDC_BUFFER_MASK = PDC_BUFFER_SIZE - 1;
+    static constexpr size_t DEFERRED_RECLAIM_CAPACITY = 2048;
 
     explicit ParallelBranch(std::string name);
     ~ParallelBranch();
 
     void prepare(double sampleRate, uint32_t maxBlockSize);
     void reset();
+    void setAudioRunning(bool running) noexcept { m_isAudioRunning.store(running, std::memory_order_release); }
 
     // UI-thread mutations (Push to SPSC command queue, update UI shadow list)
     void addSlot(std::unique_ptr<PluginSlot> slot);
+    void insertSlot(size_t index, std::unique_ptr<PluginSlot> slot);
     void removeSlot(size_t index);
     std::unique_ptr<PluginSlot> takeSlot(size_t index);
+    void reorderSlots(size_t fromIndex, size_t toIndex);
 
-    // Thread-safe UI readouts (Reads UI shadow list, zero lock contention)
-    [[nodiscard]] size_t numSlots() const noexcept { return m_uiSlots.size(); }
-    [[nodiscard]] PluginSlot* getSlot(size_t index) noexcept {
-        return (index < m_uiSlots.size()) ? m_uiSlots[index] : nullptr;
+    // Thread-safe UI readouts
+    [[nodiscard]] size_t numSlots() const noexcept;
+    [[nodiscard]] PluginSlot* getSlot(size_t index) noexcept;
+    [[nodiscard]] PluginSlot* getSlotLockFree(size_t index) const noexcept {
+        const size_t count = m_rtNumSlots.load(std::memory_order_acquire);
+        if (index >= count || index >= MAX_BRANCH_SLOTS) return nullptr;
+        return m_rtSlots[index].load(std::memory_order_acquire);
     }
+    void addSlotToUiShadow(PluginSlot* slot);
+    [[nodiscard]] std::vector<std::unique_ptr<PluginSlot>>& activeSlots() noexcept { return m_activeSlots; }
+    void drainSlotCommandsIntoActive() noexcept;
 
     // Audio thread processing (Drains commands wait-free, pushes retired to reclaim queue)
     void process(AudioProcessContext& ctx);
@@ -192,11 +291,15 @@ public:
 private:
     void stashForReclamation(std::unique_ptr<PluginSlot> slot) noexcept;
     void flushStashedReclamations() noexcept;
+    void syncRtSlotsLocked() noexcept;
 
     std::string m_name;
+    mutable std::mutex m_slotMutex;
 
-    // 1. UI-Thread Shadow Registry (Only accessed from UI thread)
+    // 1. UI-Thread Shadow Registry (guarded by m_slotMutex)
     std::vector<PluginSlot*> m_uiSlots;
+    std::array<std::atomic<PluginSlot*>, MAX_BRANCH_SLOTS> m_rtSlots{};
+    std::atomic<size_t> m_rtNumSlots{0};
 
     // 2. Audio-Thread Active Slots (Only accessed from Audio thread in process())
     std::vector<std::unique_ptr<PluginSlot>> m_activeSlots;
@@ -204,12 +307,14 @@ private:
     // 3. SPSC Command Queue: UI Thread -> Audio Thread
     moodycamel::ReaderWriterQueue<SlotCommand> m_commandQueue{QUEUE_CAPACITY};
 
-    // 4. SPSC Reclamation Queue: Audio Thread -> UI Thread
-    moodycamel::ReaderWriterQueue<std::unique_ptr<PluginSlot>> m_reclaimQueue{QUEUE_CAPACITY};
+    // 4. SPSC Reclamation Queue: Audio Thread -> UI Thread (1024 capacity for bounded reclamation)
+    moodycamel::ReaderWriterQueue<std::unique_ptr<PluginSlot>> m_reclaimQueue{1024};
 
     // 5. Fail-Safe Audio Thread Stash (Prevents destruction on audio thread if queue is saturated)
-    std::array<std::unique_ptr<PluginSlot>, 16> m_stashedReclamations;
-    size_t m_stashedCount{0};
+    std::vector<std::unique_ptr<PluginSlot>> m_deferredReclaim;
+    std::atomic<bool> m_isAudioRunning{false};
+    std::atomic<uint32_t> m_branchSuspendDepth{0};
+    std::atomic<uint32_t> m_branchActiveCallbacks{0};
 
     // 6. Parallel Delay Compensation (PDC) stereo circular delay lines (16,384 samples)
     std::vector<float> m_delayBufferL;
@@ -236,17 +341,61 @@ private:
     uint32_t m_maxBlockSize{256};
 };
 
+enum class BranchCommandType : uint8_t {
+    Add,
+    Remove,
+    Clear
+};
+
+/**
+ * @brief Lock-free command payload dispatched from UI thread to ParallelSplitMergeBlock audio thread.
+ */
+struct BranchCommand {
+    BranchCommandType type{BranchCommandType::Add};
+    std::unique_ptr<ParallelBranch> branch{nullptr};
+    size_t index{0};
+    ParallelBranch* targetBranch{nullptr};
+
+    static BranchCommand makeAdd(std::unique_ptr<ParallelBranch> b) noexcept {
+        BranchCommand cmd;
+        cmd.type = BranchCommandType::Add;
+        cmd.branch = std::move(b);
+        return cmd;
+    }
+
+    static BranchCommand makeRemove(size_t idx, ParallelBranch* target = nullptr) noexcept {
+        BranchCommand cmd;
+        cmd.type = BranchCommandType::Remove;
+        cmd.index = idx;
+        cmd.targetBranch = target;
+        return cmd;
+    }
+
+    static BranchCommand makeClear() noexcept {
+        BranchCommand cmd;
+        cmd.type = BranchCommandType::Clear;
+        return cmd;
+    }
+};
+
 /**
  * @brief Split & Merge Block: splits audio into parallel branches and mixes them,
  * coordinating dynamic phase-coherent Parallel Delay Compensation.
+ * Concurrency-safe: UI mutations use lock-free SPSC branch command and reclamation queues.
  */
 class ParallelSplitMergeBlock : public AudioNode {
 public:
+    static constexpr size_t BRANCH_QUEUE_CAPACITY = 64;
+    static constexpr size_t MAX_BRANCHES = 16;
+    static constexpr size_t DEFERRED_BRANCH_RECLAIM_CAPACITY = 256;
+
     explicit ParallelSplitMergeBlock(std::string name = "Parallel Split/Merge");
+    ~ParallelSplitMergeBlock() override;
 
     void prepare(double sampleRate, uint32_t maxBlockSize) override;
     void process(AudioProcessContext& ctx) override;
     void reset() override;
+    void setAudioRunning(bool running) noexcept;
 
     [[nodiscard]] NodeType type() const noexcept override { return NodeType::ParallelSplitMerge; }
     [[nodiscard]] const std::string& name() const noexcept override { return m_name; }
@@ -255,19 +404,56 @@ public:
 
     ParallelBranch* addBranch(const std::string& branchName);
     void removeBranch(size_t index);
-    [[nodiscard]] size_t numBranches() const noexcept { return m_branches.size(); }
+    [[nodiscard]] size_t numBranches() const noexcept;
     [[nodiscard]] ParallelBranch* getBranch(size_t index) noexcept;
+    [[nodiscard]] ParallelBranch* getBranchLockFree(size_t index) const noexcept {
+        const size_t count = m_rtNumBranches.load(std::memory_order_acquire);
+        if (index >= count || index >= MAX_BRANCHES) return nullptr;
+        return m_rtBranches[index].load(std::memory_order_acquire);
+    }
+
+    // Audio-thread lock-free branch access (must ONLY be called on the audio thread or when audio is stopped)
+    void flushBranchCommandsIntoActive() noexcept { drainCommandQueueIntoActive(); }
+    [[nodiscard]] std::vector<std::unique_ptr<ParallelBranch>>& activeBranches() noexcept { return m_activeBranches; }
+    [[nodiscard]] const std::vector<std::unique_ptr<ParallelBranch>>& activeBranches() const noexcept { return m_activeBranches; }
 
     void setBlend(float blend) noexcept { m_blend.store(std::clamp(blend, -1.0f, 1.0f), std::memory_order_relaxed); }
     [[nodiscard]] float blend() const noexcept { return m_blend.load(std::memory_order_relaxed); }
 
     void collectReclaimedSlots() noexcept;
+    void collectReclaimedBranches() noexcept;
 
 private:
+    void drainCommandQueueIntoActive();
+    void stashBranchForReclamation(std::unique_ptr<ParallelBranch> branch) noexcept;
+    void syncRtBranchesLocked() noexcept;
+
     std::string m_name;
-    std::vector<std::unique_ptr<ParallelBranch>> m_branches;
+    mutable std::mutex m_branchMutex;
+
+    // 1. UI-Thread Branch Shadow Registry (guarded by m_branchMutex)
+    std::vector<ParallelBranch*> m_uiBranches;
+    std::array<std::atomic<ParallelBranch*>, MAX_BRANCHES> m_rtBranches{};
+    std::atomic<size_t> m_rtNumBranches{0};
+
+    // 2. Audio-Thread Active Branches (owned exclusively by Audio thread in process())
+    std::vector<std::unique_ptr<ParallelBranch>> m_activeBranches;
+
+    // 3. SPSC Command Queue: UI Thread -> Audio Thread
+    moodycamel::ReaderWriterQueue<BranchCommand> m_branchCmdQueue{BRANCH_QUEUE_CAPACITY};
+
+    // 4. SPSC Reclamation Queue: Audio Thread -> UI Thread
+    moodycamel::ReaderWriterQueue<std::unique_ptr<ParallelBranch>> m_branchReclaimQueue{BRANCH_QUEUE_CAPACITY};
+
+    // 5. Overflow stash for branches
+    std::vector<std::unique_ptr<ParallelBranch>> m_deferredReclaimBranches;
+
     OwnedAudioBuffer m_mixBuffer;
     std::atomic<float> m_blend{0.0f};
+    std::atomic<bool> m_isAudioRunning{false};
+    std::atomic<uint32_t> m_blockSuspendDepth{0};
+    std::atomic<uint32_t> m_blockActiveCallbacks{0};
+    std::atomic<uint32_t> m_blockLatency{0};
     double m_sampleRate{48000.0};
     uint32_t m_maxBlockSize{256};
 };
@@ -304,7 +490,9 @@ enum class GraphCommandType : uint8_t {
     Swap,
     Reorder,
     Clear,
-    CrossfadeTo
+    CrossfadeTo,
+    SplitToParallel,
+    DissolveParallel
 };
 
 /**
@@ -376,25 +564,68 @@ struct GraphCommand {
         cmd.chainPayload = std::move(chain);
         return cmd;
     }
+
+    static GraphCommand makeSplitToParallel(size_t index, std::unique_ptr<AudioNode> block) noexcept {
+        GraphCommand cmd;
+        cmd.type = GraphCommandType::SplitToParallel;
+        cmd.indexA = index;
+        cmd.node = std::move(block);
+        return cmd;
+    }
+
+    static GraphCommand makeDissolveParallel(size_t blockIndex, int branchToKeep) noexcept {
+        GraphCommand cmd;
+        cmd.type = GraphCommandType::DissolveParallel;
+        cmd.indexA = blockIndex;
+        cmd.indexB = static_cast<size_t>(branchToKeep >= 0 ? branchToKeep : 0);
+        return cmd;
+    }
 };
 
 /**
  * @brief Master Audio Graph Engine managing the entire realtime signal path.
  * Real-time safety contract: strictly 0 heap allocations, 0 mutex locks, and 0 blocking file I/O
- * in the ASIO audio callback. Structural mutations execute at block boundaries via SPSC queue
- * with a 64-sample equal-power micro-crossfade.
+ * in the ASIO audio callback and WinMM MIDI callback. Structural mutations execute at block
+ * boundaries via SPSC queue with a 64-sample equal-power micro-crossfade.
  */
 class GraphEngine {
 public:
     static constexpr size_t GRAPH_QUEUE_CAPACITY = 512;
     static constexpr size_t MAX_GRAPH_NODES = 128;
+    static constexpr size_t DEFERRED_RECLAIM_CAPACITY = 4096;
 
     GraphEngine();
     ~GraphEngine();
 
     void prepare(double sampleRate, uint32_t maxBlockSize);
     void process(const AudioBufferView& hardwareIn, AudioBufferView& hardwareOut);
+    void process(const AudioBufferView& hardwareIn, AudioBufferView& hardwareOut, const AudioProcessContext& transportCtx);
     void reset();
+    void setAudioRunning(bool running) noexcept;
+
+    /**
+     * @brief Executes a structural or slot mutation safely by fencing the real-time audio thread
+     * via a two-way Dekker atomic handshake (m_suspendDepth + m_activeCallbacks).
+     */
+    template <typename Fn>
+    void executeWithAudioFence(Fn&& fn) {
+        beginAudioFence();
+        const bool wasRunning = m_isAudioRunning.load(std::memory_order_acquire);
+        if (wasRunning) {
+            setAudioRunning(false);
+        }
+        struct FenceRestoreGuard {
+            GraphEngine* self;
+            bool restoreRunning;
+            ~FenceRestoreGuard() noexcept {
+                if (restoreRunning) {
+                    self->setAudioRunning(true);
+                }
+                self->endAudioFence();
+            }
+        } restoreGuard{this, wasRunning};
+        std::forward<Fn>(fn)();
+    }
 
     // UI-thread mutations (Push to SPSC command queue, update UI shadow list)
     void addSerialNode(std::unique_ptr<AudioNode> node);
@@ -407,21 +638,45 @@ public:
     void dissolveParallelBlock(size_t blockIndex, int branchToKeep);
     void clearNodes();
     void crossfadeToNodes(std::vector<std::unique_ptr<AudioNode>> newNodes);
+    void triggerCrossfade(float durationMs = 10.0f) noexcept {
+        const uint32_t rampSamples = static_cast<uint32_t>(m_sampleRate * (durationMs / 1000.0f));
+        m_pendingCrossfadeSamples.store(std::max(1u, rampSamples), std::memory_order_release);
+    }
     [[nodiscard]] bool isSceneCrossfading() const noexcept {
         return m_isSceneCrossfading.load(std::memory_order_acquire);
     }
 
     void processReclamation() noexcept;
 
-    // UI readouts (Reads UI shadow list, zero lock contention)
+    // UI readouts
     [[nodiscard]] size_t numNodes() const noexcept;
     [[nodiscard]] AudioNode* getNode(size_t index) noexcept;
+
+    // Wait-free, lock-free parameter and binding dispatch (0 mutex locks on MIDI/Audio threads)
+    bool dispatchParameterThreadSafe(int slotIdx, int branchIdx, int branchSlotIdx,
+                                     uint32_t paramId, float normalizedValue) noexcept;
+    bool dispatchBindingThreadSafe(praccy::midi::BindingTargetType type,
+                                   int slotIdx, int branchIdx, int branchSlotIdx,
+                                   uint32_t paramId, float value) noexcept;
 
     void setInputGainDb(float db) noexcept { m_inputGainDb.store(db, std::memory_order_relaxed); }
     [[nodiscard]] float inputGainDb() const noexcept { return m_inputGainDb.load(std::memory_order_relaxed); }
 
-    void setInputRouting(const InputRoutingConfig& config) noexcept { m_inputConfig = config; }
-    [[nodiscard]] const InputRoutingConfig& inputRouting() const noexcept { return m_inputConfig; }
+    void setInputRouting(const InputRoutingConfig& config) noexcept {
+        const uint64_t packed =
+            (static_cast<uint64_t>(static_cast<uint8_t>(config.mode)) & 0xFFull) |
+            ((static_cast<uint64_t>(static_cast<uint16_t>(std::max(0, config.channelLeft))) & 0xFFFFull) << 8) |
+            ((static_cast<uint64_t>(static_cast<uint16_t>(std::max(0, config.channelRight))) & 0xFFFFull) << 24);
+        m_packedInputConfig.store(packed, std::memory_order_release);
+    }
+    [[nodiscard]] InputRoutingConfig inputRouting() const noexcept {
+        const uint64_t packed = m_packedInputConfig.load(std::memory_order_acquire);
+        InputRoutingConfig cfg;
+        cfg.mode = static_cast<InputRoutingMode>(packed & 0xFFull);
+        cfg.channelLeft = static_cast<int>((packed >> 8) & 0xFFFFull);
+        cfg.channelRight = static_cast<int>((packed >> 24) & 0xFFFFull);
+        return cfg;
+    }
 
     void setMasterVolumeDb(float db) noexcept { m_masterVolumeDb.store(db, std::memory_order_relaxed); }
     [[nodiscard]] float masterVolumeDb() const noexcept { return m_masterVolumeDb.load(std::memory_order_relaxed); }
@@ -433,51 +688,82 @@ public:
     [[nodiscard]] double sampleRate() const noexcept { return m_sampleRate; }
     [[nodiscard]] uint32_t maxBlockSize() const noexcept { return m_maxBlockSize; }
 
-private:
     void stashForReclamation(std::unique_ptr<AudioNode> node) noexcept;
+
+private:
+    void beginAudioFence() noexcept {
+        m_suspendDepth.fetch_add(1, std::memory_order_seq_cst);
+        while (m_activeCallbacks.load(std::memory_order_acquire) != 0) {
+            std::this_thread::yield();
+        }
+    }
+    void endAudioFence() noexcept {
+        m_suspendDepth.fetch_sub(1, std::memory_order_release);
+    }
+
+    struct ScopedAudioFence {
+        GraphEngine* engine;
+        explicit ScopedAudioFence(GraphEngine* e) noexcept : engine(e) {
+            engine->beginAudioFence();
+        }
+        ~ScopedAudioFence() noexcept {
+            engine->endAudioFence();
+        }
+    };
+
     void stashChainForReclamation(std::unique_ptr<NodeChain> chain) noexcept;
     void flushStashedReclamations() noexcept;
     void drainCommandQueueIntoActive();
+    void syncRtNodesLocked() noexcept;
 
     double m_sampleRate{48000.0};
     uint32_t m_maxBlockSize{256};
 
     std::atomic<float> m_inputGainDb{0.0f};
     std::atomic<float> m_masterVolumeDb{0.0f};
-    InputRoutingConfig m_inputConfig;
+    std::atomic<uint64_t> m_packedInputConfig{
+        (static_cast<uint64_t>(static_cast<uint8_t>(InputRoutingMode::MonoLeft)) & 0xFFull) |
+        (0ull << 8) |
+        (1ull << 24)
+    };
 
     NoiseGate m_noiseGate;
     LevelMeter m_inputMeter;
     LevelMeter m_outputMeter;
 
-    // 1. UI-Thread Shadow Registry (Only accessed from UI thread)
+    // 1. UI-Thread Shadow Registry & Wait-Free Atomic Topology Mirror
     std::vector<AudioNode*> m_uiNodes;
+    std::array<std::atomic<AudioNode*>, MAX_GRAPH_NODES> m_rtNodes{};
+    std::atomic<size_t> m_rtNumNodes{0};
 
-    // 2. Audio-Thread Active Nodes (Only accessed from Audio thread in process() or prepare())
+    // 2. Audio-Thread Active Nodes (Only accessed from Audio thread in process() or under ScopedAudioFence)
     std::vector<std::unique_ptr<AudioNode>> m_activeNodes;
 
     // 3. SPSC Command Queue: UI Thread -> Audio Thread
     moodycamel::ReaderWriterQueue<GraphCommand> m_commandQueue{GRAPH_QUEUE_CAPACITY};
 
-    // 4. SPSC Reclamation Queue: Audio Thread -> UI Thread
-    moodycamel::ReaderWriterQueue<std::unique_ptr<AudioNode>> m_reclaimQueue{GRAPH_QUEUE_CAPACITY};
-    moodycamel::ReaderWriterQueue<std::unique_ptr<NodeChain>> m_chainReclaimQueue{GRAPH_QUEUE_CAPACITY};
+    // 4. SPSC Reclamation Queue: Audio Thread -> UI Thread (1024 capacity for bounded reclamation)
+    moodycamel::ReaderWriterQueue<std::unique_ptr<AudioNode>> m_reclaimQueue{1024};
+    moodycamel::ReaderWriterQueue<std::unique_ptr<NodeChain>> m_chainReclaimQueue{1024};
 
     // 5. Fail-Safe Audio Thread Stash (Prevents destruction on audio thread if queue is saturated)
-    std::array<std::unique_ptr<AudioNode>, 16> m_stashedReclamations;
-    size_t m_stashedCount{0};
+    std::vector<std::unique_ptr<AudioNode>> m_deferredReclaim;
     std::array<std::unique_ptr<NodeChain>, 16> m_stashedChains;
     size_t m_stashedChainCount{0};
 
-    // UI thread mutex (Guards UI shadow modifications, NEVER locked on audio thread!)
-    std::mutex m_uiMutex;
+    // UI thread mutex (Guards UI shadow modifications, NEVER locked on audio or MIDI threads!)
+    mutable std::mutex m_uiMutex;
+    std::atomic<bool> m_isAudioRunning{false};
+    std::atomic<uint32_t> m_suspendDepth{0};
+    std::atomic<uint32_t> m_activeCallbacks{0};
+    std::atomic<bool> m_cancelSceneCrossfade{false};
 
     OwnedAudioBuffer m_mainProcessingBuffer;
     OwnedAudioBuffer m_scratchBuffer;
     EqualPowerRamp m_sceneCrossfadeRamp;
-    std::vector<std::unique_ptr<AudioNode>> m_retiringNodes;
-    OwnedAudioBuffer m_retiringBuffer;
+    std::vector<std::unique_ptr<AudioNode>> m_fadingOutNodes;
     OwnedAudioBuffer m_activeBuffer;
+    uint32_t m_crossfadeRemainingSamples{0};
 
     // 64-sample equal-power micro-crossfade for structural updates
     EqualPowerRamp m_microCrossfadeRamp;
@@ -485,6 +771,11 @@ private:
     float m_lastBlockSampleR{0.0f};
     bool m_hasProcessedAudio{false};
     std::atomic<bool> m_isSceneCrossfading{false};
+
+    // 10ms smooth equal-power crossfade for in-place preset / snapshot / A-B switching
+    std::atomic<uint32_t> m_pendingCrossfadeSamples{0};
+    EqualPowerRamp m_inplaceCrossfadeRamp;
+    OwnedAudioBuffer m_outgoingTailBuffer;
 };
 
 } // namespace praccy::audio

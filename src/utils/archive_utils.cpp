@@ -4,7 +4,9 @@
 
 #include "archive_utils.h"
 
+#if defined(_WIN32)
 #include <windows.h>
+#endif
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -136,6 +138,7 @@ bool extractZipArchiveCore(mz_zip_archive& zip,
     }
 
     uint64_t totalUncompressed = 0;
+    uint64_t actualTotalUncompressed = 0;
 
     for (mz_uint i = 0; i < numFiles; ++i) {
         mz_zip_archive_file_stat stat;
@@ -222,6 +225,33 @@ bool extractZipArchiveCore(mz_zip_archive& zip,
             return false;
         }
 
+        // Verify post-extraction uncompressed size against bomb guards
+        if (uncompSize > guards.maxSingleFileSize) {
+            mz_free(pData);
+            outError = "Extracted file exceeds maxSingleFileSize limit: " + rawName;
+            return false;
+        }
+
+        actualTotalUncompressed += uncompSize;
+        if (actualTotalUncompressed > guards.maxArchiveTotalSize) {
+            mz_free(pData);
+            outError = "Extracted archive total uncompressed size exceeds safe limits (potential decompression bomb, exceeds 128MB limit): " + rawName;
+            return false;
+        }
+
+        const std::string extLower = safeRel.extension().string();
+        if ((extLower == ".xml" || extLower == ".dawproject") && uncompSize > guards.maxXmlSize) {
+            mz_free(pData);
+            outError = "Extracted XML file exceeds maxXmlSize limit: " + rawName;
+            return false;
+        }
+
+        if (stat.m_comp_size > 0 && (uncompSize / stat.m_comp_size) > guards.maxCompressionRatio) {
+            mz_free(pData);
+            outError = "Extracted file exceeds maxCompressionRatio: " + rawName;
+            return false;
+        }
+
         std::ofstream outFile(canonicalTarget, std::ios::binary | std::ios::trunc);
         if (!outFile.is_open()) {
             mz_free(pData);
@@ -252,7 +282,11 @@ bool extractZipArchive(const std::filesystem::path& zipPath,
         return false;
     }
 
+#if defined(_WIN32)
     FILE* fp = _wfopen(zipPath.wstring().c_str(), L"rb");
+#else
+    FILE* fp = std::fopen(zipPath.string().c_str(), "rb");
+#endif
     if (!fp) {
         outError = "Failed to open zip archive: " + zipPath.string();
         return false;
@@ -339,22 +373,54 @@ bool ArchiveUtils::gzipDecompress(const std::vector<uint8_t>& gzData, std::strin
     size_t deflateLen = gzData.size() - 8 - offset;
     const uint8_t* deflateData = gzData.data() + offset;
 
-    size_t uncompLen = 0;
-    void* uncompBuf = tinfl_decompress_mem_to_heap(deflateData, deflateLen, &uncompLen, 0);
-    if (!uncompBuf) return false;
+    uint32_t isize = 0;
+    if (gzData.size() >= 4) {
+        const size_t end = gzData.size();
+        isize = static_cast<uint32_t>(gzData[end - 4]) |
+               (static_cast<uint32_t>(gzData[end - 3]) << 8) |
+               (static_cast<uint32_t>(gzData[end - 2]) << 16) |
+               (static_cast<uint32_t>(gzData[end - 1]) << 24);
+    }
 
-    if (uncompLen > kMaxDecompressedXmlBytes) {
-        mz_free(uncompBuf);
+    size_t outCapacity = 0;
+    if (isize > 0 && isize <= kMaxDecompressedXmlBytes) {
+        outCapacity = isize;
+    } else {
+        outCapacity = std::min(kMaxDecompressedXmlBytes, std::max<size_t>(deflateLen * kMaxCompressionRatio, 64 * 1024));
+    }
+
+    if (outCapacity == 0 || outCapacity > kMaxDecompressedXmlBytes) return false;
+
+    std::vector<uint8_t> outBuffer(outCapacity);
+    tinfl_decompressor decomp;
+    tinfl_init(&decomp);
+
+    size_t inBytes = deflateLen;
+    size_t outBytes = outCapacity;
+    tinfl_status status = tinfl_decompress(
+        &decomp,
+        reinterpret_cast<const mz_uint8*>(deflateData),
+        &inBytes,
+        outBuffer.data(),
+        outBuffer.data(),
+        &outBytes,
+        TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF
+    );
+
+    if (status != TINFL_STATUS_DONE) {
         return false;
     }
 
-    if (deflateLen > 0 && (uncompLen / deflateLen) > kMaxCompressionRatio) {
-        mz_free(uncompBuf);
+    if (outBytes > kMaxDecompressedXmlBytes) {
         return false;
     }
 
-    outXml.assign(reinterpret_cast<const char*>(uncompBuf), uncompLen);
-    mz_free(uncompBuf);
+    // Only reject on compression ratio if uncompressed size exceeds 10 MB, preventing false-positive rejection on small repetitive Ableton .adg XMLs
+    if (outBytes > 10 * 1024 * 1024 && deflateLen > 0 && (outBytes / deflateLen) > kMaxCompressionRatio) {
+        return false;
+    }
+
+    outXml.assign(reinterpret_cast<const char*>(outBuffer.data()), outBytes);
     return true;
 }
 

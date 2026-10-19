@@ -5,6 +5,7 @@
 #include <string_view>
 #include <array>
 #include <cmath>
+#undef NDEBUG
 #include <cassert>
 #include <filesystem>
 #include <fstream>
@@ -25,6 +26,7 @@
 #include "../src/state/daw_interop/universal_daw_interop_manager.h"
 #include "../src/audio/audio_node.h"
 #include "../src/audio/audio_buffer.h"
+#include "../src/version.h"
 
 using namespace praccy;
 
@@ -369,7 +371,7 @@ void test_dawproject_roundtrip() {
     ASSERT_EQ(manifestNode->tag, "manifest");
     ASSERT_EQ(manifestNode->attribute("formatVersion"), "1.0");
     ASSERT_EQ(manifestNode->attribute("application"), "Praccy");
-    ASSERT_EQ(manifestNode->attribute("appVersion"), "2.4");
+    ASSERT_EQ(manifestNode->attribute("appVersion"), praccy::kDawprojectAppVersion);
 
     // Verify project.xml
     auto projectPath = inspectDir / "project.xml";

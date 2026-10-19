@@ -7,45 +7,28 @@ namespace praccy::state {
 namespace {
 
 void applyScenePresetToGraph(const ScenePreset& preset, audio::GraphEngine& graph) {
-    plugins::PluginWindowManager::instance().closeAllWindows();
-
-    std::vector<std::unique_ptr<audio::AudioNode>> newNodes;
-
-    for (const auto& np : preset.nodes) {
-        if (np.kind == NodePreset::Kind::Plugin) {
-            auto slot = SceneManager::createSlotFromPreset(np.slot);
-            if (slot) {
-                slot->prepare(graph.sampleRate(), graph.maxBlockSize());
-                newNodes.push_back(std::move(slot));
-            }
-        } else if (np.kind == NodePreset::Kind::ParallelBlock) {
-            auto block = std::make_unique<audio::ParallelSplitMergeBlock>();
-            block->prepare(graph.sampleRate(), graph.maxBlockSize());
-            for (const auto& bp : np.branches) {
-                auto* branch = block->addBranch(bp.name);
-                branch->prepare(graph.sampleRate(), graph.maxBlockSize());
-                branch->setGainDb(bp.gainDb);
-                branch->setPan(bp.pan);
-                branch->setMuted(bp.muted);
-                branch->setSolo(bp.solo);
-                branch->setPhaseInvert(bp.phaseInvert);
-
-                for (const auto& sp : bp.slots) {
-                    auto slot = SceneManager::createSlotFromPreset(sp);
-                    if (slot) {
-                        slot->prepare(graph.sampleRate(), graph.maxBlockSize());
-                        branch->addSlot(std::move(slot));
-                    }
-                }
-            }
-            newNodes.push_back(std::move(block));
-        }
-    }
-
-    graph.crossfadeToNodes(std::move(newNodes));
+    SceneManager::applyGraphSnapshot(preset, graph);
 }
 
 } // anonymous namespace
+
+bool UndoManager::shouldCoalesce(UndoActionType actionType,
+                                 const std::string& targetKey,
+                                 bool force) const noexcept {
+    if (force || !m_inContinuousGroup || m_undoStack.empty()) {
+        return false;
+    }
+    const bool isContinuous = (actionType == UndoActionType::ParameterTweak ||
+                               actionType == UndoActionType::MidiCcAutomation);
+    if (!isContinuous) {
+        return false;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    const auto& top = m_undoStack.back();
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - top.timestamp).count();
+    const bool sameTarget = (targetKey.empty() || top.targetIdentifier == targetKey);
+    return (elapsedMs < kCoalesceIdleThresholdMs) && sameTarget;
+}
 
 void UndoManager::pushSnapshot(ScenePreset snapshot,
                                std::string description,
@@ -161,6 +144,17 @@ bool UndoManager::redo() {
 }
 
 bool UndoManager::undo(audio::GraphEngine& graph, SceneManager& /*scenes*/) {
+    if (m_undoStack.empty()) {
+        return false;
+    }
+    if (m_undoStack.size() == 1) {
+        // Preserve the baseline snapshot at the bottom of the undo stack so subsequent
+        // parameter or rack edits always have a baseline state to undo back to.
+        m_inContinuousGroup = false;
+        applyScenePresetToGraph(m_undoStack.back().snapshot, graph);
+        m_lastActionDesc = "Undo: " + m_undoStack.back().description;
+        return true;
+    }
     ScenePreset restored;
     if (!undo(restored)) {
         return false;

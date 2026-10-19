@@ -1,6 +1,14 @@
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wpragma-once-outside-header"
+#endif
 #pragma once
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 #include <charconv>
+#include <string>
 #include <string_view>
 #include <vector>
 #include <cstdint>
@@ -122,6 +130,54 @@ inline std::vector<uint8_t> hexToBytes(std::string_view hex) {
         bytes.push_back(b);
     }
     return bytes;
+}
+
+/// Escapes delimiter characters ('\', '|', '=', ',', '\n', '\r') in INI field values using collision-free hex escapes
+inline std::string escapeIniField(std::string_view input) {
+    std::string out;
+    out.reserve(input.size() + 8);
+    for (unsigned char c : input) {
+        switch (c) {
+            case '\\': out += "\\\\"; break;
+            case '|':  out += "\\x7C"; break;
+            case '=':  out += "\\x3D"; break;
+            case ',':  out += "\\x2C"; break;
+            case '\n': out += "\\x0A"; break;
+            case '\r': out += "\\x0D"; break;
+            default:   out.push_back(static_cast<char>(c)); break;
+        }
+    }
+    return out;
+}
+
+/// Decodes hex-escaped delimiter sequences in INI field values while preserving unescaped Windows paths untouched
+inline std::string unescapeIniField(std::string_view input) {
+    std::string out;
+    out.reserve(input.size());
+    for (size_t i = 0; i < input.size(); ++i) {
+        if (input[i] == '\\' && i + 1 < input.size()) {
+            const char next = input[i + 1];
+            if (next == '\\') {
+                out.push_back('\\');
+                ++i;
+                continue;
+            }
+            if ((next == 'x' || next == 'X') && i + 3 < input.size()) {
+                uint8_t b = 0;
+                if (parseHexByte(input.substr(i + 2, 2), b)) {
+                    if (b == 0x7C || b == 0x3D || b == 0x2C || b == 0x0A || b == 0x0D || b == 0x5C) {
+                        out.push_back(static_cast<char>(b));
+                        i += 3;
+                        continue;
+                    }
+                }
+            }
+            out.push_back('\\');
+        } else {
+            out.push_back(input[i]);
+        }
+    }
+    return out;
 }
 
 } // namespace praccy::utils

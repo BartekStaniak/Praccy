@@ -29,6 +29,9 @@ public:
 
     // Request delayed capture from a window (e.g. 25 frames after opening to allow full paint)
     void requestCapture(const std::string& pluginName, HWND hwnd, int delayFrames = 25);
+    void captureWindowAsync(const std::string& pluginName, HWND hwnd, int delayFrames = 25) {
+        requestCapture(pluginName, hwnd, delayFrames);
+    }
 
     // Immediately capture window content and update thumbnail
     bool captureWindow(const std::string& pluginName, HWND hwnd);
@@ -70,6 +73,9 @@ private:
     std::unordered_map<std::string, Thumbnail> m_cache;
     std::unordered_map<std::string, std::filesystem::path> m_discoveredFiles;
     std::vector<PendingCapture> m_pendingCaptures;
+    std::vector<ID3D11ShaderResourceView*> m_retiredSrvs;
+
+    void flushRetiredResources() noexcept;
 };
 
 } // namespace praccy::ui

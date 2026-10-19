@@ -21,9 +21,8 @@ DroppedFileType DragDropRouter::classifyFile(const std::filesystem::path& path) 
         return static_cast<char>(::tolower(c));
     });
 
-    // Audio tracks
-    if (ext == ".wav" || ext == ".wave" || ext == ".flac" || ext == ".mp3" ||
-        ext == ".ogg" || ext == ".aiff" || ext == ".aif") {
+    // Audio tracks (strictly .wav - WavReader only supports RIFF WAVE PCM/Float)
+    if (ext == ".wav") {
         return DroppedFileType::AudioTrack;
     }
 
@@ -34,7 +33,7 @@ DroppedFileType DragDropRouter::classifyFile(const std::filesystem::path& path) 
     }
 
     // Signal chains
-    if (ext == ".pracchaim" || ext == ".chain" || ext == ".rack" ||
+    if (ext == ".praccy" || ext == ".pracchain" || ext == ".pracchaim" || ext == ".chain" || ext == ".rack" ||
         ext == ".rfxchain" || ext == ".adg" || ext == ".dawproject") {
         return DroppedFileType::SignalChain;
     }
@@ -61,7 +60,7 @@ bool DragDropRouter::isChain(const std::filesystem::path& path) noexcept {
 std::vector<ClassifiedDropItem> DragDropRouter::parseHDrop(HDROP hDrop) {
     std::vector<ClassifiedDropItem> items;
     if (!hDrop) return items;
-
+#if defined(_WIN32)
     const UINT fileCount = DragQueryFileW(hDrop, 0xFFFFFFFF, nullptr, 0);
     items.reserve(fileCount);
 
@@ -80,7 +79,7 @@ std::vector<ClassifiedDropItem> DragDropRouter::parseHDrop(HDROP hDrop) {
             });
         }
     }
-
+#endif
     return items;
 }
 
@@ -118,29 +117,61 @@ bool DragDropRouter::handleDrop(const std::string& path, DropContext& ctx) const
     const auto type = classifyPath(path);
     switch (type) {
         case DroppedFileType::AudioTrack:
-            if (ctx.player) {
-                ctx.player->loadWavFile(path);
-            }
-            if (ctx.looper) {
-                ctx.looper->loadWavFile(path);
+            if (ctx.preferLooper) {
+                if (ctx.looper) {
+                    ctx.looper->loadWavFile(path);
+                }
+            } else {
+                if (ctx.player) {
+                    ctx.player->loadWavFile(path);
+                }
             }
             return true;
-        case DroppedFileType::Preset:
+        case DroppedFileType::Preset: {
+            std::filesystem::path p(path);
+            auto* dawAdapter = state::UniversalDawInteropManager::instance().findAdapter(p);
+            if (dawAdapter && ctx.scenes && ctx.graph) {
+                if (ctx.scanner) {
+                    return state::UniversalDawInteropManager::instance().importAndApply(p, *ctx.graph, *ctx.scenes, *ctx.scanner);
+                }
+                plugins::PluginScanner fallbackScanner;
+                fallbackScanner.loadFromAppConfig();
+                if (fallbackScanner.numPlugins() == 0) {
+                    fallbackScanner.scanSync();
+                }
+                return state::UniversalDawInteropManager::instance().importAndApply(p, *ctx.graph, *ctx.scenes, fallbackScanner);
+            }
             if (ctx.scenes) {
-                return ctx.scenes->loadFromFile(path);
+                if (std::filesystem::exists(p) && ctx.scenes->loadFromFile(path)) {
+                    if (ctx.graph) {
+                        ctx.scenes->applyScene(0, *ctx.graph, true /* allowAsync */);
+                    }
+                    return true;
+                }
+                return false;
             }
             return false;
+        }
         case DroppedFileType::SignalChain:
             if (ctx.scenes && ctx.graph) {
                 std::filesystem::path p(path);
                 auto* dawAdapter = state::UniversalDawInteropManager::instance().findAdapter(p);
                 if (dawAdapter) {
-                    plugins::PluginScanner scanner;
-                    scanner.scanSync();
-                    return state::UniversalDawInteropManager::instance().importAndApply(p, *ctx.graph, *ctx.scenes, scanner);
+                    if (ctx.scanner) {
+                        return state::UniversalDawInteropManager::instance().importAndApply(p, *ctx.graph, *ctx.scenes, *ctx.scanner);
+                    }
+                    plugins::PluginScanner fallbackScanner;
+                    fallbackScanner.loadFromAppConfig();
+                    if (fallbackScanner.numPlugins() == 0) {
+                        fallbackScanner.scanSync();
+                    }
+                    return state::UniversalDawInteropManager::instance().importAndApply(p, *ctx.graph, *ctx.scenes, fallbackScanner);
                 } else {
-                    ctx.scenes->loadPresetChain(p.stem().string(), *ctx.graph);
-                    return true;
+                    if (std::filesystem::exists(p) && ctx.scenes->loadFromFile(path)) {
+                        ctx.scenes->applyScene(0, *ctx.graph, true /* allowAsync */);
+                        return true;
+                    }
+                    return ctx.scenes->loadPresetChain(p.stem().string(), *ctx.graph, true /* allowAsync */);
                 }
             }
             return false;

@@ -1,4 +1,11 @@
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wpragma-once-outside-header"
+#endif
 #pragma once
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 #include "../audio/graph_engine.h"
 #include <string>
@@ -27,8 +34,35 @@ struct PluginSlotPreset {
         std::string label;
         float value{0.0f};
         float defaultValue{0.0f};
+        float minValue{0.0f};
+        float maxValue{1.0f};
+        bool bound{false};
+        bool isSlotMix{false};
+        bool isSlotTrim{false};
+
+        bool operator==(const MacroBinding& other) const noexcept {
+            return paramId == other.paramId &&
+                   label == other.label &&
+                   value == other.value &&
+                   defaultValue == other.defaultValue &&
+                   minValue == other.minValue &&
+                   maxValue == other.maxValue &&
+                   bound == other.bound &&
+                   isSlotMix == other.isSlotMix &&
+                   isSlotTrim == other.isSlotTrim;
+        }
     };
     std::vector<MacroBinding> macros;
+
+    struct ParamValue {
+        uint32_t paramId{0};
+        float value{0.0f};
+
+        bool operator==(const ParamValue& other) const noexcept {
+            return paramId == other.paramId && value == other.value;
+        }
+    };
+    std::vector<ParamValue> paramValues;
 };
 
 struct BranchPreset {
@@ -47,11 +81,12 @@ struct NodePreset {
     Kind kind{Kind::Plugin};
     PluginSlotPreset slot;
     std::vector<BranchPreset> branches; // If ParallelBlock: index 0 = Branch A, 1 = Branch B
-    float branchBlend{0.5f};            // Cross-branch balance
+    float branchBlend{0.0f};            // Cross-branch balance (-1.0 to 1.0, 0.0 = center)
 };
 
 struct ScenePreset {
     std::string name;
+    std::string category;               // e.g. "High Gain Metal", "Glassy Clean", or custom category
     std::string sourceDawName{"Praccy"}; // "Praccy", "Reaper", "Ableton", "Bitwig", "StudioOne"
 
     // Host Transport Context (for tempo-synced delays, tremolos, and modulations)
@@ -67,16 +102,21 @@ public:
     SceneManager();
 
     void initializeDefaultScenes();
+    void initializeDefaultUserPresets();
 
     bool loadFromFile(const std::string& filePath = "");
     bool saveToFile(const std::string& filePath = "") const;
 
     void captureCurrentScene(int sceneIndex, audio::GraphEngine& graph);
-    bool applyScene(int sceneIndex, audio::GraphEngine& graph);
+    bool applyScene(int sceneIndex, audio::GraphEngine& graph, bool allowAsync = false);
 
     void savePresetChain(const std::string& name, audio::GraphEngine& graph);
-    bool loadPresetChain(const std::string& name, audio::GraphEngine& graph);
+    bool loadPresetChain(const std::string& name, audio::GraphEngine& graph, bool allowAsync = false);
     [[nodiscard]] std::vector<std::string> savedPresetNames() const;
+    [[nodiscard]] const ScenePreset* findUserPreset(const std::string& name) const;
+    [[nodiscard]] std::string presetCategory(const std::string& name) const;
+    void setPresetCategory(const std::string& name, const std::string& category);
+    [[nodiscard]] std::vector<std::string> allPresetCategories() const;
 
     [[nodiscard]] int activeSceneIndex() const noexcept { return m_activeSceneIndex; }
     void setActiveSceneIndex(int idx) noexcept { m_activeSceneIndex = idx; }
@@ -87,11 +127,19 @@ public:
 
     [[nodiscard]] const std::string& lastStatusMessage() const noexcept { return m_statusMessage; }
 
-    static std::unique_ptr<audio::PluginSlot> createSlotFromPreset(const PluginSlotPreset& p);
+    static std::unique_ptr<audio::PluginSlot> createSlotFromPreset(
+        const PluginSlotPreset& p,
+        bool allowAsync = false,
+        double sampleRate = 48000.0,
+        uint32_t maxBlockSize = 256);
 
     // Graph snapshot serialization & crossfaded application
-    static ScenePreset captureGraphSnapshot(audio::GraphEngine& graph, const std::string& name = "Snapshot");
-    static bool applyGraphSnapshot(const ScenePreset& preset, audio::GraphEngine& graph);
+    static ScenePreset captureGraphSnapshot(audio::GraphEngine& graph,
+                                            const std::string& name = "Snapshot",
+                                            bool captureBinaryState = true);
+    static bool applyGraphSnapshot(const ScenePreset& preset, audio::GraphEngine& graph, bool allowAsync = false);
+    static bool canApplyInPlace(const ScenePreset& preset, audio::GraphEngine& graph);
+    static bool applyGraphSnapshotInPlace(const ScenePreset& preset, audio::GraphEngine& graph);
 
     // Instant A/B Tone Snapshot Comparison
     enum class ToneSnapshotSlot : uint8_t { None, A, B };

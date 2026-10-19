@@ -4,6 +4,7 @@
 #include <string>
 #include <string_view>
 #include <cstring>
+#undef NDEBUG
 #include <cassert>
 #include <cmath>
 #include <thread>
@@ -20,20 +21,22 @@
 #include "state/app_config.h"
 #include "plugins/plugin_scanner.h"
 
-#if defined(__GNUC__)
-#pragma GCC diagnostic ignored "-Wmismatched-new-delete"
-#endif
-
 using namespace praccy;
 
 // ============================================================================
 // REAL-TIME MEMORY ALLOCATION MONITORING HOOKS
 // ============================================================================
 
+#if defined(__GNUC__)
+#define PRACCY_NOINLINE __attribute__((noinline))
+#else
+#define PRACCY_NOINLINE
+#endif
+
 static thread_local bool t_disallowAllocations = false;
 static thread_local size_t t_allocationsCount = 0;
 
-void* operator new(std::size_t size) {
+PRACCY_NOINLINE void* operator new(std::size_t size) {
     if (t_disallowAllocations) {
         t_allocationsCount++;
     }
@@ -42,11 +45,11 @@ void* operator new(std::size_t size) {
     return p;
 }
 
-void operator delete(void* p) noexcept {
+PRACCY_NOINLINE void operator delete(void* p) noexcept {
     std::free(p);
 }
 
-void* operator new[](std::size_t size) {
+PRACCY_NOINLINE void* operator new[](std::size_t size) {
     if (t_disallowAllocations) {
         t_allocationsCount++;
     }
@@ -55,16 +58,80 @@ void* operator new[](std::size_t size) {
     return p;
 }
 
-void operator delete[](void* p) noexcept {
+PRACCY_NOINLINE void operator delete[](void* p) noexcept {
     std::free(p);
 }
 
-void operator delete(void* p, std::size_t) noexcept {
+PRACCY_NOINLINE void operator delete(void* p, std::size_t) noexcept {
     std::free(p);
 }
 
-void operator delete[](void* p, std::size_t) noexcept {
+PRACCY_NOINLINE void operator delete[](void* p, std::size_t) noexcept {
     std::free(p);
+}
+
+PRACCY_NOINLINE void* operator new(std::size_t size, std::align_val_t al) {
+    if (t_disallowAllocations) {
+        t_allocationsCount++;
+    }
+#if defined(_WIN32)
+    void* p = _aligned_malloc(size ? size : 1, static_cast<std::size_t>(al));
+#else
+    void* p = std::aligned_alloc(static_cast<std::size_t>(al), ((size ? size : 1) + static_cast<std::size_t>(al) - 1) & ~(static_cast<std::size_t>(al) - 1));
+#endif
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+PRACCY_NOINLINE void* operator new[](std::size_t size, std::align_val_t al) {
+    if (t_disallowAllocations) {
+        t_allocationsCount++;
+    }
+#if defined(_WIN32)
+    void* p = _aligned_malloc(size ? size : 1, static_cast<std::size_t>(al));
+#else
+    void* p = std::aligned_alloc(static_cast<std::size_t>(al), ((size ? size : 1) + static_cast<std::size_t>(al) - 1) & ~(static_cast<std::size_t>(al) - 1));
+#endif
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+PRACCY_NOINLINE void operator delete(void* p, std::align_val_t al) noexcept {
+    (void)al;
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+PRACCY_NOINLINE void operator delete[](void* p, std::align_val_t al) noexcept {
+    (void)al;
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+PRACCY_NOINLINE void operator delete(void* p, std::size_t size, std::align_val_t al) noexcept {
+    (void)size;
+    (void)al;
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+PRACCY_NOINLINE void operator delete[](void* p, std::size_t size, std::align_val_t al) noexcept {
+    (void)size;
+    (void)al;
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
 }
 
 // ============================================================================

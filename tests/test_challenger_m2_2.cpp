@@ -3,6 +3,7 @@
 #include <string>
 #include <cstring>
 #include <cmath>
+#undef NDEBUG
 #include <cassert>
 #include <chrono>
 #include <thread>
@@ -25,12 +26,18 @@ using namespace praccy;
 // 1. REAL-TIME AUDIO HEAP ALLOCATION MONITOR
 // ============================================================================
 
+#if defined(__GNUC__)
+#define PRACCY_NOINLINE __attribute__((noinline))
+#else
+#define PRACCY_NOINLINE
+#endif
+
 static thread_local bool t_isAudioThread = false;
 static std::atomic<size_t> g_audioThreadAllocCount{0};
 static std::atomic<size_t> g_audioThreadAllocBytes{0};
 static std::atomic<size_t> g_audioThreadFreeCount{0};
 
-void* operator new(std::size_t size) {
+PRACCY_NOINLINE void* operator new(std::size_t size) {
     if (t_isAudioThread) {
         g_audioThreadAllocCount.fetch_add(1, std::memory_order_relaxed);
         g_audioThreadAllocBytes.fetch_add(size, std::memory_order_relaxed);
@@ -40,14 +47,14 @@ void* operator new(std::size_t size) {
     return p;
 }
 
-void operator delete(void* p) noexcept {
+PRACCY_NOINLINE void operator delete(void* p) noexcept {
     if (t_isAudioThread && p != nullptr) {
         g_audioThreadFreeCount.fetch_add(1, std::memory_order_relaxed);
     }
     std::free(p);
 }
 
-void* operator new[](std::size_t size) {
+PRACCY_NOINLINE void* operator new[](std::size_t size) {
     if (t_isAudioThread) {
         g_audioThreadAllocCount.fetch_add(1, std::memory_order_relaxed);
         g_audioThreadAllocBytes.fetch_add(size, std::memory_order_relaxed);
@@ -57,25 +64,103 @@ void* operator new[](std::size_t size) {
     return p;
 }
 
-void operator delete[](void* p) noexcept {
+PRACCY_NOINLINE void operator delete[](void* p) noexcept {
     if (t_isAudioThread && p != nullptr) {
         g_audioThreadFreeCount.fetch_add(1, std::memory_order_relaxed);
     }
     std::free(p);
 }
 
-void operator delete(void* p, std::size_t) noexcept {
+PRACCY_NOINLINE void operator delete(void* p, std::size_t) noexcept {
     if (t_isAudioThread && p != nullptr) {
         g_audioThreadFreeCount.fetch_add(1, std::memory_order_relaxed);
     }
     std::free(p);
 }
 
-void operator delete[](void* p, std::size_t) noexcept {
+PRACCY_NOINLINE void operator delete[](void* p, std::size_t) noexcept {
     if (t_isAudioThread && p != nullptr) {
         g_audioThreadFreeCount.fetch_add(1, std::memory_order_relaxed);
     }
     std::free(p);
+}
+
+PRACCY_NOINLINE void* operator new(std::size_t size, std::align_val_t al) {
+    if (t_isAudioThread) {
+        g_audioThreadAllocCount.fetch_add(1, std::memory_order_relaxed);
+        g_audioThreadAllocBytes.fetch_add(size, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    void* p = _aligned_malloc(size ? size : 1, static_cast<std::size_t>(al));
+#else
+    void* p = std::aligned_alloc(static_cast<std::size_t>(al), ((size ? size : 1) + static_cast<std::size_t>(al) - 1) & ~(static_cast<std::size_t>(al) - 1));
+#endif
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+PRACCY_NOINLINE void* operator new[](std::size_t size, std::align_val_t al) {
+    if (t_isAudioThread) {
+        g_audioThreadAllocCount.fetch_add(1, std::memory_order_relaxed);
+        g_audioThreadAllocBytes.fetch_add(size, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    void* p = _aligned_malloc(size ? size : 1, static_cast<std::size_t>(al));
+#else
+    void* p = std::aligned_alloc(static_cast<std::size_t>(al), ((size ? size : 1) + static_cast<std::size_t>(al) - 1) & ~(static_cast<std::size_t>(al) - 1));
+#endif
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+PRACCY_NOINLINE void operator delete(void* p, std::align_val_t al) noexcept {
+    (void)al;
+    if (t_isAudioThread && p != nullptr) {
+        g_audioThreadFreeCount.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+PRACCY_NOINLINE void operator delete[](void* p, std::align_val_t al) noexcept {
+    (void)al;
+    if (t_isAudioThread && p != nullptr) {
+        g_audioThreadFreeCount.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+PRACCY_NOINLINE void operator delete(void* p, std::size_t size, std::align_val_t al) noexcept {
+    (void)size;
+    (void)al;
+    if (t_isAudioThread && p != nullptr) {
+        g_audioThreadFreeCount.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
+PRACCY_NOINLINE void operator delete[](void* p, std::size_t size, std::align_val_t al) noexcept {
+    (void)size;
+    (void)al;
+    if (t_isAudioThread && p != nullptr) {
+        g_audioThreadFreeCount.fetch_add(1, std::memory_order_relaxed);
+    }
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
 }
 
 // ============================================================================
@@ -547,50 +632,53 @@ void runAudioThreadHeapAllocationAudit() {
         assert(slotProcessAllocs == 0 && "CRITICAL: PluginSlot::process allocated heap memory during crash!");
     }
 
-    // 4.3 EMPIRICAL CHALLENGE: Verify Vst3PluginInstance / ClapPluginInstance faultReason string formatting
-    // Let's test the exact pattern from vst3_host.cpp:379 and clap_host.cpp:172:
-    // m_faultReason = std::string("VST3 crash: ") + getExceptionDescription(exCode);
+    // 4.3 Production Verification: Zero-allocation plugins::formatFaultReason (F-08, F-26)
     {
+        t_isAudioThread = true;
         g_audioThreadAllocCount.store(0);
         g_audioThreadAllocBytes.store(0);
-        t_isAudioThread = true;
 
         DWORD testExCode = EXCEPTION_ACCESS_VIOLATION;
-        std::string testFaultReason;
-        testFaultReason = std::string("VST3 crash: ") + plugins::getExceptionDescription(testExCode);
+        char faultBuf[128] = {};
+        plugins::formatFaultReason(faultBuf, sizeof(faultBuf), "VST3 crash: ", testExCode);
 
         t_isAudioThread = false;
         size_t stringConcatAllocs = g_audioThreadAllocCount.load();
         size_t bytesAllocated = g_audioThreadAllocBytes.load();
 
-        std::cout << "  - std::string(\"VST3 crash: \") + getExceptionDescription() on audio thread:\n";
-        std::cout << "    * Length of string: " << testFaultReason.length() << " chars\n";
+        std::cout << "  - plugins::formatFaultReason(\"VST3 crash: \", EXCEPTION_ACCESS_VIOLATION) on audio thread:\n";
+        std::cout << "    * Formatted string: " << faultBuf << "\n";
         std::cout << "    * Allocations detected: " << stringConcatAllocs << "\n";
         std::cout << "    * Bytes allocated: " << bytesAllocated << "\n";
 
-        if (stringConcatAllocs > 0) {
-            std::cout << "    [VULNERABILITY IDENTIFIED] Vst3PluginInstance::process and ClapPluginInstance::process\n";
-            std::cout << "    allocate dynamic heap memory on the audio callback thread during crash latching!\n";
-        }
+        assert(stringConcatAllocs == 0 && "CRITICAL: plugins::formatFaultReason allocated heap memory on the audio thread!");
+        assert(std::strlen(faultBuf) > 0 && "CRITICAL: faultBuf must not be empty!");
+        assert(std::strstr(faultBuf, "VST3 crash: ") != nullptr && "CRITICAL: faultBuf must contain the prefix!");
+        assert(std::strstr(faultBuf, "Access Violation") != nullptr && "CRITICAL: faultBuf must contain exception description!");
     }
 
-    // 4.4 Test CrashingMockPlugin allocation from test_praccy.cpp
+    // 4.4 Production Verification: Array-ref formatFaultReason without prefix on audio thread
     {
+        t_isAudioThread = true;
         g_audioThreadAllocCount.store(0);
         g_audioThreadAllocBytes.store(0);
-        t_isAudioThread = true;
 
-        std::string mockFaultReason;
-        mockFaultReason = plugins::getExceptionDescription(EXCEPTION_ACCESS_VIOLATION);
+        DWORD testExCode = EXCEPTION_ACCESS_VIOLATION;
+        char mockFaultBuf[128] = {};
+        plugins::formatFaultReason(mockFaultBuf, nullptr, testExCode);
 
         t_isAudioThread = false;
         size_t mockAllocs = g_audioThreadAllocCount.load();
         size_t mockBytes = g_audioThreadAllocBytes.load();
 
-        std::cout << "  - m_faultReason = getExceptionDescription() from test_praccy.cpp:\n";
-        std::cout << "    * Length of string: " << mockFaultReason.length() << " chars\n";
+        std::cout << "  - plugins::formatFaultReason(nullptr, EXCEPTION_ACCESS_VIOLATION) on audio thread:\n";
+        std::cout << "    * Formatted string: " << mockFaultBuf << "\n";
         std::cout << "    * Allocations detected: " << mockAllocs << "\n";
         std::cout << "    * Bytes allocated: " << mockBytes << "\n";
+
+        assert(mockAllocs == 0 && "CRITICAL: formatFaultReason array overload allocated heap memory on audio thread!");
+        assert(std::strlen(mockFaultBuf) > 0);
+        assert(std::strstr(mockFaultBuf, "Access Violation") != nullptr);
     }
 
     std::cout << "  -> Audio thread allocation audit completed\n\n";

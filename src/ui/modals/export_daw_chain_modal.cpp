@@ -1,5 +1,6 @@
 #include "export_daw_chain_modal.h"
 #include "../design_tokens.h"
+#include "../ui_helpers.h"
 #include "../../state/daw_interop/universal_daw_interop_manager.h"
 #include "imgui.h"
 #include <windows.h>
@@ -14,20 +15,22 @@ void ExportDawChainModal::render(state::SceneManager& sceneMgr, audio::GraphEngi
 
     ImGui::OpenPopup("Export Chain as DAW Preset");
 
-    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    const float initW = vp ? std::clamp(vp->Size.x * 0.48f, 500.0f, 650.0f) : 520.0f;
+    const float initH = vp ? std::clamp(vp->Size.y * 0.48f, 320.0f, 480.0f) : 360.0f;
+
+    ImVec2 center = vp ? vp->GetCenter() : ImVec2(100.0f, 100.0f);
     ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(480.0f, 320.0f), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(initW, initH), ImGuiCond_Appearing);
+    if (vp) {
+        ImGui::SetNextWindowSizeConstraints(ImVec2(440.0f, 280.0f), ImVec2(vp->Size.x * 0.95f, vp->Size.y * 0.95f));
+    }
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.0f, 16.0f));
     ImGui::PushStyleColor(ImGuiCol_PopupBg, static_cast<ImVec4>(tokens.surfaces.popupBg));
     ImGui::PushStyleColor(ImGuiCol_Border, static_cast<ImVec4>(tokens.borders.focus));
 
-    if (ImGui::BeginPopupModal("Export Chain as DAW Preset", &m_isOpen, ImGuiWindowFlags_NoResize)) {
-        ImGui::TextColored(tokens.text.primary.vec4, "UNIVERSAL DAW PRESET EXPORTER");
-        ImGui::TextColored(tokens.text.secondary.vec4, "Export the active Praccy signal chain directly to foreign DAWs.");
-        ImGui::Separator();
-        ImGui::Spacing();
-
+    if (ImGui::BeginPopupModal("Export Chain as DAW Preset", &m_isOpen, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
         // 1. Format Selection
         ImGui::TextColored(tokens.text.accent.vec4, "Target DAW Format:");
         const char* formats[] = {
@@ -101,7 +104,7 @@ void ExportDawChainModal::render(state::SceneManager& sceneMgr, audio::GraphEngi
         ImGui::Spacing();
 
         // 3. Action Buttons
-        if (ImGui::Button("Export", ImVec2(120.0f, 28.0f))) {
+        if (CenteredButton("Export", ImVec2(120.0f, Metrics::buttonHeight()))) {
             std::error_code ec;
             std::filesystem::create_directories(m_exportDirectory, ec);
 
@@ -110,8 +113,10 @@ void ExportDawChainModal::render(state::SceneManager& sceneMgr, audio::GraphEngi
             else if (m_targetFormatIdx == 2) ext = ".dawproject";
             else if (m_targetFormatIdx == 3) ext = ".vstpreset";
 
-            std::filesystem::path outPath = std::filesystem::path(m_exportDirectory) / (m_exportFilename + ext);
-            state::ScenePreset scene = sceneMgr.captureGraphSnapshot(graph, m_exportFilename);
+            auto cleanFilename = std::filesystem::path(m_exportFilename).filename();
+            if (cleanFilename.empty()) cleanFilename = "ExportedRig";
+            std::filesystem::path outPath = (std::filesystem::path(m_exportDirectory) / cleanFilename).replace_extension(ext);
+            state::ScenePreset scene = sceneMgr.captureGraphSnapshot(graph, cleanFilename.stem().string());
 
             std::string statusMsg;
             if (state::UniversalDawInteropManager::instance().exportScene(scene, outPath, &statusMsg)) {
@@ -124,7 +129,7 @@ void ExportDawChainModal::render(state::SceneManager& sceneMgr, audio::GraphEngi
         }
 
         ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(100.0f, 28.0f))) {
+        if (CenteredButton("Cancel", ImVec2(100.0f, Metrics::buttonHeight())) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             m_isOpen = false;
             ImGui::CloseCurrentPopup();
         }

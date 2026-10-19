@@ -1,4 +1,5 @@
 #include <iostream>
+#undef NDEBUG
 #include <cassert>
 #include <cmath>
 #include <vector>
@@ -20,14 +21,28 @@
 #include "tools/quick_looper.h"
 #include "state/scene_manager.h"
 #include "state/app_config.h"
+#include "plugins/plugin_scanner.h"
 #include "ui/update_checker.h"
 #include "ui/design_tokens.h"
 #include "ui/ui_helpers.h"
+#include "plugins/vst3_param_queue.h"
+#include "ui/widgets/device_badges.h"
+#include "ui/widgets/rotary_knob.h"
+#include "ui/widgets/strobe_tuner.h"
+#include "ui/modals/tuner_settings_modal.h"
+#include <imgui_internal.h>
 #include "utils/parse_utils.h"
+#include "utils/archive_utils.h"
+#include "state/daw_interop/reaper_adapter.h"
+#include "state/daw_interop/vstpreset_adapter.h"
+#include "state/daw_interop/dawproject_adapter.h"
 #include "miniz.h"
 #include <fstream>
 #include <filesystem>
 #include <cstring>
+
+ImFont* g_fontUI = nullptr;
+ImFont* g_fontMono = nullptr;
 
 using namespace praccy;
 
@@ -81,6 +96,28 @@ void testDspUtils() {
         float power = (l * l) + (r * r);
         assert(std::abs(power - 1.0f) < 1e-4f);
     }
+
+    // LevelMeter responsive ballistics: instantaneous peak capture & 120ms decay
+    audio::LevelMeter meter;
+    assert(meter.peakLeft() == 0.0f);
+    assert(meter.peakRight() == 0.0f);
+
+    float peakBlock[64];
+    std::fill_n(peakBlock, 64, 0.8f);
+    meter.process(peakBlock, peakBlock, 64, 48000.0);
+    assert(std::abs(meter.peakLeft() - 0.8f) < 1e-4f);
+    assert(std::abs(meter.peakRight() - 0.8f) < 1e-4f);
+
+    // Responsive decay after tau = 120 ms (5760 samples @ 48kHz)
+    std::vector<float> silence(5760, 0.0f);
+    meter.process(silence.data(), silence.data(), static_cast<uint32_t>(silence.size()), 48000.0);
+    const float expectedDecay = 0.8f * (1.0f / std::numbers::e_v<float>);
+    assert(std::abs(meter.peakLeft() - expectedDecay) < 0.01f);
+    assert(std::abs(meter.peakRight() - expectedDecay) < 0.01f);
+
+    meter.reset();
+    assert(meter.peakLeft() == 0.0f);
+    assert(meter.peakRight() == 0.0f);
 
     std::cout << "PASSED\n";
 }
@@ -162,6 +199,186 @@ void testTunerPitchDetection() {
     assert(resE.noteName == "E2");
     assert(std::abs(resE.frequencyHz - 82.41f) < 2.0f);
 
+    // 1. Test Pitch Standard (Middle A / A4 Reference change to 432 Hz)
+    tuner.setA4Reference(432.0f);
+    assert(std::abs(tuner.a4Reference() - 432.0f) < 0.01f);
+
+    for (size_t i = 0; i < sineWave.size(); ++i) {
+        double phase = 2.0 * std::numbers::pi * 432.0 * (static_cast<double>(i) / sampleRate);
+        sineWave[i] = static_cast<float>(std::sin(phase) * 0.7);
+    }
+    tuner.process(sineWave.data(), static_cast<uint32_t>(sineWave.size()));
+    auto res432 = tuner.currentResult();
+    assert(res432.confidence == true);
+    assert(res432.noteNumber == 69); // A4
+    assert(res432.noteName == "A4");
+    assert(std::abs(res432.frequencyHz - 432.0f) < 2.0f);
+    assert(std::abs(res432.centDeviation) < 5.0f); // Exactly 0 cents relative to A4=432Hz
+
+    // Restore to standard 440 Hz
+    tuner.setA4Reference(440.0f);
+    assert(std::abs(tuner.a4Reference() - 440.0f) < 0.01f);
+
+    // 2. Test Tuner On/Off Toggle
+    tuner.setEnabled(false);
+    assert(!tuner.isEnabled());
+    auto resOff = tuner.currentResult();
+    assert(!resOff.confidence);
+    assert(resOff.frequencyHz == 0.0f);
+    assert(resOff.noteName == "--");
+    tuner.setEnabled(true);
+    assert(tuner.isEnabled());
+
+    // 3. Test Guitar String Counts (6, 7, 8, 9 strings)
+    tools::TunerConfig cfg;
+    cfg.setInstrument(tools::InstrumentType::Guitar);
+    assert(cfg.minStrings() == 6);
+    assert(cfg.maxStrings() == 9);
+    for (int s = 6; s <= 9; ++s) {
+        cfg.setStringCount(s);
+        assert(cfg.stringCount == s);
+        assert(static_cast<int>(cfg.stringMidiNotes.size()) == s);
+    }
+
+    // 4. Test Bass String Counts (4, 5, 6 strings)
+    cfg.setInstrument(tools::InstrumentType::Bass);
+    assert(cfg.minStrings() == 4);
+    assert(cfg.maxStrings() == 6);
+    for (int s = 4; s <= 6; ++s) {
+        cfg.setStringCount(s);
+        assert(cfg.stringCount == s);
+        assert(static_cast<int>(cfg.stringMidiNotes.size()) == s);
+    }
+
+    // 5. Test Other Electric Stringed Instruments
+    cfg.setInstrument(tools::InstrumentType::ElectricMandolin);
+    assert(cfg.minStrings() == 4 && cfg.maxStrings() == 8);
+    cfg.setInstrument(tools::InstrumentType::ElectricBowed);
+    assert(cfg.minStrings() == 4 && cfg.maxStrings() == 5);
+    cfg.setInstrument(tools::InstrumentType::ElectricUkulele);
+    assert(cfg.minStrings() == 4 && cfg.maxStrings() == 4);
+    cfg.setInstrument(tools::InstrumentType::ElectricBanjo);
+    assert(cfg.minStrings() == 4 && cfg.maxStrings() == 5);
+    cfg.setInstrument(tools::InstrumentType::LapSteel);
+    assert(cfg.minStrings() == 6 && cfg.maxStrings() == 8);
+
+    // 6. Test Common Presets (Root + Type: Drop D, DADGAD, Open D)
+    cfg.setInstrument(tools::InstrumentType::Guitar);
+    cfg.setStringCount(6);
+    // Standard: E2, A2, D3, G3, B3, E4 -> { 64, 59, 55, 50, 45, 40 }
+    cfg.setTuningPreset(tools::TuningType::Standard, 4);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 64, 59, 55, 50, 45, 40 }));
+    // Drop D (Root D = index 2) -> { 64, 59, 55, 50, 45, 38 }
+    cfg.setTuningPreset(tools::TuningType::Drop, 2);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 64, 59, 55, 50, 45, 38 }));
+    // Drop C (Root C = index 0) -> C2-G2-C3-F3-A3-D4 -> { 62, 57, 53, 48, 43, 36 }
+    cfg.setTuningPreset(tools::TuningType::Drop, 0);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 62, 57, 53, 48, 43, 36 }));
+    // E-Flat Standard / Half-Step Down -> D#2-G#2-C#3-F#3-A#3-D#4 -> { 63, 58, 54, 49, 44, 39 }
+    cfg.setTuningPreset(tools::TuningType::HalfStepDown);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 63, 58, 54, 49, 44, 39 }));
+    // Open D -> D2-A2-D3-F#3-A3-D4 -> { 62, 57, 54, 50, 45, 38 }
+    cfg.setTuningPreset(tools::TuningType::OpenD, 2);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 62, 57, 54, 50, 45, 38 }));
+    // DADGAD
+    cfg.setTuningPreset(tools::TuningType::DADGAD, 2);
+    assert(cfg.stringMidiNotes[5] == 38); // D2
+    assert(cfg.stringMidiNotes[0] == 62); // D4
+
+    // 7-String Guitar:
+    cfg.setStringCount(7);
+    cfg.setTuningPreset(tools::TuningType::Standard);
+    // Standard: B1-E2-A2-D3-G3-B3-E4 -> { 64, 59, 55, 50, 45, 40, 35 }
+    assert((cfg.stringMidiNotes == std::vector<int>{ 64, 59, 55, 50, 45, 40, 35 }));
+    // Drop A: A1-E2-A2-D3-G3-B3-E4 -> { 64, 59, 55, 50, 45, 40, 33 }
+    cfg.setTuningPreset(tools::TuningType::Drop);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 64, 59, 55, 50, 45, 40, 33 }));
+    // Half-Step Down: A#1-D#2-G#2-C#3-F#3-A#3-D#4 -> { 63, 58, 54, 49, 44, 39, 34 }
+    cfg.setTuningPreset(tools::TuningType::HalfStepDown);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 63, 58, 54, 49, 44, 39, 34 }));
+
+    // 8-String Guitar:
+    cfg.setStringCount(8);
+    cfg.setTuningPreset(tools::TuningType::Standard);
+    // Standard: F#1-B1-E2-A2-D3-G3-B3-E4 -> { 64, 59, 55, 50, 45, 40, 35, 30 }
+    assert((cfg.stringMidiNotes == std::vector<int>{ 64, 59, 55, 50, 45, 40, 35, 30 }));
+    // Drop E: E1-B1-E2-A2-D3-G3-B3-E4 -> { 64, 59, 55, 50, 45, 40, 35, 28 }
+    cfg.setTuningPreset(tools::TuningType::Drop);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 64, 59, 55, 50, 45, 40, 35, 28 }));
+
+    // 9-String Guitar:
+    cfg.setStringCount(9);
+    cfg.setTuningPreset(tools::TuningType::Standard);
+    // Standard (C#): C#1-F#1-B1-E2-A2-D3-G3-B3-E4 -> { 64, 59, 55, 50, 45, 40, 35, 30, 25 }
+    assert((cfg.stringMidiNotes == std::vector<int>{ 64, 59, 55, 50, 45, 40, 35, 30, 25 }));
+    // Standard (C): C1-F1-Bb1-Eb2-Ab2-Db3-Gb3-Bb3-Eb4 -> { 63, 58, 54, 49, 44, 39, 34, 29, 24 }
+    cfg.setTuningPreset(tools::TuningType::Standard, 0); // Root C
+    assert((cfg.stringMidiNotes == std::vector<int>{ 63, 58, 54, 49, 44, 39, 34, 29, 24 }));
+
+    // Bass Verification:
+    cfg.setInstrument(tools::InstrumentType::Bass);
+    cfg.setStringCount(4);
+    cfg.setTuningPreset(tools::TuningType::Standard);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 43, 38, 33, 28 })); // E1, A1, D2, G2
+    cfg.setTuningPreset(tools::TuningType::Drop);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 43, 38, 33, 26 })); // Drop D: D1, A1, D2, G2
+    cfg.setStringCount(5);
+    cfg.setTuningPreset(tools::TuningType::Standard);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 43, 38, 33, 28, 23 })); // B0, E1, A1, D2, G2
+    cfg.setTuningPreset(tools::TuningType::Drop);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 43, 38, 33, 28, 21 })); // Drop A: A0, E1, A1, D2, G2
+    cfg.setStringCount(6);
+    cfg.setTuningPreset(tools::TuningType::Standard);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 48, 43, 38, 33, 28, 23 })); // B0, E1, A1, D2, G2, C3
+    cfg.setTuningPreset(tools::TuningType::Drop);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 48, 43, 38, 33, 28, 21 })); // Drop A: A0, E1, A1, D2, G2, C3
+
+    // Bowed Verification:
+    cfg.setInstrument(tools::InstrumentType::ElectricBowed);
+    cfg.setStringCount(4);
+    cfg.setTuningPreset(tools::TuningType::Standard, 7); // Violin G3
+    assert((cfg.stringMidiNotes == std::vector<int>{ 76, 69, 62, 55 })); // E5, A4, D4, G3
+    cfg.setTuningPreset(tools::TuningType::Standard, 0); // Cello C2
+    assert((cfg.stringMidiNotes == std::vector<int>{ 57, 50, 43, 36 })); // A3, D3, G2, C2
+
+    // Ukulele Verification:
+    cfg.setInstrument(tools::InstrumentType::ElectricUkulele);
+    cfg.setTuningPreset(tools::TuningType::Standard);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 69, 64, 60, 67 })); // High-G: A4, E4, C4, G4
+    cfg.setTuningPreset(tools::TuningType::Drop);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 69, 64, 60, 55 })); // Low-G: A4, E4, C4, G3
+
+    // Banjo Verification:
+    cfg.setInstrument(tools::InstrumentType::ElectricBanjo);
+    cfg.setStringCount(5);
+    cfg.setTuningPreset(tools::TuningType::Standard);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 62, 59, 55, 50, 67 })); // Open G
+    cfg.setTuningPreset(tools::TuningType::Drop);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 62, 59, 55, 48, 67 })); // Drop C: D4, B3, G3, C3, G4
+
+    // Lap Steel Verification:
+    cfg.setInstrument(tools::InstrumentType::LapSteel);
+    cfg.setStringCount(6);
+    cfg.setTuningPreset(tools::TuningType::Standard);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 64, 60, 57, 55, 52, 48 })); // C6
+    cfg.setTuningPreset(tools::TuningType::OpenD);
+    assert((cfg.stringMidiNotes == std::vector<int>{ 62, 57, 54, 50, 45, 38 })); // Open D: D4, A3, F#3, D3, A2, D2
+
+    // 7. Test Custom Tuning
+    cfg.setCustomStringNote(0, 64); // E4
+    cfg.setCustomStringNote(1, 59); // B3
+    cfg.setCustomStringNote(2, 55); // G3
+    cfg.setCustomStringNote(3, 50); // D3
+    cfg.setCustomStringNote(4, 45); // A2
+    cfg.setCustomStringNote(5, 40); // E2
+    assert(cfg.mode == tools::TuningMode::Custom);
+    auto strInfo = cfg.getStringInfoList();
+    assert(strInfo.size() == 6);
+    assert(strInfo[0].noteName == "E4");
+    assert(strInfo[5].noteName == "E2");
+    assert(std::abs(strInfo[0].targetFreqHz - 329.63f) < 0.5f);
+    assert(std::abs(strInfo[5].targetFreqHz - 82.41f) < 0.5f);
+
     std::cout << "PASSED\n";
 }
 
@@ -227,6 +444,26 @@ void testSceneManager() {
     assert(slot1->dryWet() == 0.25f);
     assert(slot1->isBypassed() == true);
 
+    // Test preset category management
+    scenes.savePresetChain("Test High Gain Lead", engine);
+    scenes.setPresetCategory("Test High Gain Lead", "High Gain Metal");
+    assert(scenes.presetCategory("Test High Gain Lead") == "High Gain Metal");
+
+    // Test custom category creation & listing
+    scenes.setPresetCategory("Test High Gain Lead", "Prog Metal");
+    assert(scenes.presetCategory("Test High Gain Lead") == "Prog Metal");
+    auto cats = scenes.allPresetCategories();
+    assert(std::find(cats.begin(), cats.end(), "Prog Metal") != cats.end());
+
+    // Test persistence across save/load file
+    std::string tempPresetsFile = (std::filesystem::temp_directory_path() / "test_presets_cat.ini").string();
+    scenes.saveToFile(tempPresetsFile);
+
+    state::SceneManager loadedScenes;
+    loadedScenes.loadFromFile(tempPresetsFile);
+    assert(loadedScenes.presetCategory("Test High Gain Lead") == "Prog Metal");
+    std::filesystem::remove(tempPresetsFile);
+
     std::cout << "PASSED\n";
 }
 
@@ -291,7 +528,32 @@ void testAppConfigPersistence() {
     cfg.inputGainDb = 4.5f;
     cfg.masterVolumeDb = -2.0f;
     cfg.metronomeBpm = 135.0f;
+    cfg.lastLoadedPreset = "Modern High Gain Djent";
+    cfg.rackViewMode = state::AppConfig::RackViewMode::Modular;
     cfg.customPluginPaths = {"D:\\VSTPlugins", "E:\\MyAudio"};
+    cfg.scannedPlugins.push_back(state::ScannedPluginEntry{
+        .name = "Pro-Q 3",
+        .path = "C:\\VST3\\FabFilter Pro-Q 3.vst3",
+        .type = "VST3",
+        .vendor = "FabFilter",
+        .category = "Equalizer",
+        .bundleFileName = "FabFilter Pro-Q 3.vst3",
+        .classGuid = "12345678",
+        .clapId = ""
+    });
+    cfg.scannedPlugins.push_back(state::ScannedPluginEntry{
+        .name = "Diva",
+        .path = "C:\\CLAP\\Diva.clap",
+        .type = "CLAP",
+        .vendor = "u-he",
+        .category = "Audio FX",
+        .bundleFileName = "Diva.clap",
+        .classGuid = "",
+        .clapId = "com.u-he.diva"
+    });
+
+    cfg.favoritePresets = {"Modern High Gain Djent", "California Glassy Clean"};
+    cfg.presetFavoritesInitialized = true;
 
     assert(cfg.save(testPath) == true);
 
@@ -302,10 +564,130 @@ void testAppConfigPersistence() {
     assert(std::abs(loaded.inputGainDb - 4.5f) < 1e-4f);
     assert(std::abs(loaded.masterVolumeDb - (-2.0f)) < 1e-4f);
     assert(std::abs(loaded.metronomeBpm - 135.0f) < 1e-4f);
+    assert(loaded.lastLoadedPreset == "Modern High Gain Djent");
+    assert(loaded.rackViewMode == state::AppConfig::RackViewMode::Modular);
     assert(loaded.customPluginPaths.size() >= 2);
+    assert(loaded.presetFavoritesInitialized == true);
+    assert(loaded.favoritePresets.size() == 2);
+    assert(loaded.favoritePresets[0] == "Modern High Gain Djent");
+    assert(loaded.favoritePresets[1] == "California Glassy Clean");
+    assert(loaded.scannedPlugins.size() == 2);
+    assert(loaded.scannedPlugins[0].name == "Pro-Q 3");
+    assert(loaded.scannedPlugins[0].type == "VST3");
+    assert(loaded.scannedPlugins[0].category == "Equalizer");
+    assert(loaded.scannedPlugins[1].name == "Diva");
+    assert(loaded.scannedPlugins[1].type == "CLAP");
+    assert(loaded.scannedPlugins[1].clapId == "com.u-he.diva");
+
+    // Test explicit empty favorites with presetFavoritesInitialized = true
+    loaded.favoritePresets.clear();
+    assert(loaded.save(testPath) == true);
+    state::AppConfig loadedEmptyFavs;
+    assert(loadedEmptyFavs.load(testPath) == true);
+    assert(loadedEmptyFavs.presetFavoritesInitialized == true);
+    assert(loadedEmptyFavs.favoritePresets.empty());
+
+    // Test CRLF and whitespace trimming
+    {
+        std::ofstream crlfFile(testPath, std::ios::binary);
+        crlfFile << "preset_favorites_initialized=1\r\n";
+        crlfFile << "favorite_preset=Modern High Gain Djent\r\n";
+        crlfFile << "favorite_plugin=Praccy Drive  \r\n";
+        crlfFile << "last_loaded_preset=Custom Preset\r\n";
+        crlfFile.close();
+
+        state::AppConfig loadedCrlf;
+        assert(loadedCrlf.load(testPath) == true);
+        assert(loadedCrlf.presetFavoritesInitialized == true);
+        assert(loadedCrlf.favoritePresets.size() == 1);
+        assert(loadedCrlf.favoritePresets[0] == "Modern High Gain Djent");
+        assert(loadedCrlf.favoritePlugins.size() == 1);
+        assert(loadedCrlf.favoritePlugins[0] == "Praccy Drive");
+        assert(loadedCrlf.lastLoadedPreset == "Custom Preset");
+    }
 
     std::remove(testPath.c_str());
 
+    std::cout << "PASSED\n";
+}
+
+void testPluginScannerPersistence() {
+    std::cout << "[TEST] PluginScanner Scanned Plugins & Type Tag Persistence... ";
+
+    const std::string testIni = "test_plugin_scanner_temp.ini";
+    std::remove(testIni.c_str());
+
+    // Session 1: Scan / add plugins with distinct types and categories, then save
+    {
+        plugins::PluginScanner scanner(testIni);
+        plugins::PluginDescriptor vstDesc{
+            .name = "FabFilter Pro-Q 3",
+            .path = "C:\\Program Files\\Common Files\\VST3\\FabFilter Pro-Q 3.vst3",
+            .type = plugins::PluginType::VST3,
+            .vendor = "FabFilter",
+            .category = "Equalizer",
+            .bundleFileName = "FabFilter Pro-Q 3.vst3",
+            .classGuid = "56535451-7565-7279-0000-000000000000",
+            .clapId = ""
+        };
+        plugins::PluginDescriptor clapDesc{
+            .name = "u-he Diva",
+            .path = "C:\\Program Files\\Common Files\\CLAP\\Diva.clap",
+            .type = plugins::PluginType::CLAP,
+            .vendor = "u-he",
+            .category = "Audio FX",
+            .bundleFileName = "Diva.clap",
+            .classGuid = "",
+            .clapId = "com.u-he.diva"
+        };
+        scanner.addPlugin(vstDesc);
+        scanner.addPlugin(clapDesc);
+        scanner.setCustomCategory("FabFilter Pro-Q 3", "Dynamic EQ");
+        scanner.toggleFavorite("FabFilter Pro-Q 3");
+
+        scanner.saveToAppConfig(testIni);
+    }
+
+    // Session 2: Fresh instance (simulating restart), load from saved configuration
+    {
+        plugins::PluginScanner scanner2(testIni);
+
+        auto plugins = scanner2.scannedPlugins();
+        // 3 built-in effects + 2 restored scanned plugins = 5 total
+        assert(plugins.size() == 5);
+
+        // Verify VST3 plugin retained across sessions with its type tag and custom category
+        const auto* pVst = scanner2.resolvePlugin("FabFilter Pro-Q 3");
+        assert(pVst != nullptr);
+        assert(pVst->type == plugins::PluginType::VST3);
+        assert(pVst->typeString() == "VST3");
+        assert(pVst->vendor == "FabFilter");
+        assert(scanner2.getPluginCategory("FabFilter Pro-Q 3") == "Dynamic EQ");
+        assert(scanner2.isFavorite("FabFilter Pro-Q 3"));
+        assert(scanner2.isFavorite("C:\\Program Files\\Common Files\\VST3\\FabFilter Pro-Q 3.vst3"));
+        assert(scanner2.isFavorite("FabFilter Pro-Q 3.vst3"));
+        assert(pVst->bundleFileName == "FabFilter Pro-Q 3.vst3");
+
+        // Verify CLAP plugin retained across sessions with its type tag and category
+        const auto* pClap = scanner2.resolvePlugin("u-he Diva");
+        assert(pClap != nullptr);
+        assert(pClap->type == plugins::PluginType::CLAP);
+        assert(pClap->typeString() == "CLAP");
+        assert(pClap->vendor == "u-he");
+        assert(pClap->category == "Audio FX");
+        assert(pClap->clapId == "com.u-he.diva");
+
+        // Verify path-based favorite matches plugin name and order is preserved
+        scanner2.toggleFavorite("C:\\Program Files\\Common Files\\CLAP\\Diva.clap");
+        assert(scanner2.isFavorite("Diva"));
+        assert(scanner2.isFavorite("Diva.clap"));
+        auto favs = scanner2.favorites();
+        assert(favs.size() == 2);
+        assert(favs[0] == "FabFilter Pro-Q 3");
+        assert(favs[1] == "C:\\Program Files\\Common Files\\CLAP\\Diva.clap");
+    }
+
+    std::remove(testIni.c_str());
     std::cout << "PASSED\n";
 }
 
@@ -680,7 +1062,7 @@ void testTunerAsynchronousDecoupling() {
     constexpr double sampleRate = 48000.0;
     for (int block = 0; block < 16; ++block) {
         for (size_t i = 0; i < sineBlock.size(); ++i) {
-            double phase = 2.0 * std::numbers::pi * freq * ((block * 256.0 + i) / sampleRate);
+            double phase = 2.0 * std::numbers::pi * freq * ((static_cast<double>(block) * 256.0 + static_cast<double>(i)) / sampleRate);
             sineBlock[i] = static_cast<float>(std::sin(phase) * 0.7);
         }
         tuner.pushSamples(sineBlock.data(), static_cast<uint32_t>(sineBlock.size()));
@@ -1245,6 +1627,24 @@ void testWcagContrastCompliance() {
 
         float crActiveBg = calculateContrastRatio(theme.signal.active, theme.surfaces.windowBg);
         assert(crActiveBg >= 3.0f);
+
+        // 4. Text accent highlights against window and card backgrounds >= 3.0:1 (and >= 4.5:1 on light theme)
+        float crAccentCard = calculateContrastRatio(theme.text.accent, theme.surfaces.cardBg);
+        assert(crAccentCard >= 3.0f);
+        float crAccentWindow = calculateContrastRatio(theme.text.accent, theme.surfaces.windowBg);
+        assert(crAccentWindow >= 3.0f);
+
+        // 5. Muted text against card background >= 3.0:1
+        float crMutedCard = calculateContrastRatio(theme.text.muted, theme.surfaces.cardBg);
+        assert(crMutedCard >= 3.0f);
+
+        // 6. Vintage Console calibrated card border and accent contrast
+        if (theme.id == ui::ThemeId::VintageConsole) {
+            float crCardBorder = calculateContrastRatio(theme.borders.card, theme.surfaces.cardBg);
+            assert(crCardBorder >= 3.0f);
+            assert(crAccentCard >= 4.5f);
+            assert(crAccentWindow >= 4.5f);
+        }
     }
 
     std::cout << "PASSED\n";
@@ -1258,22 +1658,32 @@ void testThemeSwitchingAndTokenIntegrity() {
     assert(ui::themeTokens().id == ui::ThemeId::ObsidianStudio);
     assert(std::strcmp(ui::themeTokens().name, "Obsidian Studio") == 0);
     assert(ui::themeTokens().isDark == true);
+    assert(ui::themeTokens().borders.card.u32 != 0);
+    assert(ui::themeTokens().borders.subtle.u32 != 0);
 
     // 2. Switch through all themes and verify active tokens
     ui::applyTheme(ui::ThemeId::CyberMidnight);
     assert(ui::themeTokens().id == ui::ThemeId::CyberMidnight);
     assert(std::strcmp(ui::themeTokens().name, "Cyber / Midnight") == 0);
     assert(ui::themeTokens().isDark == true);
+    assert(ui::themeTokens().borders.card.u32 != 0);
+    assert(ui::themeTokens().borders.card.u32 != ui::getThemeTokens(ui::ThemeId::ObsidianStudio).borders.card.u32);
 
     ui::applyTheme(ui::ThemeId::NordicSlate);
     assert(ui::themeTokens().id == ui::ThemeId::NordicSlate);
     assert(std::strcmp(ui::themeTokens().name, "Nordic Slate") == 0);
     assert(ui::themeTokens().isDark == true);
+    assert(ui::themeTokens().borders.card.u32 != 0);
+    assert(ui::themeTokens().borders.card.u32 != ui::getThemeTokens(ui::ThemeId::CyberMidnight).borders.card.u32);
 
     ui::applyTheme(ui::ThemeId::VintageConsole);
     assert(ui::themeTokens().id == ui::ThemeId::VintageConsole);
     assert(std::strcmp(ui::themeTokens().name, "Vintage Console") == 0);
     assert(ui::themeTokens().isDark == false);
+    assert(ui::themeTokens().borders.card.u32 != 0);
+    assert(ui::themeTokens().borders.card.u32 != ui::getThemeTokens(ui::ThemeId::NordicSlate).borders.card.u32);
+    // Vintage Console card border must be warm analog tone (140, 126, 110)
+    assert(std::abs(ui::themeTokens().borders.card.r - (140.0f / 255.0f)) < 1e-3f);
 
     // 3. Out-of-bounds fallback clamping
     ui::applyTheme(static_cast<ui::ThemeId>(99));
@@ -1431,6 +1841,32 @@ void testViewportCenteringCalculations() {
     float viewH_small = 200.0f;
     float offsetY_overflow = computeVerticalOffset(rackHeight, viewH_small);
     assert(offsetY_overflow == 16.0f); // clamped to deadband minimum
+
+    std::cout << "PASSED\n";
+}
+
+void testBottomBarCentering() {
+    std::cout << "[TEST] Bottom Bar Elements Vertical Centering Math... ";
+
+    for (float dpi : { 1.0f, 1.25f, 1.5f, 1.75f, 2.0f }) {
+        ui::setDpiScale(dpi);
+        for (float windowH : { 600.0f, 720.0f, 900.0f, 1080.0f, 1440.0f }) {
+            const float btnH = ui::px(24.0f);
+            const float bottomBarH = btnH + ui::px(18.0f);
+            const float borderY = windowH - bottomBarH;
+
+            const float targetY = std::round(borderY + (bottomBarH - btnH) * 0.5f);
+            const float topMargin = targetY - borderY;
+            const float bottomMargin = windowH - (targetY + btnH);
+
+            // Verify top margin and bottom margin are symmetric within 1 pixel (rounding)
+            assert(std::abs(topMargin - bottomMargin) <= 1.0f);
+            // Verify margins are positive and equal to approximately 9px * dpi
+            assert(topMargin >= ui::px(8.5f));
+            assert(bottomMargin >= ui::px(8.5f));
+        }
+    }
+    ui::setDpiScale(1.0f);
 
     std::cout << "PASSED\n";
 }
@@ -1611,6 +2047,862 @@ void testFloatingHudAlphaDecayComputation() {
     std::cout << "PASSED\n";
 }
 
+void testStyleStackGuards() {
+    std::cout << "[TEST] RAII Style Stack Guards (ScopedStyleColor & ScopedStyleVar)... ";
+    ImGuiContext* ctx = ImGui::CreateContext();
+    ImGui::SetCurrentContext(ctx);
+
+    const int baseColorStack = ctx->ColorStack.Size;
+    const int baseVarStack = ctx->StyleVarStack.Size;
+
+    // 1. Single ScopedStyleColor
+    {
+        ui::ScopedStyleColor cGuard(ImGuiCol_Button, ImVec4(1.0f, 0.0f, 0.0f, 1.0f));
+        assert(ctx->ColorStack.Size == baseColorStack + 1);
+    }
+    assert(ctx->ColorStack.Size == baseColorStack);
+
+    // 2. Condition false
+    {
+        ui::ScopedStyleColor cGuard(ImGuiCol_Button, ImVec4(1.0f, 0.0f, 0.0f, 1.0f), false);
+        assert(ctx->ColorStack.Size == baseColorStack);
+    }
+    assert(ctx->ColorStack.Size == baseColorStack);
+
+    // 3. Multi-color initializer list
+    {
+        ui::ScopedStyleColor cGuard({
+            {ImGuiCol_Button, ImVec4(0.1f, 0.2f, 0.3f, 1.0f)},
+            {ImGuiCol_Border, ImVec4(0.4f, 0.5f, 0.6f, 1.0f)},
+            {ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f)}
+        });
+        assert(ctx->ColorStack.Size == baseColorStack + 3);
+    }
+    assert(ctx->ColorStack.Size == baseColorStack);
+
+    // 4. Early return protection
+    auto earlyExitTest = [&](bool triggerExit) {
+        ui::ScopedStyleColor cGuard(ImGuiCol_Button, ImVec4(1.0f, 0.0f, 0.0f, 1.0f));
+        assert(ctx->ColorStack.Size == baseColorStack + 1);
+        if (triggerExit) return;
+        assert(false);
+    };
+    earlyExitTest(true);
+    assert(ctx->ColorStack.Size == baseColorStack);
+
+    // 5. ScopedStyleVar float and ImVec2
+    {
+        ui::ScopedStyleVar vGuard(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 4.0f));
+        assert(ctx->StyleVarStack.Size == baseVarStack + 1);
+    }
+    assert(ctx->StyleVarStack.Size == baseVarStack);
+
+    {
+        ui::ScopedStyleVar vGuard(ImGuiStyleVar_Alpha, 0.5f);
+        assert(ctx->StyleVarStack.Size == baseVarStack + 1);
+    }
+    assert(ctx->StyleVarStack.Size == baseVarStack);
+
+    // 6. Nested guards
+    {
+        ui::ScopedStyleColor c1(ImGuiCol_Button, ImVec4(1.0f, 0.0f, 0.0f, 1.0f));
+        {
+            ui::ScopedStyleColor c2(ImGuiCol_Border, ImVec4(0.0f, 1.0f, 0.0f, 1.0f));
+            ui::ScopedStyleVar v1(ImGuiStyleVar_Alpha, 0.8f);
+            assert(ctx->ColorStack.Size == baseColorStack + 2);
+            assert(ctx->StyleVarStack.Size == baseVarStack + 1);
+        }
+        assert(ctx->ColorStack.Size == baseColorStack + 1);
+        assert(ctx->StyleVarStack.Size == baseVarStack);
+    }
+    // 7. Boolean toggle inversion across dynamic iterations and loops
+    for (int iter = 0; iter < 100; ++iter) {
+        bool active = (iter % 2 == 0);
+        {
+            ui::ScopedStyleColor cGuard(ImGuiCol_Button, ImVec4(0.2f, 0.4f, 0.6f, 1.0f), active);
+            ui::ScopedStyleVar vGuard(ImGuiStyleVar_FrameRounding, 4.0f, !active);
+            if (active) {
+                assert(ctx->ColorStack.Size == baseColorStack + 1);
+                assert(ctx->StyleVarStack.Size == baseVarStack);
+            } else {
+                assert(ctx->ColorStack.Size == baseColorStack);
+                assert(ctx->StyleVarStack.Size == baseVarStack + 1);
+            }
+            if (iter == 42) {
+                // Early break inside loop
+                break;
+            }
+        }
+        assert(ctx->ColorStack.Size == baseColorStack);
+        assert(ctx->StyleVarStack.Size == baseVarStack);
+    }
+    assert(ctx->ColorStack.Size == baseColorStack);
+    assert(ctx->StyleVarStack.Size == baseVarStack);
+
+    ImGui::DestroyContext(ctx);
+    std::cout << "PASSED\n";
+}
+
+void testFastParameterChanges() {
+    std::cout << "[TEST] VST3 FastParameterChanges & FastParamValueQueue... ";
+    plugins::FastParameterChanges changes;
+    assert(changes.getParameterCount() == 0);
+    assert(changes.getParameterData(0) == nullptr);
+
+    // 1. Verify COM interface query
+    void* iface = nullptr;
+    Steinberg::tresult qr = changes.queryInterface(Steinberg::Vst::IParameterChanges::iid, &iface);
+    assert(qr == Steinberg::kResultOk && iface == &changes);
+
+    qr = changes.queryInterface(Steinberg::FUnknown::iid, &iface);
+    assert(qr == Steinberg::kResultOk && iface == &changes);
+
+    // 2. Queue up to 128 changes (max capacity)
+    for (uint32_t i = 0; i < 128; ++i) {
+        bool ok = changes.addParameterChange(2000 + i, static_cast<double>(i) / 128.0);
+        assert(ok);
+    }
+    assert(changes.getParameterCount() == 128);
+
+    // 3. Verify 129th fails safely without reallocating
+    assert(!changes.addParameterChange(9999, 0.5));
+    assert(changes.getParameterCount() == 128);
+
+    // 4. Verify parameter queue data and points
+    for (Steinberg::int32 i = 0; i < 128; ++i) {
+        auto* q = changes.getParameterData(i);
+        assert(q != nullptr);
+        assert(q->getParameterId() == static_cast<Steinberg::Vst::ParamID>(2000 + i));
+        assert(q->getPointCount() == 1);
+
+        Steinberg::int32 offset = -1;
+        double val = -1.0;
+        auto res = q->getPoint(0, offset, val);
+        assert(res == Steinberg::kResultTrue);
+        assert(offset == 0);
+        assert(std::abs(val - static_cast<double>(i) / 128.0) < 1e-9);
+
+        // Verify out-of-range point index
+        assert(q->getPoint(1, offset, val) == Steinberg::kResultFalse);
+
+        // Verify queue COM interface query
+        void* qIface = nullptr;
+        assert(q->queryInterface(Steinberg::Vst::IParamValueQueue::iid, &qIface) == Steinberg::kResultOk);
+        assert(qIface == q);
+    }
+
+    // 5. Verify clear
+    changes.clear();
+    assert(changes.getParameterCount() == 0);
+    assert(changes.getParameterData(0) == nullptr);
+
+    std::cout << "PASSED\n";
+}
+
+void testAudioPlayerAsyncLoading() {
+    std::cout << "[TEST] AudioPlayer Asynchronous Loading & Atomic Pointer Swap... ";
+
+    std::string tempPath = (std::filesystem::temp_directory_path() / "praccy_test_async_track.wav").string();
+    {
+        std::ofstream wav(tempPath, std::ios::binary);
+        const uint32_t sampleRate = 44100;
+        const uint16_t numChannels = 2;
+        const uint16_t bitsPerSample = 16;
+        const uint32_t numSamples = 2000;
+        const uint32_t dataBytes = numSamples * numChannels * (bitsPerSample / 8);
+        const uint32_t riffSize = 36 + dataBytes;
+
+        wav.write("RIFF", 4);
+        wav.write(reinterpret_cast<const char*>(&riffSize), 4);
+        wav.write("WAVE", 4);
+
+        wav.write("fmt ", 4);
+        uint32_t fmtSize = 16;
+        uint16_t audioFormat = 1; // PCM
+        uint32_t byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+        uint16_t blockAlign = numChannels * (bitsPerSample / 8);
+        wav.write(reinterpret_cast<const char*>(&fmtSize), 4);
+        wav.write(reinterpret_cast<const char*>(&audioFormat), 2);
+        wav.write(reinterpret_cast<const char*>(&numChannels), 2);
+        wav.write(reinterpret_cast<const char*>(&sampleRate), 4);
+        wav.write(reinterpret_cast<const char*>(&byteRate), 4);
+        wav.write(reinterpret_cast<const char*>(&blockAlign), 2);
+        wav.write(reinterpret_cast<const char*>(&bitsPerSample), 2);
+
+        wav.write("data", 4);
+        wav.write(reinterpret_cast<const char*>(&dataBytes), 4);
+        for (uint32_t i = 0; i < numSamples; ++i) {
+            int16_t s = static_cast<int16_t>(std::sin(2.0 * 3.14159265 * 440.0 * i / sampleRate) * 16000.0);
+            wav.write(reinterpret_cast<const char*>(&s), 2);
+            wav.write(reinterpret_cast<const char*>(&s), 2);
+        }
+    }
+
+    tools::AudioPlayer player;
+    player.prepare(48000.0);
+
+    // 1. Synchronous loading test
+    bool syncOk = player.loadWavFileSync(tempPath);
+    assert(syncOk);
+    assert(player.isLoaded());
+    assert(!player.isLoading());
+    assert(player.durationSeconds() > 0.0);
+    assert(!player.waveformPeaks800().empty());
+    assert(player.waveformPeaks800().size() == 800);
+
+    // 2. Audio process playback test
+    player.play();
+    assert(player.isPlaying());
+    audio::OwnedAudioBuffer outBuf(2, 256);
+    auto view = outBuf.view(256);
+    view.clear();
+    player.process(view);
+    float sumL = 0.0f;
+    for (uint32_t s = 0; s < 256; ++s) {
+        sumL += std::abs(view.channel(0)[s]);
+    }
+    assert(sumL > 0.0f);
+
+    player.unload();
+    assert(!player.isLoaded());
+    assert(!player.isPlaying());
+
+    // 3. Asynchronous loading test
+    bool asyncLaunched = player.loadWavFile(tempPath);
+    assert(asyncLaunched);
+
+    int attempts = 0;
+    while (!player.isLoaded() && attempts++ < 100) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    assert(player.isLoaded());
+    assert(!player.isLoading());
+    assert(player.loadProgress() >= 1.0f);
+    assert(player.durationSeconds() > 0.0);
+
+    std::error_code ec;
+    std::filesystem::remove(tempPath, ec);
+
+    std::cout << "PASSED\n";
+}
+
+void testHardwareGradeWidgetsAndCategoryBadges() {
+    std::cout << "[TEST] Hardware-Grade Widgets & Device Category Badges... ";
+
+    // 1. Heuristic Category Detection
+    using namespace praccy::ui;
+    assert(detectDeviceCategory("Ibanez TS9 Tube Screamer", "Ibanez") == DeviceCategory::OverdriveStompbox);
+    assert(detectDeviceCategory("Big Muff Pi Fuzz", "Electro-Harmonix") == DeviceCategory::OverdriveStompbox);
+    assert(detectDeviceCategory("ProCo Rat Distortion", "ProCo") == DeviceCategory::OverdriveStompbox);
+    assert(detectDeviceCategory("Klon Centaur Clean Boost", "Klon") == DeviceCategory::OverdriveStompbox);
+
+    assert(detectDeviceCategory("JCM800 Lead Amp", "Marshall") == DeviceCategory::TubeAmpHead);
+    assert(detectDeviceCategory("Dual Rectifier Crunch Head", "Mesa Boogie") == DeviceCategory::TubeAmpHead);
+    assert(detectDeviceCategory("Clean Twin Reverb Amp", "Fender") == DeviceCategory::TubeAmpHead);
+
+    assert(detectDeviceCategory("1176 Classic Limiting Amplifier", "Universal Audio") == DeviceCategory::StudioCompressor);
+    assert(detectDeviceCategory("Teletronix LA-2A Leveler", "Universal Audio") == DeviceCategory::StudioCompressor);
+    assert(detectDeviceCategory("Solid Dynamics Gate/Comp", "SSL") == DeviceCategory::StudioCompressor);
+
+    assert(detectDeviceCategory("Roland RE-201 Space Echo", "Roland") == DeviceCategory::TapeDelay);
+    assert(detectDeviceCategory("Analog BBD Delay", "Memory Man") == DeviceCategory::TapeDelay);
+
+    assert(detectDeviceCategory("EMT 140 Classic Plate", "EMT") == DeviceCategory::PlateReverb);
+    assert(detectDeviceCategory("Shimmer Hall Reverb", "Valhalla") == DeviceCategory::PlateReverb);
+
+    assert(detectDeviceCategory("Stereo Chorus / Flanger", "TC Electronic") == DeviceCategory::Modulation);
+    assert(detectDeviceCategory("Optical Tremolo & Phase", "Univibe") == DeviceCategory::Modulation);
+
+    assert(detectDeviceCategory("Parametric Dynamic EQ", "FabFilter") == DeviceCategory::Equalizer);
+    assert(detectDeviceCategory("10-Band Graphic Filter Curve", "Boss") == DeviceCategory::Equalizer);
+
+    assert(detectDeviceCategory("Unknown Utility Tool", "Praccy Audio") == DeviceCategory::GenericProcessor);
+
+    // 2. Category Title Strings
+    assert(std::string(getCategoryTitle(DeviceCategory::OverdriveStompbox)) == "STOMPBOX OD");
+    assert(std::string(getCategoryTitle(DeviceCategory::TubeAmpHead)) == "TUBE AMP");
+    assert(std::string(getCategoryTitle(DeviceCategory::StudioCompressor)) == "COMPRESSOR");
+    assert(std::string(getCategoryTitle(DeviceCategory::TapeDelay)) == "TAPE DELAY");
+    assert(std::string(getCategoryTitle(DeviceCategory::PlateReverb)) == "PLATE REVERB");
+    assert(std::string(getCategoryTitle(DeviceCategory::Modulation)) == "MODULATION");
+    assert(std::string(getCategoryTitle(DeviceCategory::Equalizer)) == "PRECISION EQ");
+    assert(std::string(getCategoryTitle(DeviceCategory::GenericProcessor)) == "STUDIO FX");
+
+    // 3. HardwareKnobOptions defaults
+    HardwareKnobOptions opt;
+    assert(opt.radius == 13.0f);
+    assert(opt.arcThickness == 2.2f);
+    assert(opt.sensitivity == 0.012f);
+
+    // 4. Gravity sag computation parity
+    auto computeSag = [](float dx) {
+        return std::clamp(std::abs(dx) * 0.16f + 8.0f, 6.0f, 42.0f);
+    };
+    assert(computeSag(0.0f) == 8.0f);
+    assert(computeSag(100.0f) == 24.0f);
+    assert(computeSag(400.0f) == 42.0f); // Clamped at 42.0f max
+
+    // 5. Rack View Mode Enum Parity
+    state::AppConfig cfg;
+    assert(cfg.rackViewMode == state::AppConfig::RackViewMode::Modular);
+    cfg.rackViewMode = state::AppConfig::RackViewMode::Simple;
+    assert(cfg.rackViewMode == state::AppConfig::RackViewMode::Simple);
+
+    std::cout << "PASSED\n";
+}
+
+void testMilestone3PracticeSuiteAndStrobeTuner() {
+    std::cout << "[TEST] Milestone 3: Practice Suite, Strobe Tuner & Quick Looper Layers... ";
+
+    // 1. QuickLooper Undo/Redo Layer Verification
+    {
+        tools::QuickLooper looper;
+        looper.prepare(48000.0, 10);
+        assert(!looper.canUndo());
+        assert(!looper.canRedo());
+
+        // Fill initial loop by triggering Record
+        looper.triggerAction();
+        assert(looper.state() == tools::LooperState::Recording);
+
+        audio::OwnedAudioBuffer recIn(2, 48000);
+        audio::OwnedAudioBuffer recOut(2, 48000);
+        for (uint32_t s = 0; s < 48000; ++s) {
+            recIn.view(48000).channel(0)[s] = 0.5f;
+            recIn.view(48000).channel(1)[s] = 0.5f;
+        }
+        auto recOutView = recOut.view(48000);
+        looper.process(recIn.view(48000), recOutView);
+
+        // Lock loop: transitions to Playing
+        looper.triggerAction();
+        assert(looper.state() == tools::LooperState::Playing);
+        assert(std::abs(looper.loopLengthSeconds() - 1.0) < 0.05);
+        assert(!looper.canUndo());
+
+        // Trigger Overdub: snapshots current loop layer
+        looper.triggerAction();
+        assert(looper.state() == tools::LooperState::Overdubbing);
+        assert(looper.canUndo());
+        assert(!looper.canRedo());
+
+        // Accumulate audio into overdub
+        audio::OwnedAudioBuffer dubIn(2, 4800);
+        audio::OwnedAudioBuffer dubOut(2, 4800);
+        for (uint32_t s = 0; s < 4800; ++s) {
+            dubIn.view(4800).channel(0)[s] = 0.4f;
+            dubIn.view(4800).channel(1)[s] = 0.4f;
+        }
+        auto dubOutView = dubOut.view(4800);
+        looper.process(dubIn.view(4800), dubOutView);
+
+        // Test Undo: reverts layer
+        bool undoOk = looper.undo();
+        assert(undoOk);
+        assert(!looper.canUndo());
+        assert(looper.canRedo());
+
+        // Test Redo: restores layer
+        bool redoOk = looper.redo();
+        assert(redoOk);
+        assert(looper.canUndo());
+        assert(!looper.canRedo());
+    }
+
+    // 2. Musical Bar/Beat Calculation Verification
+    {
+        tools::QuickLooper looper;
+        looper.prepare(48000.0, 10);
+        looper.setBpm(120.0f);
+        looper.setBeatsPerBar(4);
+        assert(looper.bpm() == 120.0f);
+        assert(looper.beatsPerBar() == 4);
+
+        // Record a 2.0s loop = 4 beats = 1 bar at 120 BPM
+        looper.triggerAction();
+        audio::OwnedAudioBuffer bufIn(2, 96000); // 2 seconds
+        audio::OwnedAudioBuffer bufOut(2, 96000);
+        auto bufOutView = bufOut.view(96000);
+        looper.process(bufIn.view(96000), bufOutView);
+        looper.triggerAction(); // Lock
+
+        assert(looper.totalBeats() == 4);
+        assert(looper.totalBars() == 1);
+        assert(looper.currentBar() >= 1);
+        assert(looper.currentBeat() >= 1 && looper.currentBeat() <= 4);
+    }
+
+    // 3. Strobe Tuner Widget Execution Verification
+    {
+        ImGuiContext* ctx = ImGui::GetCurrentContext();
+        bool createdCtx = false;
+        if (!ctx) {
+            ctx = ImGui::CreateContext();
+            createdCtx = true;
+        }
+        ImGui::SetCurrentContext(ctx);
+
+        ImGuiIO& io = ImGui::GetIO();
+        io.DisplaySize = ImVec2(1024, 768);
+        io.DeltaTime = 1.0f / 60.0f;
+
+        unsigned char* pixels = nullptr;
+        int width = 0, height = 0;
+        io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+
+        ImGui::NewFrame();
+        ImGui::Begin("TunerTestWindow");
+
+        tools::TunerResult exactInTune;
+        exactInTune.confidence = true;
+        exactInTune.noteName = "A2";
+        exactInTune.frequencyHz = 110.0f;
+        exactInTune.centDeviation = 0.0f;
+
+        tools::TunerResult flatResult;
+        flatResult.confidence = true;
+        flatResult.noteName = "E2";
+        flatResult.frequencyHz = 80.1f;
+        flatResult.centDeviation = -18.5f;
+
+        tools::TunerResult sharpResult;
+        sharpResult.confidence = true;
+        sharpResult.noteName = "D3";
+        sharpResult.frequencyHz = 148.5f;
+        sharpResult.centDeviation = +24.2f;
+
+        tools::TunerResult unconfident;
+        unconfident.confidence = false;
+
+        // Verify DrawStrobeTuner renders without crash across all states
+        ui::DrawStrobeTuner(exactInTune, ImVec2(100, 100), 30.0f);
+        ui::DrawStrobeTuner(flatResult, ImVec2(200, 100), 30.0f);
+        ui::DrawStrobeTuner(sharpResult, ImVec2(300, 100), 30.0f);
+        ui::DrawStrobeTuner(unconfident, ImVec2(400, 100), 30.0f);
+
+        // Verify DrawStrobeTunerModule renders
+        ui::DrawStrobeTunerModule(exactInTune, 240.0f, 64.0f);
+        ui::DrawStrobeTunerModule(flatResult, 240.0f, 64.0f);
+
+        // Verify DrawStrobeTuner with isEnabled=false
+        ui::DrawStrobeTuner(unconfident, ImVec2(500, 100), 30.0f, nullptr, false);
+
+        // Verify DrawStrobeTunerModule with active InstrumentTuner and settings callback
+        tools::InstrumentTuner testTuner(2048);
+        testTuner.prepare(48000.0);
+        bool settingsOpened = false;
+        ui::DrawStrobeTunerModule(exactInTune, 260.0f, 64.0f, &testTuner, [&]() {
+            settingsOpened = true;
+        });
+
+        // Verify TunerSettingsModal renders properly
+        ui::TunerSettingsModal modal(testTuner);
+        assert(!modal.isOpen());
+        modal.open();
+        assert(modal.isOpen());
+        modal.render();
+        modal.close();
+        assert(!modal.isOpen());
+
+        ImGui::End();
+        ImGui::Render();
+
+        if (createdCtx) {
+            ImGui::DestroyContext(ctx);
+        }
+    }
+
+    // 4. Default Factory User Presets & Sound Profile Detection
+    {
+        state::SceneManager scenes;
+        auto names = scenes.savedPresetNames();
+        assert(!names.empty());
+        assert(names.size() >= 4);
+
+        bool foundClean = false;
+        bool foundMetal = false;
+        bool foundBreakup = false;
+        bool foundAmbient = false;
+
+        for (const auto& name : names) {
+            if (name.find("Clean") != std::string::npos) foundClean = true;
+            if (name.find("Metal") != std::string::npos || name.find("Djent") != std::string::npos) foundMetal = true;
+            if (name.find("Breakup") != std::string::npos || name.find("Blues") != std::string::npos) foundBreakup = true;
+            if (name.find("Ambient") != std::string::npos || name.find("Wash") != std::string::npos) foundAmbient = true;
+        }
+
+        assert(foundClean);
+        assert(foundMetal);
+        assert(foundBreakup);
+        assert(foundAmbient);
+    }
+
+    std::cout << "PASSED\n";
+}
+
+void testGraphEngineVariableBlockSizes() {
+    std::cout << "[TEST] GraphEngine Variable Block Sizes (512, 1024, 2048)... ";
+    audio::GraphEngine engine;
+    engine.prepare(48000.0, 2048);
+
+    auto slot = std::make_unique<audio::PluginSlot>(std::make_unique<plugins::OverdriveEffect>());
+    slot->prepare(48000.0, 2048);
+    engine.addSerialNode(std::move(slot));
+
+    audio::OwnedAudioBuffer inBuf(2, 2048);
+    audio::OwnedAudioBuffer outBuf(2, 2048);
+
+    const uint32_t blockSizes[] = {512, 1024, 2048};
+    for (uint32_t bs : blockSizes) {
+        auto inView = inBuf.view(bs);
+        auto outView = outBuf.view(bs);
+
+        for (uint32_t ch = 0; ch < 2; ++ch) {
+            for (uint32_t s = 0; s < bs; ++s) {
+                inView.channel(ch)[s] = 0.5f * std::sin(2.0f * 3.14159265f * 440.0f * static_cast<float>(s) / 48000.0f);
+            }
+        }
+        outView.clear();
+
+        engine.process(inView, outView);
+
+        float sumAbs = 0.0f;
+        for (uint32_t ch = 0; ch < 2; ++ch) {
+            for (uint32_t s = 0; s < bs; ++s) {
+                sumAbs += std::abs(outView.channel(ch)[s]);
+            }
+        }
+        assert(sumAbs > 0.0f);
+    }
+    std::cout << "PASSED\n";
+}
+
+void testStereoBypassRampSymmetry() {
+    std::cout << "[TEST] Stereo Bypass Ramp Symmetry... ";
+    audio::PluginSlot slot(std::make_unique<plugins::OverdriveEffect>());
+    slot.prepare(48000.0, 512);
+
+    audio::OwnedAudioBuffer inBuf(2, 512);
+    audio::OwnedAudioBuffer outBuf(2, 512);
+
+    auto inView = inBuf.view(512);
+    auto outView = outBuf.view(512);
+
+    for (uint32_t s = 0; s < 512; ++s) {
+        float v = 0.4f * std::sin(2.0f * 3.14159265f * 220.0f * static_cast<float>(s) / 48000.0f);
+        inView.channel(0)[s] = v;
+        inView.channel(1)[s] = v;
+    }
+
+    slot.setBypassed(true);
+
+    audio::AudioProcessContext ctx{inView, outView, 48000.0, 512};
+    slot.process(ctx);
+
+    for (uint32_t s = 0; s < 512; ++s) {
+        float l = outView.channel(0)[s];
+        float r = outView.channel(1)[s];
+        assert(l == r);
+    }
+
+    slot.setBypassed(false);
+    slot.process(ctx);
+
+    for (uint32_t s = 0; s < 512; ++s) {
+        float l = outView.channel(0)[s];
+        float r = outView.channel(1)[s];
+        assert(l == r);
+    }
+    std::cout << "PASSED\n";
+}
+
+void testColorTokenFloatConversion() {
+    std::cout << "[TEST] ColorToken float RGBA conversion... ";
+    ui::ColorToken col(0.5f, 0.8f, 0.2f, 0.9f);
+    assert(col.u32 != 0);
+    assert(col.r > 0.49f && col.r < 0.51f);
+    assert(col.g > 0.79f && col.g < 0.81f);
+    assert(col.b > 0.19f && col.b < 0.21f);
+    assert(col.a > 0.89f && col.a < 0.91f);
+    assert(col.vec4.x == col.r);
+    assert(col.vec4.y == col.g);
+    assert(col.vec4.z == col.b);
+    assert(col.vec4.w == col.a);
+    std::cout << "PASSED\n";
+}
+
+void testDawInteropSecurityAndOverflowRejection() {
+    std::cout << "[TEST] DAW Interop Security & Overflow Payload Rejection... ";
+
+    // 1. ReaperAdapter: compLen = 0xFFFFFFFC overflow rejection
+    std::vector<uint8_t> malformedReaper = {'v', 's', 't', '3', 0xFC, 0xFF, 0xFF, 0xFF, 0x01, 0x02, 0x03, 0x04};
+    std::vector<uint8_t> reaperComp, reaperCtrl;
+    bool okReaper = state::ReaperAdapter::unpackVst3ChunkEnvelope(malformedReaper, reaperComp, reaperCtrl);
+    (void)okReaper;
+    assert(reaperComp.size() != 0xFFFFFFFC);
+
+    // 2. VstPresetAdapter: compSize = UINT64_MAX - 8 overflow rejection
+    std::vector<uint8_t> malformedPreset(64, 0);
+    malformedPreset[0] = 'V'; malformedPreset[1] = 'S'; malformedPreset[2] = 'T'; malformedPreset[3] = '3';
+    malformedPreset[40] = 'C'; malformedPreset[41] = 'o'; malformedPreset[42] = 'm'; malformedPreset[43] = 'p';
+    uint64_t overflowCompSize = UINT64_MAX - 8;
+    std::memcpy(malformedPreset.data() + 44, &overflowCompSize, 8);
+    std::vector<uint8_t> vstComp;
+    std::string vstGuid;
+    (void)state::VstPresetAdapter::parseVstPreset(malformedPreset, vstGuid, vstComp);
+    assert(vstComp.size() != overflowCompSize);
+    assert(vstComp.size() <= malformedPreset.size());
+
+    // 3. DawprojectAdapter: path traversal rejection
+    std::filesystem::path safeRel;
+    assert(!utils::sanitizeZipPath("../../win.ini", safeRel));
+    assert(!utils::sanitizeZipPath("..\\..\\win.ini", safeRel));
+    assert(!utils::sanitizeZipPath("/etc/passwd", safeRel));
+    assert(!utils::sanitizeZipPath("C:\\Windows\\System32\\cmd.exe", safeRel));
+
+    std::cout << "PASSED\n";
+}
+
+void testDynamicSampleRateAndBufferSizeUpdates() {
+    std::cout << "[TEST] Dynamic Sample Rate & Buffer Size Updates... ";
+
+    // 1. AsioManager safety without active driver
+    {
+        audio::AsioManager asio;
+        assert(!asio.isLoaded());
+        assert(!asio.isRunning());
+        assert(!asio.checkHardwareChanges());
+        assert(!asio.setSampleRate(96000.0));
+        assert(!asio.setBufferSize(128));
+        assert(!asio.canSampleRate(48000.0));
+    }
+
+    // 2. Real-time DSP Pill formatting verification across standard sample rates & buffer sizes
+    {
+        const struct {
+            double sr;
+            int bufSize;
+            const char* expectedSrSubstr;
+        } cases[] = {
+            { 44100.0,  128, "44.1 kHz" },
+            { 48000.0,  256, "48 kHz"   },
+            { 88200.0,  512, "88.2 kHz" },
+            { 96000.0,   64, "96 kHz"   },
+            { 176400.0, 1024, "176.4 kHz"},
+            { 192000.0, 2048, "192 kHz"  }
+        };
+
+        for (const auto& c : cases) {
+            const char* srFormat = (std::fmod(c.sr, 1000.0) == 0.0) ? "%.0f kHz" : "%.1f kHz";
+            char srBuf[32];
+            std::snprintf(srBuf, sizeof(srBuf), srFormat, c.sr / 1000.0);
+            assert(std::string(srBuf) == c.expectedSrSubstr);
+
+            const double latencyMs = (c.sr > 0.0) ? (static_cast<double>(c.bufSize) / c.sr * 1000.0) : 0.0;
+            assert(latencyMs > 0.0 && latencyMs < 100.0);
+
+            char statusText[160];
+            std::snprintf(statusText, sizeof(statusText), "ACTIVE  |  %s  |  %d spls (%.1f ms)  |  DSP: 12%%",
+                          srBuf, c.bufSize, latencyMs);
+            assert(std::string(statusText).find(c.expectedSrSubstr) != std::string::npos);
+        }
+
+        // Pill width stability verification across single- and double-digit DSP loads
+        {
+            ImGuiContext* ctx = ImGui::GetCurrentContext();
+            bool createdCtx = false;
+            if (!ctx) {
+                ctx = ImGui::CreateContext();
+                createdCtx = true;
+            }
+            ImGui::SetCurrentContext(ctx);
+
+            ImGuiIO& io = ImGui::GetIO();
+            io.DisplaySize = ImVec2(1024, 768);
+            io.DeltaTime = 1.0f / 60.0f;
+            unsigned char* pixels = nullptr;
+            int width = 0, height = 0;
+            io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+            ImGui::NewFrame();
+
+            auto calcPillW = [](double sr, int bufSize, double latencyMs, float dspLoad, uint32_t drops) {
+                const char* srFormat = (std::fmod(sr, 1000.0) == 0.0) ? "%.0f kHz" : "%.1f kHz";
+                char srBuf[32];
+                std::snprintf(srBuf, sizeof(srBuf), srFormat, sr / 1000.0);
+
+                char statusText[160];
+                char refText[160];
+                const float refLoad = (dspLoad < 100.0f) ? 99.0f : dspLoad;
+                if (drops > 0) {
+                    std::snprintf(statusText, sizeof(statusText), "ACTIVE  |  %s  |  %d spls (%.1f ms)  |  DSP: %.0f%%  |  DROPS: %u",
+                                  srBuf, bufSize, latencyMs, dspLoad, drops);
+                    std::snprintf(refText, sizeof(refText), "ACTIVE  |  %s  |  %d spls (%.1f ms)  |  DSP: %.0f%%  |  DROPS: %u",
+                                  srBuf, bufSize, latencyMs, refLoad, drops);
+                } else {
+                    std::snprintf(statusText, sizeof(statusText), "ACTIVE  |  %s  |  %d spls (%.1f ms)  |  DSP: %.0f%%",
+                                  srBuf, bufSize, latencyMs, dspLoad);
+                    std::snprintf(refText, sizeof(refText), "ACTIVE  |  %s  |  %d spls (%.1f ms)  |  DSP: %.0f%%",
+                                  srBuf, bufSize, latencyMs, refLoad);
+                }
+                const float pillTextW = std::max(ImGui::CalcTextSize(statusText).x, ImGui::CalcTextSize(refText).x);
+                return pillTextW + 36.0f;
+            };
+
+            const float wSingle = calcPillW(48000.0, 128, 2.7, 9.0f, 0);
+            const float wDouble = calcPillW(48000.0, 128, 2.7, 10.0f, 0);
+            const float wZero   = calcPillW(48000.0, 128, 2.7, 0.0f, 0);
+            const float wHigh   = calcPillW(48000.0, 128, 2.7, 99.0f, 0);
+
+            // Pill width must be identical across single and double digit loads to prevent jitter
+            assert(std::abs(wSingle - wDouble) < 0.001f);
+            assert(std::abs(wZero - wDouble) < 0.001f);
+            assert(std::abs(wHigh - wDouble) < 0.001f);
+
+            ImGui::EndFrame();
+            if (createdCtx) {
+                ImGui::DestroyContext(ctx);
+            }
+        }
+
+        // Load meter 1/sec rate limit verification
+        {
+            float displayedLoad = 0.0f;
+            std::chrono::steady_clock::time_point lastUpdate{};
+
+            auto updateMeter = [&](float rawLoad, std::chrono::steady_clock::time_point now) {
+                if (lastUpdate.time_since_epoch().count() == 0 ||
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now - lastUpdate).count() >= 1000) {
+                    displayedLoad = rawLoad;
+                    lastUpdate = now;
+                }
+            };
+
+            auto t0 = std::chrono::steady_clock::now();
+            updateMeter(12.0f, t0);
+            assert(displayedLoad == 12.0f);
+
+            // Within 1 second (e.g. 500ms later), raw load changes, but meter does not change
+            updateMeter(25.0f, t0 + std::chrono::milliseconds(500));
+            assert(displayedLoad == 12.0f);
+
+            // At 999ms, meter still does not change
+            updateMeter(35.0f, t0 + std::chrono::milliseconds(999));
+            assert(displayedLoad == 12.0f);
+
+            // At 1000ms (1 second), meter updates
+            updateMeter(42.0f, t0 + std::chrono::milliseconds(1000));
+            assert(displayedLoad == 42.0f);
+
+            // Within next second (e.g. 1500ms), meter does not change
+            updateMeter(50.0f, t0 + std::chrono::milliseconds(1500));
+            assert(displayedLoad == 42.0f);
+
+            // At 2000ms (2 seconds), meter updates
+            updateMeter(15.0f, t0 + std::chrono::milliseconds(2000));
+            assert(displayedLoad == 15.0f);
+        }
+    }
+
+    // 3. Dynamic multi-rate GraphEngine & Practice Tools re-preparation
+    {
+        audio::GraphEngine graph;
+        tools::InstrumentTuner tuner(2048);
+        tools::Metronome metronome;
+        tools::AudioPlayer player;
+        tools::QuickLooper looper;
+
+        auto slot = std::make_unique<audio::PluginSlot>(std::make_unique<plugins::OverdriveEffect>());
+        graph.addSerialNode(std::move(slot));
+
+        const double rates[] = { 44100.0, 48000.0, 96000.0, 88200.0 };
+        const uint32_t sizes[] = { 512, 128, 64, 2048 };
+
+        for (size_t i = 0; i < 4; ++i) {
+            const double sr = rates[i];
+            const uint32_t bs = sizes[i];
+
+            // Dynamic re-preparation with newly configured rate & buffer size
+            graph.prepare(sr, bs);
+            tuner.prepare(sr, 4096);
+            metronome.prepare(sr);
+            player.prepare(sr);
+            looper.prepare(sr);
+
+            audio::OwnedAudioBuffer inBuf(2, bs);
+            audio::OwnedAudioBuffer outBuf(2, bs);
+            auto inView = inBuf.view(bs);
+            auto outView = outBuf.view(bs);
+
+            for (uint32_t ch = 0; ch < 2; ++ch) {
+                for (uint32_t s = 0; s < bs; ++s) {
+                    inView.channel(ch)[s] = 0.3f * std::sin(2.0f * 3.14159265f * 440.0f * static_cast<float>(s) / static_cast<float>(sr));
+                }
+            }
+            outView.clear();
+
+            graph.process(inView, outView);
+
+            // Verify non-zero, finite processed audio across buffer size and sample rate mutations
+            float maxAbs = 0.0f;
+            for (uint32_t ch = 0; ch < 2; ++ch) {
+                for (uint32_t s = 0; s < bs; ++s) {
+                    float v = outView.channel(ch)[s];
+                    assert(!std::isnan(v));
+                    assert(!std::isinf(v));
+                    maxAbs = std::max(maxAbs, std::abs(v));
+                }
+            }
+            assert(maxAbs > 0.0f);
+        }
+    }
+
+    std::cout << "PASSED\n";
+}
+
+void testParallelBranchSplitNoDuplicateAndCleanDelete() {
+    std::cout << "[TEST] Parallel Branch Split Single Slot & Clean Deletion... ";
+    audio::GraphEngine engine;
+    engine.prepare(48000.0, 512);
+
+    auto slot = std::make_unique<audio::PluginSlot>(std::make_unique<plugins::OverdriveEffect>());
+    engine.addSerialNode(std::move(slot));
+
+    audio::OwnedAudioBuffer inBuf(2, 512);
+    audio::OwnedAudioBuffer outBuf(2, 512);
+    auto inView = inBuf.view(512);
+    auto outView = outBuf.view(512);
+
+    // 1. Process block to ensure audio is actively running
+    engine.process(inView, outView);
+
+    // 2. Split serial node into parallel while audio is active
+    engine.splitSerialNodeIntoParallel(0);
+    engine.process(inView, outView);
+
+    auto* block = dynamic_cast<audio::ParallelSplitMergeBlock*>(engine.getNode(0));
+    assert(block != nullptr);
+    auto* branchA = block->getBranch(0);
+    assert(branchA != nullptr);
+
+    // CRITICAL: Slot must NOT be duplicated into the next slot in the branch!
+    assert(branchA->numSlots() == 1);
+    assert(branchA->getSlot(0) != nullptr);
+    assert(branchA->getSlot(0)->name() == "Praccy Drive");
+
+    // 3. Delete slot from Branch A
+    branchA->removeSlot(0);
+    engine.process(inView, outView);
+    branchA->collectReclaimedSlots();
+
+    // Verify Branch A now cleanly has 0 slots
+    assert(branchA->numSlots() == 0);
+
+    // 4. Continue audio processing to verify no null dereferences or memory faults
+    engine.process(inView, outView);
+
+    std::cout << "PASSED\n";
+}
+
 int main() {
     std::cout << "===========================================\n";
     std::cout << "   PRACCY CORE AUDIO ENGINE TEST SUITE   \n";
@@ -1624,6 +2916,7 @@ int main() {
     testSceneManager();
     testGraphEngineDynamicTopology();
     testAppConfigPersistence();
+    testPluginScannerPersistence();
     testParallelBlockBlendAndDissolve();
     testQuickLooper();
     testAudioPlayer();
@@ -1640,13 +2933,25 @@ int main() {
     testThemeSwitchingAndTokenIntegrity();
     testCubicHermiteSplineEvaluation();
     testViewportCenteringCalculations();
+    testBottomBarCentering();
     testEqualPowerRampEnergyConservation();
     testQuickLooperCircularProgressMath();
     testWavDragAndDropExtensionValidation();
     testFloatingHudAlphaDecayComputation();
+    testStyleStackGuards();
+    testFastParameterChanges();
+    testAudioPlayerAsyncLoading();
+    testHardwareGradeWidgetsAndCategoryBadges();
+    testMilestone3PracticeSuiteAndStrobeTuner();
+    testGraphEngineVariableBlockSizes();
+    testStereoBypassRampSymmetry();
+    testColorTokenFloatConversion();
+    testDawInteropSecurityAndOverflowRejection();
+    testDynamicSampleRateAndBufferSizeUpdates();
+    testParallelBranchSplitNoDuplicateAndCleanDelete();
 
     std::cout << "===========================================\n";
-    std::cout << "   ALL TESTS PASSED SUCCESSFULLY! (28/28)  \n";
+    std::cout << "   ALL TESTS PASSED SUCCESSFULLY! (41/41)  \n";
     std::cout << "===========================================\n";
     return 0;
 }

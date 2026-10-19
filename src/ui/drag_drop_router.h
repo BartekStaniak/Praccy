@@ -1,7 +1,11 @@
 #pragma once
 
+#if defined(_WIN32)
 #include <windows.h>
 #include <shellapi.h>
+#else
+using HDROP = void*;
+#endif
 #include <filesystem>
 #include <vector>
 #include <string>
@@ -10,6 +14,7 @@
 namespace praccy::audio { class GraphEngine; }
 namespace praccy::tools { class AudioPlayer; class QuickLooper; }
 namespace praccy::state { class SceneManager; }
+namespace praccy::plugins { class PluginScanner; }
 
 namespace praccy::ui {
 
@@ -33,7 +38,11 @@ struct DropContext {
     tools::QuickLooper* looper{nullptr};
     state::SceneManager* scenes{nullptr};
     audio::GraphEngine* graph{nullptr};
+    plugins::PluginScanner* scanner{nullptr};
+    bool preferLooper{false};
 };
+
+using DragDropContext = DropContext;
 
 class DragDropRouter {
 public:

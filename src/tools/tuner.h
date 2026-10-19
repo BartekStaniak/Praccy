@@ -9,15 +9,177 @@
 #include <condition_variable>
 #include <cstring>
 #include <algorithm>
+#include <array>
+#include <string_view>
+#include <ostream>
+#include "tuner_settings.h"
 
 namespace praccy::tools {
+
+/**
+ * @brief Zero-heap-allocation fixed buffer for note name representation (e.g. "E2", "A#4", "--").
+ * Fully compatible with std::string_view, const char*, and std::string callers.
+ */
+struct NoteNameBuffer {
+    std::array<char, 8> noteNameBuf{'-', '-', '\0', '\0', '\0', '\0', '\0', '\0'};
+
+    constexpr NoteNameBuffer() noexcept {
+        noteNameBuf[0] = '-';
+        noteNameBuf[1] = '-';
+        noteNameBuf[2] = '\0';
+    }
+
+    NoteNameBuffer(const char* str) noexcept {
+        assign(str);
+    }
+
+    NoteNameBuffer(std::string_view sv) noexcept {
+        assign(sv);
+    }
+
+    NoteNameBuffer(const std::string& str) noexcept {
+        assign(std::string_view(str));
+    }
+
+    NoteNameBuffer& operator=(const char* str) noexcept {
+        assign(str);
+        return *this;
+    }
+
+    NoteNameBuffer& operator=(std::string_view sv) noexcept {
+        assign(sv);
+        return *this;
+    }
+
+    NoteNameBuffer& operator=(const std::string& str) noexcept {
+        assign(std::string_view(str));
+        return *this;
+    }
+
+    void assign(const char* str) noexcept {
+        if (!str) {
+            noteNameBuf[0] = '\0';
+            return;
+        }
+        size_t i = 0;
+        while (i < 7 && str[i] != '\0') {
+            noteNameBuf[i] = str[i];
+            ++i;
+        }
+        noteNameBuf[i] = '\0';
+    }
+
+    void assign(std::string_view sv) noexcept {
+        const size_t len = std::min(sv.size(), size_t{7});
+        if (len > 0) {
+            std::memcpy(noteNameBuf.data(), sv.data(), len);
+        }
+        noteNameBuf[len] = '\0';
+    }
+
+    void setNote(const char* note, int octave) noexcept {
+        size_t i = 0;
+        if (note) {
+            while (i < 4 && note[i] != '\0') {
+                noteNameBuf[i] = note[i];
+                ++i;
+            }
+        }
+        if (octave < 0) {
+            if (i < 7) noteNameBuf[i++] = '-';
+            octave = -octave;
+        }
+        if (octave >= 10 && i < 6) {
+            noteNameBuf[i++] = static_cast<char>('0' + (octave / 10));
+            octave %= 10;
+        }
+        if (i < 7) {
+            noteNameBuf[i++] = static_cast<char>('0' + octave);
+        }
+        noteNameBuf[i] = '\0';
+    }
+
+    void clear() noexcept {
+        noteNameBuf[0] = '\0';
+    }
+
+    [[nodiscard]] const char* c_str() const noexcept { return noteNameBuf.data(); }
+    [[nodiscard]] const char* data() const noexcept { return noteNameBuf.data(); }
+    [[nodiscard]] bool empty() const noexcept { return noteNameBuf[0] == '\0'; }
+    [[nodiscard]] size_t size() const noexcept { return std::strlen(noteNameBuf.data()); }
+    [[nodiscard]] size_t length() const noexcept { return size(); }
+
+    [[nodiscard]] char operator[](size_t idx) const noexcept { return noteNameBuf[idx]; }
+    [[nodiscard]] char& operator[](size_t idx) noexcept { return noteNameBuf[idx]; }
+
+    [[nodiscard]] const char* begin() const noexcept { return noteNameBuf.data(); }
+    [[nodiscard]] const char* end() const noexcept { return noteNameBuf.data() + size(); }
+
+    operator std::string_view() const noexcept { return std::string_view(noteNameBuf.data(), size()); }
+    operator std::string() const { return std::string(noteNameBuf.data(), size()); }
+
+    bool operator==(const char* other) const noexcept {
+        if (!other) return empty();
+        return std::strcmp(noteNameBuf.data(), other) == 0;
+    }
+    bool operator!=(const char* other) const noexcept {
+        return !(*this == other);
+    }
+
+    bool operator==(std::string_view other) const noexcept {
+        return std::string_view(noteNameBuf.data(), size()) == other;
+    }
+    bool operator!=(std::string_view other) const noexcept {
+        return !(*this == other);
+    }
+
+    bool operator==(const std::string& other) const noexcept {
+        return std::string_view(noteNameBuf.data(), size()) == other;
+    }
+    bool operator!=(const std::string& other) const noexcept {
+        return !(*this == other);
+    }
+
+    bool operator==(const NoteNameBuffer& other) const noexcept {
+        return std::strcmp(noteNameBuf.data(), other.noteNameBuf.data()) == 0;
+    }
+    bool operator!=(const NoteNameBuffer& other) const noexcept {
+        return !(*this == other);
+    }
+
+    friend bool operator==(const char* lhs, const NoteNameBuffer& rhs) noexcept {
+        return rhs == lhs;
+    }
+    friend bool operator!=(const char* lhs, const NoteNameBuffer& rhs) noexcept {
+        return rhs != lhs;
+    }
+    friend bool operator==(std::string_view lhs, const NoteNameBuffer& rhs) noexcept {
+        return rhs == lhs;
+    }
+    friend bool operator!=(std::string_view lhs, const NoteNameBuffer& rhs) noexcept {
+        return rhs != lhs;
+    }
+    friend bool operator==(const std::string& lhs, const NoteNameBuffer& rhs) noexcept {
+        return rhs == lhs;
+    }
+    friend bool operator!=(const std::string& lhs, const NoteNameBuffer& rhs) noexcept {
+        return rhs != lhs;
+    }
+
+    friend std::ostream& operator<<(std::ostream& os, const NoteNameBuffer& n) {
+        return os << n.c_str();
+    }
+};
 
 struct TunerResult {
     float frequencyHz{0.0f};
     int noteNumber{0};         // MIDI note number (69 = A4 = 440Hz)
-    std::string noteName;      // e.g. "E2", "A2", "D3", "G3", "B3", "E4"
+    NoteNameBuffer noteName;   // e.g. "E2", "A2", "D3", "G3", "B3", "E4"
     float centDeviation{0.0f}; // [-50.0, +50.0] cents
     bool confidence{false};
+    int matchedStringIndex{-1}; // 0-indexed string (0 = String 1), -1 if none
+    float targetFrequencyHz{0.0f};
+    float stringCentDeviation{0.0f};
 };
 
 /**
@@ -87,6 +249,39 @@ public:
     [[nodiscard]] bool isEnabled() const noexcept { return m_enabled.load(std::memory_order_relaxed); }
     void setEnabled(bool enabled) noexcept { m_enabled.store(enabled, std::memory_order_relaxed); }
 
+    void setA4Reference(float freqHz) noexcept {
+        float clamped = std::clamp(freqHz, 300.0f, 600.0f);
+        m_a4Reference.store(clamped, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lock(m_configMutex);
+        m_config.a4ReferenceHz = clamped;
+    }
+    [[nodiscard]] float a4Reference() const noexcept {
+        return m_a4Reference.load(std::memory_order_relaxed);
+    }
+
+    void setConfig(const TunerConfig& cfg) {
+        {
+            std::lock_guard<std::mutex> lock(m_configMutex);
+            m_config = cfg;
+            m_config.clampStringCount();
+            const uint32_t cnt = static_cast<uint32_t>(std::min(m_config.stringMidiNotes.size(), MAX_TUNER_STRINGS));
+            for (uint32_t i = 0; i < cnt; ++i) {
+                m_atomicStringNotes[i].store(m_config.stringMidiNotes[i], std::memory_order_relaxed);
+            }
+            // Release publishes updated string note table to wait-free UI readers
+            m_atomicStringCount.store(cnt, std::memory_order_release);
+        }
+        m_a4Reference.store(cfg.a4ReferenceHz, std::memory_order_relaxed);
+    }
+    [[nodiscard]] TunerConfig getConfigSnapshot() const {
+        std::lock_guard<std::mutex> lock(m_configMutex);
+        return m_config;
+    }
+    [[nodiscard]] TunerConfig config() const {
+        std::lock_guard<std::mutex> lock(m_configMutex);
+        return m_config;
+    }
+
 private:
     void workerLoop();
     void detectPitchYin();
@@ -96,15 +291,24 @@ private:
     uint32_t m_maxBlockSize{4096};
     double m_sampleRate{48000.0};
     std::atomic<bool> m_enabled{true};
+    std::atomic<float> m_a4Reference{440.0f};
+    mutable std::mutex m_configMutex;
+    TunerConfig m_config;
+    static constexpr size_t MAX_TUNER_STRINGS = 12;
+    std::array<std::atomic<int>, MAX_TUNER_STRINGS> m_atomicStringNotes{};
+    std::atomic<uint32_t> m_atomicStringCount{6};
 
     // Lock-free ingestion ring buffer
     AudioRingBuffer m_ringBuffer;
 
-    // Background worker thread state
+    // Background worker thread state & prepare/push Dekker fence
     std::thread m_workerThread;
     std::atomic<bool> m_workerRunning{false};
+    std::atomic<bool> m_preparing{false};
+    std::atomic<uint32_t> m_activePushWriters{0};
     std::condition_variable m_workerCv;
     std::mutex m_workerCvMutex; // Used exclusively for worker cv sleep/shutdown, NEVER on audio thread
+    mutable std::mutex m_dspMutex; // Serializes YIN scratch buffers between workerLoop() and direct process()
 
     // Internal scratch and history buffers (pre-allocated in prepare())
     std::vector<float> m_inputHistory;
@@ -112,6 +316,7 @@ private:
     std::vector<float> m_drainBuffer;
     std::vector<float> m_differenceBuffer;
     std::vector<float> m_cumulativeDiffBuffer;
+    std::vector<float> m_linearWindow;
 
     // Thread-safe atomic result snapshotting (Seqlock + Atomics)
     alignas(64) std::atomic<uint32_t> m_resultSeq{0};

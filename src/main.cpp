@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <dwmapi.h>
 #include <shellapi.h>
 #include <filesystem>
 #include <d3d11.h>
@@ -18,15 +19,22 @@
 #include "tools/audio_player.h"
 #include "tools/quick_looper.h"
 #include "state/scene_manager.h"
+#include "state/daw_interop/universal_daw_interop_manager.h"
 #include "plugins/builtin_dsp.h"
 #include "plugins/plugin_scanner.h"
 #include "plugins/plugin_window.h"
+#include "plugins/clap_host.h"
 #include "state/app_config.h"
 #include "ui/theme.h"
 #include "ui/rack_view.h"
 #include "ui/thumbnail_manager.h"
 #include "ui/drag_drop_router.h"
+#if __has_include("resource.h")
 #include "resource.h"
+#elif __has_include("../resources/resource.h")
+#include "../resources/resource.h"
+#endif
+#include <fstream>
 
 // Global typography handles
 ImFont* g_fontUI   = nullptr;
@@ -35,15 +43,16 @@ ImFont* g_fontMono = nullptr;
 namespace {
 
 static praccy::ui::DragDropRouter g_dragDropRouter;
+static std::atomic<float> g_pendingDpiScale{0.0f};
 
 struct EmbeddedResource {
     const void* data = nullptr;
     DWORD       size = 0;
 };
 
-EmbeddedResource loadWin32Resource(HMODULE hModule, int resourceId, LPCSTR resourceType) {
+EmbeddedResource loadWin32Resource(HMODULE hModule, int resourceId, LPCWSTR resourceType = MAKEINTRESOURCEW(10)) {
     EmbeddedResource res{};
-    HRSRC hRsrc = FindResourceA(hModule, MAKEINTRESOURCEA(resourceId), resourceType);
+    HRSRC hRsrc = FindResourceW(hModule, MAKEINTRESOURCEW(resourceId), resourceType);
     if (!hRsrc) return res;
 
     res.size = SizeofResource(hModule, hRsrc);
@@ -54,6 +63,114 @@ EmbeddedResource loadWin32Resource(HMODULE hModule, int resourceId, LPCSTR resou
 
     res.data = LockResource(hGlobal);
     return res;
+}
+
+void loadApplicationFonts(ImGuiIO& io, float scale) {
+    ImFontConfig fontConfig;
+    fontConfig.OversampleH = 3;
+    fontConfig.OversampleV = 1;
+    fontConfig.PixelSnapH  = true;
+    fontConfig.FontDataOwnedByAtlas = false;
+
+    static const ImWchar glyphRanges[] = {
+        0x0020, 0x00FF, // Basic Latin + Latin Supplement
+        0x2190, 0x21FF, // Arrows (←, ↑, →, ↓, etc.)
+        0,
+    };
+
+    const float scaledFontSizeUI   = std::round(15.0f * scale);
+    const float scaledFontSizeMono = std::round(13.0f * scale);
+
+    HMODULE hModule = GetModuleHandleW(nullptr);
+
+    // Load Inter (UI Primary Font) via Win32 resource (RT_RCDATA / type 10)
+    EmbeddedResource resInter = loadWin32Resource(hModule, IDR_FONT_INTER, MAKEINTRESOURCEW(10));
+    if (resInter.data && resInter.size > 0) {
+        g_fontUI = io.Fonts->AddFontFromMemoryTTF(
+            const_cast<void*>(resInter.data),
+            static_cast<int>(resInter.size),
+            scaledFontSizeUI,
+            &fontConfig,
+            glyphRanges
+        );
+    } else {
+        // Portable / developer disk fallback
+        const char* fontPaths[] = {
+            "resources/fonts/Inter-Regular.ttf",
+            "fonts/Inter-Regular.ttf",
+            "../resources/fonts/Inter-Regular.ttf"
+        };
+        for (const char* path : fontPaths) {
+            if (std::filesystem::exists(path)) {
+                ImFontConfig diskCfg = fontConfig;
+                diskCfg.FontDataOwnedByAtlas = true;
+                g_fontUI = io.Fonts->AddFontFromFileTTF(path, scaledFontSizeUI, &diskCfg, glyphRanges);
+                if (g_fontUI) break;
+            }
+        }
+    }
+
+    // Fallback if Inter resource unavailable
+    if (!g_fontUI) {
+        g_fontUI = io.Fonts->AddFontDefault();
+    }
+    io.FontDefault = g_fontUI;
+
+    // Optional: Merge Segoe UI Symbol for dingbats/stars if available on Windows host
+    if (GetFileAttributesA("C:\\Windows\\Fonts\\seguisym.ttf") != INVALID_FILE_ATTRIBUTES) {
+        ImFontConfig symConfig = fontConfig;
+        symConfig.MergeMode = true;
+        symConfig.FontDataOwnedByAtlas = true;
+        static const ImWchar symRanges[] = {
+            0x2190, 0x21FF, // Arrows (←, ↑, →, ↓, etc.)
+            0x2600, 0x26FF, // Miscellaneous Symbols (★, ☆, etc.)
+            0x2700, 0x27BF, // Dingbats
+            0,
+        };
+        io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisym.ttf", scaledFontSizeUI, &symConfig, symRanges);
+    }
+
+    // Load JetBrains Mono (Numeric Parameters & DSP Readouts)
+    EmbeddedResource resMono = loadWin32Resource(hModule, IDR_FONT_JETBRAINS_MONO, MAKEINTRESOURCEW(10));
+    if (resMono.data && resMono.size > 0) {
+        ImFontConfig monoConfig = fontConfig;
+        monoConfig.FontDataOwnedByAtlas = false;
+        g_fontMono = io.Fonts->AddFontFromMemoryTTF(
+            const_cast<void*>(resMono.data),
+            static_cast<int>(resMono.size),
+            scaledFontSizeMono,
+            &monoConfig,
+            glyphRanges
+        );
+    } else {
+        const char* monoPaths[] = {
+            "resources/fonts/JetBrainsMono-Regular.ttf",
+            "fonts/JetBrainsMono-Regular.ttf",
+            "../resources/fonts/JetBrainsMono-Regular.ttf"
+        };
+        for (const char* path : monoPaths) {
+            if (std::filesystem::exists(path)) {
+                ImFontConfig diskMonoCfg = fontConfig;
+                diskMonoCfg.FontDataOwnedByAtlas = true;
+                g_fontMono = io.Fonts->AddFontFromFileTTF(path, scaledFontSizeMono, &diskMonoCfg, glyphRanges);
+                if (g_fontMono) break;
+            }
+        }
+    }
+
+    // Fallback if JetBrains Mono unavailable (never leave g_fontMono null)
+    if (!g_fontMono) {
+        g_fontMono = g_fontUI;
+    }
+}
+
+void enableWin32DarkTitleBar(HWND hwnd, bool isDark = true) {
+    if (!hwnd) return;
+    BOOL useDark = isDark ? TRUE : FALSE;
+    // DWMWA_USE_IMMERSIVE_DARK_MODE = 20 (Win10 20H1+ / Win11), fallback 19
+    if (FAILED(DwmSetWindowAttribute(hwnd, 20, &useDark, sizeof(useDark)))) {
+        DwmSetWindowAttribute(hwnd, 19, &useDark, sizeof(useDark));
+    }
 }
 
 float getDpiScaleForWindow(HWND hwnd) {
@@ -159,6 +276,13 @@ static int runDirectUpdater(DWORD oldPid, const std::wstring& destExe) {
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    (void)hPrevInstance;
+    (void)lpCmdLine;
+    (void)nCmdShow;
+
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+    SetThreadErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX, nullptr);
+
     // Check for direct updater execution flag before initializing GUI or audio
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -172,6 +296,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         LocalFree(argv);
     }
 
+    // 0. Initialize OLE/COM apartment for hosted plugin UI technologies (Direct2D, WIC, shell)
+    OleInitialize(nullptr);
+    praccy::plugins::ClapPluginInstance::setMainThreadId(GetCurrentThreadId());
+
     // 1. Enable Per-Monitor v2 DPI awareness before window creation
     ImGui_ImplWin32_EnableDpiAwareness();
 
@@ -181,11 +309,21 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(1));
     }
 
-    // Register Win32 window class with dark background brush matching Praccy theme
-    HBRUSH hDarkBrush = CreateSolidBrush(RGB(28, 30, 36));
+    praccy::state::AppConfig startupCfg;
+    startupCfg.load();
+    const auto initialThemeId = static_cast<praccy::ui::ThemeId>(std::clamp(startupCfg.themeId, 0, 3));
+    const auto& initTokens = praccy::ui::getThemeTokens(initialThemeId);
+
+    // Register Win32 window class with background brush matching initial Praccy theme
+    const COLORREF bgCol = RGB(
+        static_cast<BYTE>(initTokens.surfaces.windowBg.r * 255.0f + 0.5f),
+        static_cast<BYTE>(initTokens.surfaces.windowBg.g * 255.0f + 0.5f),
+        static_cast<BYTE>(initTokens.surfaces.windowBg.b * 255.0f + 0.5f)
+    );
+    HBRUSH hBgBrush = CreateSolidBrush(bgCol);
     WNDCLASSEXW wc = {
         sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L,
-        hInstance, hIcon, LoadCursor(nullptr, IDC_ARROW), hDarkBrush, nullptr,
+        hInstance, hIcon, LoadCursor(nullptr, IDC_ARROW), hBgBrush, nullptr,
         L"PraccyHostClass", hIcon
     };
     RegisterClassExW(&wc);
@@ -204,6 +342,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
 
     DragAcceptFiles(hwnd, TRUE);
+    enableWin32DarkTitleBar(hwnd, initTokens.isDark);
+    praccy::plugins::PluginWindowManager::instance().setMainWindow(hwnd);
+    praccy::plugins::PluginWindowManager::instance().updateTheme(initTokens.isDark, bgCol);
 
     // 2. Query active monitor DPI scale factor
     const float dpiScale = getDpiScaleForWindow(hwnd);
@@ -211,7 +352,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     if (!CreateDeviceD3D(hwnd)) {
         CleanupDeviceD3D();
         UnregisterClassW(wc.lpszClassName, wc.hInstance);
-        if (hDarkBrush) DeleteObject(hDarkBrush);
+        if (hBgBrush) DeleteObject(hBgBrush);
         return 1;
     }
 
@@ -221,77 +362,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
-    praccy::ui::applyPraccyTheme();
-    if (dpiScale > 1.0f) {
-        ImGui::GetStyle().ScaleAllSizes(dpiScale);
-    }
+    praccy::ui::setDpiScale(dpiScale);
+    praccy::ui::applyTheme(initialThemeId);
 
-    ImFontConfig fontConfig;
-    fontConfig.OversampleH = 2;
-    fontConfig.OversampleV = 2;
-    fontConfig.FontDataOwnedByAtlas = false; // CRITICAL: Prevent free() on read-only PE .rsrc memory
 
-    static const ImWchar glyphRanges[] = {
-        0x0020, 0x00FF, // Basic Latin + Latin Supplement
-        0,
-    };
 
-    const float baseFontSizeUI     = 17.0f;
-    const float baseFontSizeMono   = 14.5f;
-    const float scaledFontSizeUI   = std::round(baseFontSizeUI * dpiScale);
-    const float scaledFontSizeMono = std::round(baseFontSizeMono * dpiScale);
-
-    HMODULE hModule = GetModuleHandleW(nullptr);
-
-    // Load Inter (UI Primary Font)
-    EmbeddedResource resInter = loadWin32Resource(hModule, IDR_FONT_INTER, RT_RCDATA);
-    if (resInter.data && resInter.size > 0) {
-        g_fontUI = io.Fonts->AddFontFromMemoryTTF(
-            const_cast<void*>(resInter.data),
-            static_cast<int>(resInter.size),
-            scaledFontSizeUI,
-            &fontConfig,
-            glyphRanges
-        );
-    }
-
-    // Fallback if Inter resource unavailable
-    if (!g_fontUI) {
-        g_fontUI = io.Fonts->AddFontDefault();
-    }
-    io.FontDefault = g_fontUI;
-
-    // Optional: Merge Segoe UI Symbol for dingbats/stars if available on Windows host
-    if (GetFileAttributesA("C:\\Windows\\Fonts\\seguisym.ttf") != INVALID_FILE_ATTRIBUTES) {
-        ImFontConfig symConfig = fontConfig;
-        symConfig.MergeMode = true;
-        symConfig.FontDataOwnedByAtlas = true; // AddFontFromFileTTF allocates heap memory via ImFileLoadToMemory; atlas must own it to free on ClearInputData()
-        static const ImWchar symRanges[] = {
-            0x2600, 0x26FF, // Miscellaneous Symbols (★, ☆, etc.)
-            0x2700, 0x27BF, // Dingbats
-            0,
-        };
-        io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisym.ttf", scaledFontSizeUI, &symConfig, symRanges);
-    }
-
-    // Load JetBrains Mono (Numeric Parameters & DSP Readouts)
-    EmbeddedResource resMono = loadWin32Resource(hModule, IDR_FONT_JETBRAINS_MONO, RT_RCDATA);
-    if (resMono.data && resMono.size > 0) {
-        ImFontConfig monoConfig = fontConfig;
-        monoConfig.FontDataOwnedByAtlas = false;
-        g_fontMono = io.Fonts->AddFontFromMemoryTTF(
-            const_cast<void*>(resMono.data),
-            static_cast<int>(resMono.size),
-            scaledFontSizeMono,
-            &monoConfig,
-            glyphRanges
-        );
-    }
-
-    // Fallback if JetBrains Mono unavailable (never leave g_fontMono null)
-    if (!g_fontMono) {
-        g_fontMono = g_fontUI;
-    }
+    loadApplicationFonts(io, dpiScale);
 
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
@@ -329,6 +405,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     praccy::tools::QuickLooper looper;
     looper.prepare(48000.0);
+    looper.setBpm(metronome.bpm());
+    looper.setBeatsPerBar(metronome.beatsPerBar());
 
     std::atomic<float> dspLoadPercent{0.0f};
     std::atomic<uint32_t> dspDropouts{0};
@@ -336,19 +414,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     praccy::midi::MidiManager midi;
     praccy::state::SceneManager scenes;
 
-    g_dragDropRouter.setAudioTrackHandler([&](const std::filesystem::path& p) {
-        player.loadWavFile(p.string());
-        looper.loadWavFile(p.string());
-    });
-    g_dragDropRouter.setPresetHandler([&](const std::filesystem::path& p) {
-        scenes.loadFromFile(p.string());
-    });
-    g_dragDropRouter.setChainHandler([&](const std::filesystem::path& p) {
-        scenes.loadPresetChain(p.stem().string(), graph);
-    });
-
     praccy::plugins::PluginScanner scanner;
     if (configLoaded) {
+        scanner.loadFromConfig(appConfig);
         for (const auto& cp : appConfig.customPluginPaths) {
             scanner.addCustomSearchPath(cp);
         }
@@ -356,11 +424,35 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     // Launch asynchronous non-blocking plugin scanner in the background
     scanner.scanAll();
 
+    g_dragDropRouter.setAudioTrackHandler([&](const std::filesystem::path& p) {
+        player.loadWavFile(p.string());
+    });
+    g_dragDropRouter.setPresetHandler([&](const std::filesystem::path& p) {
+        auto* dawAdapter = praccy::state::UniversalDawInteropManager::instance().findAdapter(p);
+        if (dawAdapter) {
+            praccy::state::UniversalDawInteropManager::instance().importAndApply(p, graph, scenes, scanner);
+        } else if (scenes.loadFromFile(p.string())) {
+            scenes.applyScene(0, graph, true /* allowAsync */);
+        }
+    });
+
     // Initialize ASIO
     praccy::audio::AsioManager asio;
 
     praccy::ui::RackView rackView(graph, asio, tuner, metronome, player, looper, midi, scenes, scanner);
     rackView.setDspStats(&dspLoadPercent, &dspDropouts);
+
+
+    g_dragDropRouter.setChainHandler([&](const std::filesystem::path& p) {
+        auto* dawAdapter = praccy::state::UniversalDawInteropManager::instance().findAdapter(p);
+        if (dawAdapter) {
+            praccy::state::UniversalDawInteropManager::instance().importAndApply(p, graph, scenes, scanner);
+        } else if (std::filesystem::exists(p) && scenes.loadFromFile(p.string())) {
+            scenes.applyScene(0, graph, true /* allowAsync */);
+        } else {
+            rackView.loadPresetChain(p.stem().string());
+        }
+    });
 
     asio.setAudioCallback([&](const praccy::audio::AudioBufferView& in, praccy::audio::AudioBufferView& out) {
         auto t0 = std::chrono::high_resolution_clock::now();
@@ -384,17 +476,30 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             }
         }
 
-        // 2. Process Audio Graph Engine
-        graph.process(in, out);
+        // 2. Build Live Audio Transport Context (F-12) and Process Audio Graph Engine
+        const uint32_t outCh = out.numChannels();
+        const size_t numSamples = out.numSamples();
+        static int64_t s_projectTimeSamples = 0;
+
+        praccy::audio::AudioProcessContext ctx{};
+        ctx.input = in;
+        ctx.output = out;
+        ctx.sampleRate = asio.currentSampleRate();
+        ctx.numSamples = static_cast<uint32_t>(numSamples);
+        ctx.tempoBpm = (static_cast<double>(metronome.bpm()) > 1.0) ? static_cast<double>(metronome.bpm()) : 120.0;
+        ctx.timeSigNumerator = (metronome.beatsPerBar() > 0) ? metronome.beatsPerBar() : 4;
+        ctx.timeSigDenominator = (metronome.timeSigDenominator() > 0) ? metronome.timeSigDenominator() : 4;
+        ctx.projectTimeSamples = s_projectTimeSamples;
+
+        graph.process(in, out, ctx);
+        s_projectTimeSamples += static_cast<int64_t>(numSamples);
 
         // 3. Process Practice Tools (Looper, Backing Track Player, Metronome)
-        looper.process(in, out);
+        looper.process(out, out);
         player.process(out);
         metronome.process(out);
 
         // 4. Retroactive Riff Buffer: capture live processed audio frames
-        const uint32_t outCh = out.numChannels();
-        const size_t numSamples = out.numSamples();
         if (numSamples > 0 && outCh > 0) {
             const float* outL = out.channel(0);
             const float* outR = (outCh > 1) ? out.channel(1) : outL;
@@ -418,6 +523,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         }
     });
 
+    auto prepareAndStartAsio = [&]() {
+        double sRate = asio.currentSampleRate();
+        if (sRate <= 0.0) sRate = 48000.0;
+        const auto& dInfo = asio.driverInfo();
+        uint32_t bufSize = (dInfo.preferredBufferSize > 0) ? static_cast<uint32_t>(dInfo.preferredBufferSize) : 256;
+        rackView.applyAudioSettings(sRate, bufSize);
+    };
+
     // Auto-select and start ASIO driver (prioritizing last saved driver, then hardware USB)
     auto drivers = praccy::audio::AsioManager::enumerateDrivers();
     int activeDriverIdx = -1;
@@ -428,7 +541,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             if (drivers[i].name == appConfig.lastAsioDriver) {
                 if (asio.loadDriver(drivers[i], hwnd)) {
                     activeDriverIdx = static_cast<int>(i);
-                    asio.start();
+                    prepareAndStartAsio();
                     break;
                 }
             }
@@ -441,7 +554,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             if (drivers[i].name.find("USB") != std::string::npos) {
                 if (asio.loadDriver(drivers[i], hwnd)) {
                     activeDriverIdx = static_cast<int>(i);
-                    asio.start();
+                    prepareAndStartAsio();
                     break;
                 }
             }
@@ -453,36 +566,81 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         for (size_t i = 0; i < drivers.size(); ++i) {
             if (asio.loadDriver(drivers[i], hwnd)) {
                 activeDriverIdx = static_cast<int>(i);
-                asio.start();
+                prepareAndStartAsio();
                 break;
             }
         }
     }
 
-    // Connect MIDI bindings callback
+    // Connect MIDI bindings callback (defer SceneSelect off WinMM interrupt thread to UI thread)
+    std::atomic<int> pendingMidiSceneIndex{-1};
     midi.setBindingCallback([&](const praccy::midi::MidiBinding& binding, float normVal) {
-        if (binding.targetType == praccy::midi::BindingTargetType::SlotBypass) {
-            auto* node = graph.getNode(binding.targetSlotIndex);
-            if (node) node->setBypassed(!node->isBypassed());
-        } else if (binding.targetType == praccy::midi::BindingTargetType::SlotDryWet) {
-            auto* slot = dynamic_cast<praccy::audio::PluginSlot*>(graph.getNode(binding.targetSlotIndex));
-            if (slot) slot->setDryWet(normVal);
-        } else if (binding.targetType == praccy::midi::BindingTargetType::SceneSelect) {
-            scenes.applyScene(binding.targetSceneIndex, graph);
+        if (binding.targetType == praccy::midi::BindingTargetType::SceneSelect) {
+            pendingMidiSceneIndex.store(binding.targetSceneIndex, std::memory_order_release);
         } else if (binding.targetType == praccy::midi::BindingTargetType::MasterVolume) {
             graph.setMasterVolumeDb(-36.0f + (normVal * 42.0f));
+        } else {
+            graph.dispatchBindingThreadSafe(
+                binding.targetType,
+                binding.targetSlotIndex,
+                binding.targetBranchIndex,
+                binding.targetBranchSlotIndex,
+                binding.paramId,
+                normVal);
+        }
+    });
+
+    midi.setFlatBindingCallback([&](const praccy::midi::FlatCcBinding& flatBinding, float mappedVal) {
+        if (flatBinding.count > 0) {
+            for (uint8_t i = 0; i < flatBinding.count; ++i) {
+                const auto& b = flatBinding.bindings[i];
+                if (b.targetType == praccy::midi::BindingTargetType::SceneSelect) {
+                    pendingMidiSceneIndex.store(b.targetSceneIndex, std::memory_order_release);
+                } else if (b.targetType == praccy::midi::BindingTargetType::MasterVolume) {
+                    graph.setMasterVolumeDb(-36.0f + (mappedVal * 42.0f));
+                } else {
+                    graph.dispatchBindingThreadSafe(
+                        b.targetType,
+                        b.targetSlotIndex,
+                        b.targetBranchIndex,
+                        b.targetBranchSlotIndex,
+                        b.paramId,
+                        mappedVal);
+                }
+            }
+        } else {
+            const auto& b = flatBinding.binding;
+            if (b.targetType == praccy::midi::BindingTargetType::SceneSelect) {
+                pendingMidiSceneIndex.store(b.targetSceneIndex, std::memory_order_release);
+            } else if (b.targetType == praccy::midi::BindingTargetType::MasterVolume) {
+                graph.setMasterVolumeDb(-36.0f + (mappedVal * 42.0f));
+            } else {
+                graph.dispatchBindingThreadSafe(
+                    b.targetType,
+                    b.targetSlotIndex,
+                    b.targetBranchIndex,
+                    b.targetBranchSlotIndex,
+                    b.paramId,
+                    mappedVal);
+            }
         }
     });
 
     // Pre-render and present the first frame to the swapchain backbuffer
-    // BEFORE showing the window. This completely eliminates any white window flash or hang,
-    // ensuring the window appears instantly in its fully styled dark state.
+    // BEFORE showing the window. This completely eliminates any window flash or hang,
+    // ensuring the window appears instantly in its fully styled theme state.
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
     rackView.render();
     ImGui::Render();
-    const float clear_color[4] = { 0.11f, 0.12f, 0.14f, 1.00f };
+    const auto& initTheme = praccy::ui::themeTokens();
+    const float clear_color[4] = {
+        initTheme.surfaces.windowBg.r,
+        initTheme.surfaces.windowBg.g,
+        initTheme.surfaces.windowBg.b,
+        1.00f
+    };
     g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
     g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
@@ -496,8 +654,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
     UpdateWindow(hwnd);
 
+    praccy::ui::ThemeId activeThemeId = initTheme.id;
+
     // Main event loop
     bool done = false;
+
     while (!done) {
         MSG msg;
         while (PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
@@ -509,6 +670,28 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         }
         if (done) break;
 
+        // Drain deferred MIDI scene switches on the main UI thread (safe for HWND teardown & disk I/O)
+        const int reqScene = pendingMidiSceneIndex.exchange(-1, std::memory_order_acquire);
+        if (reqScene >= 0) {
+            rackView.recallScene(static_cast<size_t>(reqScene));
+        }
+
+        // Throttle rendering when window is minimized to keep background CPU/GPU at zero
+        if (IsIconic(hwnd)) {
+            Sleep(16);
+            continue;
+        }
+
+        // Deferred Pre-Frame WM_DPICHANGED Font Atlas Rebuild (F-22)
+        if (float newDpi = g_pendingDpiScale.exchange(0.0f, std::memory_order_acq_rel); newDpi > 0.0f) {
+            praccy::ui::setDpiScale(newDpi);
+            praccy::ui::applyTheme(praccy::ui::themeTokens().id);
+            io.Fonts->Clear();
+            loadApplicationFonts(io, newDpi);
+            ImGui_ImplDX11_InvalidateDeviceObjects();
+            ImGui_ImplDX11_CreateDeviceObjects();
+        }
+
         // Start Dear ImGui frame
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
@@ -516,17 +699,39 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         rackView.render();
 
+        const auto& curTokens = praccy::ui::themeTokens();
+        if (curTokens.id != activeThemeId) {
+            activeThemeId = curTokens.id;
+            enableWin32DarkTitleBar(hwnd, curTokens.isDark);
+            const COLORREF newBgCol = RGB(
+                static_cast<BYTE>(curTokens.surfaces.windowBg.r * 255.0f + 0.5f),
+                static_cast<BYTE>(curTokens.surfaces.windowBg.g * 255.0f + 0.5f),
+                static_cast<BYTE>(curTokens.surfaces.windowBg.b * 255.0f + 0.5f)
+            );
+            praccy::plugins::PluginWindowManager::instance().updateTheme(curTokens.isDark, newBgCol);
+        }
+
+        const float frame_clear_color[4] = {
+            curTokens.surfaces.windowBg.r,
+            curTokens.surfaces.windowBg.g,
+            curTokens.surfaces.windowBg.b,
+            1.00f
+        };
+
         // Rendering
         ImGui::Render();
         g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
-        g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
+        g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, frame_clear_color);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-
         // Present with vsync (1) to keep CPU overhead at near-zero
         g_pSwapChain->Present(1, 0);
     }
 
     // Persist configuration
+    appConfig.load();
+    if (!rackView.activePreset().empty()) {
+        appConfig.lastLoadedPreset = rackView.activePreset();
+    }
     appConfig.inputMode = graph.inputRouting().mode;
     appConfig.inputGainDb = graph.inputGainDb();
     appConfig.masterVolumeDb = graph.masterVolumeDb();
@@ -535,6 +740,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         appConfig.lastAsioDriver = asio.driverInfo().name;
     }
     appConfig.customPluginPaths = scanner.searchPaths();
+    scanner.exportToConfig(appConfig);
+    appConfig.presetFavoritesInitialized = true;
+    appConfig.favoritePresets = rackView.favoritePresets();
     appConfig.saveWindowPlacement(hwnd);
     appConfig.save();
 
@@ -542,6 +750,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     praccy::plugins::PluginWindowManager::instance().closeAllWindows();
 
     asio.stop();
+    graph.setAudioRunning(false);
     asio.unloadDriver();
 
     praccy::ui::ThumbnailManager::instance().shutdown();
@@ -552,7 +761,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     CleanupDeviceD3D();
     DestroyWindow(hwnd);
     UnregisterClassW(wc.lpszClassName, wc.hInstance);
-    if (hDarkBrush) DeleteObject(hDarkBrush);
+    if (hBgBrush) DeleteObject(hBgBrush);
+    OleUninitialize();
 
     return 0;
 }
@@ -566,13 +776,13 @@ bool CreateDeviceD3D(HWND hWnd) {
     sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     sd.BufferDesc.RefreshRate.Numerator = 60;
     sd.BufferDesc.RefreshRate.Denominator = 1;
-    sd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+    sd.Flags = 0;
     sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     sd.OutputWindow = hWnd;
     sd.SampleDesc.Count = 1;
     sd.SampleDesc.Quality = 0;
     sd.Windowed = TRUE;
-    sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
 
     UINT createDeviceFlags = 0;
     D3D_FEATURE_LEVEL featureLevel;
@@ -634,6 +844,11 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 return 0;
             break;
         case WM_DPICHANGED: {
+            const UINT newDpi = HIWORD(wParam);
+            if (newDpi > 0) {
+                const float newScale = static_cast<float>(newDpi) / 96.0f;
+                g_pendingDpiScale.store(newScale, std::memory_order_release);
+            }
             const RECT* prc = reinterpret_cast<const RECT*>(lParam);
             SetWindowPos(hWnd, nullptr,
                 prc->left, prc->top,

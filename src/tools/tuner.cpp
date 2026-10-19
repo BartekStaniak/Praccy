@@ -2,6 +2,9 @@
 #include <array>
 #include <algorithm>
 #include <chrono>
+#if defined(_M_X64) || defined(__x86_64__)
+#include <xmmintrin.h>
+#endif
 
 namespace praccy::tools {
 
@@ -60,11 +63,19 @@ uint32_t AudioRingBuffer::push(const float* in, uint32_t count) noexcept {
 
     const size_t offset = write & m_mask;
     const size_t firstPart = std::min(toWrite, m_capacity - offset);
-    std::memcpy(&m_buffer[offset], in, firstPart * sizeof(float));
+    for (size_t i = 0; i < firstPart; ++i) {
+        float s = in[i];
+        if (!std::isfinite(s)) s = 0.0f;
+        m_buffer[offset + i] = s;
+    }
 
     const size_t secondPart = toWrite - firstPart;
     if (secondPart > 0) {
-        std::memcpy(&m_buffer[0], in + firstPart, secondPart * sizeof(float));
+        for (size_t i = 0; i < secondPart; ++i) {
+            float s = in[firstPart + i];
+            if (!std::isfinite(s)) s = 0.0f;
+            m_buffer[i] = s;
+        }
     }
 
     m_writeHead.store(write + toWrite, std::memory_order_release);
@@ -85,13 +96,17 @@ uint32_t AudioRingBuffer::pushStereo(const float* left, const float* right, uint
     const size_t offset = write & m_mask;
     const size_t firstPart = std::min(toWrite, m_capacity - offset);
     for (size_t i = 0; i < firstPart; ++i) {
-        m_buffer[offset + i] = 0.5f * (left[i] + right[i]);
+        float s = 0.5f * (left[i] + right[i]);
+        if (!std::isfinite(s)) s = 0.0f;
+        m_buffer[offset + i] = s;
     }
 
     const size_t secondPart = toWrite - firstPart;
     if (secondPart > 0) {
         for (size_t i = 0; i < secondPart; ++i) {
-            m_buffer[i] = 0.5f * (left[firstPart + i] + right[firstPart + i]);
+            float s = 0.5f * (left[firstPart + i] + right[firstPart + i]);
+            if (!std::isfinite(s)) s = 0.0f;
+            m_buffer[i] = s;
         }
     }
 
@@ -140,7 +155,13 @@ InstrumentTuner::InstrumentTuner(uint32_t bufferSize)
       m_inputHistory(bufferSize, 0.0f),
       m_drainBuffer(bufferSize, 0.0f),
       m_differenceBuffer(bufferSize / 2, 0.0f),
-      m_cumulativeDiffBuffer(bufferSize / 2, 0.0f) {
+      m_cumulativeDiffBuffer(bufferSize / 2, 0.0f),
+      m_linearWindow(bufferSize, 0.0f) {
+    const uint32_t initCount = static_cast<uint32_t>(std::min(m_config.stringMidiNotes.size(), MAX_TUNER_STRINGS));
+    for (uint32_t i = 0; i < initCount; ++i) {
+        m_atomicStringNotes[i].store(m_config.stringMidiNotes[i], std::memory_order_relaxed);
+    }
+    m_atomicStringCount.store(initCount, std::memory_order_release);
     start();
 }
 
@@ -149,7 +170,14 @@ InstrumentTuner::~InstrumentTuner() {
 }
 
 void InstrumentTuner::prepare(double sampleRate, uint32_t maxBlockSize) {
+    // Fence audio-thread pushSamples() before resizing m_ringBuffer
+    m_preparing.store(true, std::memory_order_seq_cst);
+    while (m_activePushWriters.load(std::memory_order_seq_cst) > 0) {
+        std::this_thread::yield();
+    }
+
     stop();
+    std::lock_guard<std::mutex> dspLock(m_dspMutex);
 
     m_sampleRate = sampleRate;
     m_maxBlockSize = maxBlockSize;
@@ -172,9 +200,11 @@ void InstrumentTuner::prepare(double sampleRate, uint32_t maxBlockSize) {
     m_drainBuffer.assign(m_bufferSize, 0.0f);
     m_differenceBuffer.assign(m_bufferSize / 2, 0.0f);
     m_cumulativeDiffBuffer.assign(m_bufferSize / 2, 0.0f);
+    m_linearWindow.assign(m_bufferSize, 0.0f);
 
     publishResult(false, 0.0f, 0, 0.0f);
 
+    m_preparing.store(false, std::memory_order_release);
     start();
 }
 
@@ -200,16 +230,31 @@ void InstrumentTuner::stop() {
 
 void InstrumentTuner::pushSamples(const float* monoInput, uint32_t numSamples) noexcept {
     if (!m_enabled.load(std::memory_order_relaxed) || !monoInput || numSamples == 0) return;
-    m_ringBuffer.push(monoInput, numSamples);
+    if (m_preparing.load(std::memory_order_acquire)) return;
+    m_activePushWriters.fetch_add(1, std::memory_order_seq_cst);
+    if (!m_preparing.load(std::memory_order_seq_cst)) {
+        m_ringBuffer.push(monoInput, numSamples);
+    }
+    m_activePushWriters.fetch_sub(1, std::memory_order_release);
 }
 
 void InstrumentTuner::pushSamples(const float* left, const float* right, uint32_t numSamples) noexcept {
     if (!m_enabled.load(std::memory_order_relaxed) || !left || !right || numSamples == 0) return;
-    m_ringBuffer.pushStereo(left, right, numSamples);
+    if (m_preparing.load(std::memory_order_acquire)) return;
+    m_activePushWriters.fetch_add(1, std::memory_order_seq_cst);
+    if (!m_preparing.load(std::memory_order_seq_cst)) {
+        m_ringBuffer.pushStereo(left, right, numSamples);
+    }
+    m_activePushWriters.fetch_sub(1, std::memory_order_release);
 }
 
 void InstrumentTuner::process(const float* monoInput, uint32_t numSamples) {
     if (!m_enabled.load(std::memory_order_relaxed) || !monoInput || numSamples == 0) return;
+    std::lock_guard<std::mutex> dspLock(m_dspMutex);
+
+#if defined(_M_X64) || defined(__x86_64__)
+    _mm_setcsr(_mm_getcsr() | 0x8040);
+#endif
 
     if (numSamples >= m_bufferSize) {
         for (uint32_t i = 0; i < numSamples; ++i) {
@@ -217,14 +262,10 @@ void InstrumentTuner::process(const float* monoInput, uint32_t numSamples) {
             m_writeIndex = (m_writeIndex + 1) % m_bufferSize;
         }
     } else {
-        // When fewer samples than m_bufferSize are provided (e.g. offline unit testing with a fixed buffer),
-        // populate m_inputHistory smoothly so the full analysis window is available for YIN detection.
         for (uint32_t i = 0; i < numSamples; ++i) {
             m_inputHistory[i] = monoInput[i];
         }
 
-        // Extrapolate periodic wave using 2nd-order autoregressive continuation:
-        // x[n+1] = 2*cos(omega)*x[n] - x[n-1]
         double sumCross = 0.0;
         double sumSq = 0.0;
         for (uint32_t i = 1; i + 1 < numSamples; ++i) {
@@ -257,6 +298,10 @@ void InstrumentTuner::process(const float* monoInput, uint32_t numSamples) {
 }
 
 void InstrumentTuner::workerLoop() {
+#if defined(_M_X64) || defined(__x86_64__)
+    // Hardware denormal prevention (FTZ + DAZ) on background YIN autocorrelation worker thread
+    _mm_setcsr(_mm_getcsr() | 0x8040);
+#endif
     constexpr auto interval = std::chrono::milliseconds(16); // ~60 Hz update rate
 
     while (m_workerRunning.load(std::memory_order_acquire)) {
@@ -274,10 +319,10 @@ void InstrumentTuner::workerLoop() {
             continue;
         }
 
+        std::lock_guard<std::mutex> dspLock(m_dspMutex);
         size_t available = m_ringBuffer.availableToRead();
         if (available == 0) continue;
 
-        // If background thread was delayed, skip old samples to maintain current audio latency
         if (available > m_bufferSize) {
             m_ringBuffer.skip(available - m_bufferSize);
             available = m_bufferSize;
@@ -296,10 +341,19 @@ void InstrumentTuner::workerLoop() {
 void InstrumentTuner::detectPitchYin() {
     const uint32_t halfBuffer = m_bufferSize / 2;
 
-    // Check minimum signal energy (RMS threshold) to avoid tracking background noise
+    if (m_linearWindow.size() < m_bufferSize) {
+        m_linearWindow.resize(m_bufferSize, 0.0f);
+    }
+    const uint32_t startIdx = m_writeIndex % m_bufferSize;
+    const uint32_t firstPart = m_bufferSize - startIdx;
+    std::memcpy(m_linearWindow.data(), m_inputHistory.data() + startIdx, firstPart * sizeof(float));
+    if (startIdx > 0) {
+        std::memcpy(m_linearWindow.data() + firstPart, m_inputHistory.data(), startIdx * sizeof(float));
+    }
+
     float energy = 0.0f;
     for (uint32_t i = 0; i < m_bufferSize; ++i) {
-        energy += m_inputHistory[i] * m_inputHistory[i];
+        energy += m_linearWindow[i] * m_linearWindow[i];
     }
     const float rms = std::sqrt(energy / static_cast<float>(m_bufferSize));
     if (rms < 0.005f) { // -46 dB noise gate for tuner
@@ -307,19 +361,17 @@ void InstrumentTuner::detectPitchYin() {
         return;
     }
 
-    // Step 1: Difference function
+    const float* w0 = m_linearWindow.data();
     for (uint32_t tau = 0; tau < halfBuffer; ++tau) {
+        const float* wTau = w0 + tau;
         float sum = 0.0f;
         for (uint32_t j = 0; j < halfBuffer; ++j) {
-            const uint32_t idx1 = (m_writeIndex + j) % m_bufferSize;
-            const uint32_t idx2 = (m_writeIndex + j + tau) % m_bufferSize;
-            const float diff = m_inputHistory[idx1] - m_inputHistory[idx2];
+            const float diff = w0[j] - wTau[j];
             sum += diff * diff;
         }
         m_differenceBuffer[tau] = sum;
     }
 
-    // Step 2: Cumulative mean normalized difference
     m_cumulativeDiffBuffer[0] = 1.0f;
     float runningSum = 0.0f;
     for (uint32_t tau = 1; tau < halfBuffer; ++tau) {
@@ -331,7 +383,6 @@ void InstrumentTuner::detectPitchYin() {
         }
     }
 
-    // Step 3: Absolute threshold
     uint32_t tauFound = 0;
     for (uint32_t tau = 2; tau < halfBuffer; ++tau) {
         if (m_cumulativeDiffBuffer[tau] < m_yinThreshold) {
@@ -348,7 +399,6 @@ void InstrumentTuner::detectPitchYin() {
         return;
     }
 
-    // Step 4: Parabolic interpolation
     float betterTau = static_cast<float>(tauFound);
     if (tauFound > 0 && tauFound + 1 < halfBuffer) {
         const float s0 = m_cumulativeDiffBuffer[tauFound - 1];
@@ -365,15 +415,15 @@ void InstrumentTuner::detectPitchYin() {
         return;
     }
 
-    // Step 5: Frequency calculation
     const float freq = static_cast<float>(m_sampleRate) / betterTau;
     if (freq < 20.0f || freq > 2000.0f) {
         publishResult(false, 0.0f, 0, 0.0f);
         return;
     }
 
-    // Convert to MIDI Note number (A4 = 440 Hz = note 69)
-    const float midiNoteExact = 69.0f + 12.0f * std::log2(freq / 440.0f);
+    const float a4Ref = m_a4Reference.load(std::memory_order_relaxed);
+    const float safeA4 = (a4Ref >= 300.0f && a4Ref <= 600.0f) ? a4Ref : 440.0f;
+    const float midiNoteExact = 69.0f + 12.0f * std::log2(freq / safeA4);
     const int roundedNote = static_cast<int>(std::round(midiNoteExact));
     const float cents = (midiNoteExact - static_cast<float>(roundedNote)) * 100.0f;
 
@@ -381,43 +431,59 @@ void InstrumentTuner::detectPitchYin() {
 }
 
 void InstrumentTuner::publishResult(bool hasPitch, float freq, int note, float cents) {
-    // Advance sequence to odd number (in-progress marker)
     uint32_t seq = m_resultSeq.load(std::memory_order_relaxed);
-    m_resultSeq.store(seq + 1, std::memory_order_release);
+    m_resultSeq.store(seq + 1, std::memory_order_seq_cst);
 
     m_detectedFreq.store(freq, std::memory_order_relaxed);
     m_detectedMidiNote.store(note, std::memory_order_relaxed);
     m_detectedCents.store(cents, std::memory_order_relaxed);
-    m_hasPitch.store(hasPitch, std::memory_order_relaxed);
+    m_hasPitch.store(hasPitch, std::memory_order_release);
 
-    // Complete write: sequence becomes even
     m_resultSeq.store(seq + 2, std::memory_order_release);
 }
 
 TunerResult InstrumentTuner::currentResult() const {
     TunerResult result;
+    if (!m_enabled.load(std::memory_order_relaxed)) {
+        result.confidence = false;
+        result.noteName = "--";
+        result.frequencyHz = 0.0f;
+        result.centDeviation = 0.0f;
+        result.matchedStringIndex = -1;
+        return result;
+    }
+
     bool hasPitch = false;
     float freq = 0.0f;
     int note = 0;
     float cents = 0.0f;
 
-    // Seqlock read loop (wait-free, optimistic snapshot)
     uint32_t seq1 = 0, seq2 = 0;
     int retryCount = 0;
     do {
         seq1 = m_resultSeq.load(std::memory_order_acquire);
-        if (seq1 & 1) { // Writer currently modifying data
+        if (seq1 & 1) {
+            seq2 = seq1 + 1;
             std::this_thread::yield();
             continue;
         }
 
-        hasPitch = m_hasPitch.load(std::memory_order_relaxed);
+        hasPitch = m_hasPitch.load(std::memory_order_acquire);
         freq = m_detectedFreq.load(std::memory_order_relaxed);
         note = m_detectedMidiNote.load(std::memory_order_relaxed);
         cents = m_detectedCents.load(std::memory_order_relaxed);
 
-        seq2 = m_resultSeq.load(std::memory_order_acquire);
+        seq2 = m_resultSeq.load(std::memory_order_seq_cst);
     } while (seq1 != seq2 && ++retryCount < 10);
+
+    if (seq1 != seq2 || (seq1 & 1)) {
+        result.confidence = false;
+        result.noteName = "--";
+        result.frequencyHz = 0.0f;
+        result.centDeviation = 0.0f;
+        result.matchedStringIndex = -1;
+        return result;
+    }
 
     result.confidence = hasPitch;
     if (!result.confidence) {
@@ -431,7 +497,33 @@ TunerResult InstrumentTuner::currentResult() const {
 
     const int noteIndex = (result.noteNumber % 12 + 12) % 12;
     const int octave = (result.noteNumber / 12) - 1;
-    result.noteName = std::string(NOTE_NAMES[noteIndex]) + std::to_string(octave);
+    result.noteName.setNote(NOTE_NAMES[noteIndex], octave);
+
+    const float a4Ref = m_a4Reference.load(std::memory_order_relaxed);
+    const float safeA4 = (a4Ref >= 300.0f && a4Ref <= 600.0f) ? a4Ref : 440.0f;
+    int bestStringIdx = -1;
+    float bestCentsDiff = 9999.0f;
+    float bestTargetFreq = 0.0f;
+
+    // Acquire pairs with setConfig release store; zero mutex locks on UI thread
+    const uint32_t strCount = std::min<uint32_t>(m_atomicStringCount.load(std::memory_order_acquire),
+                                                 static_cast<uint32_t>(MAX_TUNER_STRINGS));
+    for (uint32_t i = 0; i < strCount; ++i) {
+        const int strMidi = m_atomicStringNotes[i].load(std::memory_order_relaxed);
+        const float strTargetFreq = safeA4 * std::pow(2.0f, (static_cast<float>(strMidi) - 69.0f) / 12.0f);
+        const float centsDiff = 1200.0f * std::log2(freq / strTargetFreq);
+        if (std::abs(centsDiff) < std::abs(bestCentsDiff)) {
+            bestCentsDiff = centsDiff;
+            bestStringIdx = static_cast<int>(i);
+            bestTargetFreq = strTargetFreq;
+        }
+    }
+
+    if (bestStringIdx >= 0 && std::abs(bestCentsDiff) <= 120.0f) {
+        result.matchedStringIndex = bestStringIdx;
+        result.targetFrequencyHz = bestTargetFreq;
+        result.stringCentDeviation = bestCentsDiff;
+    }
 
     return result;
 }

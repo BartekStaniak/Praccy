@@ -6,12 +6,15 @@
 #include "../../plugins/builtin_dsp.h"
 #include "../../plugins/vst3_host.h"
 #include "../../plugins/clap_host.h"
+#include "../../plugins/async_plugin_loader.h"
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <cstdio>
 #include <memory>
+#include <filesystem>
 
 namespace praccy::ui {
 
@@ -38,6 +41,22 @@ std::string cleanPluginName(std::string_view rawName) {
         name.pop_back();
     }
     return name;
+}
+
+bool matchesFavorite(const std::string& fav, const std::string& target) {
+    if (fav.empty() || target.empty()) return false;
+    if (fav == target) return true;
+
+    std::filesystem::path pFav(fav);
+    std::filesystem::path pTarget(target);
+    std::string favStem = pFav.stem().string();
+    std::string targetStem = pTarget.stem().string();
+
+    if (favStem == target || fav == targetStem || favStem == targetStem) return true;
+
+    std::string cleanFav = toLower(cleanPluginName(favStem));
+    std::string cleanTarget = toLower(cleanPluginName(targetStem));
+    return !cleanFav.empty() && cleanFav == cleanTarget;
 }
 
 int calculateFuzzyScore(std::string_view query, const plugins::PluginDescriptor& desc) {
@@ -100,7 +119,8 @@ int calculateFuzzyScore(std::string_view query, const plugins::PluginDescriptor&
     }
 
     if (qIdx == q.length()) {
-        score = std::max(score, subseqScore);
+        // Cap non-contiguous subsequence matches below substring tier (1000)
+        score = std::max(score, std::min(subseqScore, 950));
     }
 
     if (cleanName != q && score >= 2000) {
@@ -120,6 +140,9 @@ PluginBrowserModal::PluginBrowserModal(plugins::PluginScanner& scanner, audio::G
     if (cfg.load()) {
         m_recentPlugins = cfg.recentPlugins;
         m_favoritePlugins = cfg.favoritePlugins;
+        m_scanner.setFavorites(m_favoritePlugins);
+    } else {
+        m_favoritePlugins = m_scanner.favorites();
     }
 }
 
@@ -127,6 +150,7 @@ void PluginBrowserModal::open(int targetBlockIndex, int targetBranchIndex) {
     m_targetBlockIndex = targetBlockIndex;
     m_targetBranchIndex = targetBranchIndex;
     m_isOpen = true;
+    m_justOpened = true;
     m_needsFocus = true;
     m_scrollSelectionIntoView = true;
     m_selectedIndex = 0;
@@ -138,6 +162,9 @@ void PluginBrowserModal::open(int targetBlockIndex, int targetBranchIndex) {
     if (cfg.load()) {
         m_recentPlugins = cfg.recentPlugins;
         m_favoritePlugins = cfg.favoritePlugins;
+        m_scanner.setFavorites(m_favoritePlugins);
+    } else {
+        m_favoritePlugins = m_scanner.favorites();
     }
 
     m_allPlugins = m_scanner.scannedPlugins();
@@ -167,14 +194,13 @@ void PluginBrowserModal::setScope(PaletteScope scope) {
 }
 
 void PluginBrowserModal::cycleScope() {
-    uint8_t next = (static_cast<uint8_t>(m_currentScope) + 1) % 3;
+    uint8_t next = static_cast<uint8_t>((static_cast<uint8_t>(m_currentScope) + 1) % 3);
     setScope(static_cast<PaletteScope>(next));
 }
 
 bool PluginBrowserModal::isFavorite(const std::string& pluginName) const {
-    std::string clean = cleanPluginName(pluginName);
     for (const auto& fav : m_favoritePlugins) {
-        if (fav == pluginName || cleanPluginName(fav) == clean) {
+        if (matchesFavorite(fav, pluginName)) {
             return true;
         }
     }
@@ -182,9 +208,8 @@ bool PluginBrowserModal::isFavorite(const std::string& pluginName) const {
 }
 
 void PluginBrowserModal::toggleFavorite(const std::string& pluginName) {
-    std::string targetClean = cleanPluginName(pluginName);
     auto it = std::find_if(m_favoritePlugins.begin(), m_favoritePlugins.end(), [&](const std::string& f) {
-        return f == pluginName || cleanPluginName(f) == targetClean;
+        return matchesFavorite(f, pluginName);
     });
 
     if (it != m_favoritePlugins.end()) {
@@ -198,14 +223,20 @@ void PluginBrowserModal::toggleFavorite(const std::string& pluginName) {
     cfg.favoritePlugins = m_favoritePlugins;
     cfg.save();
 
-    updateFilteredList();
+    m_scanner.setFavorites(m_favoritePlugins);
+
+    m_filterDirty = true;
 }
 
 void PluginBrowserModal::toggleFavoriteForSelected() {
-    if (m_selectedIndex >= 0 && m_selectedIndex < static_cast<int>(m_filteredItems.size())) {
-        const auto* desc = m_filteredItems[m_selectedIndex].descriptor;
+    int targetIdx = (m_hoveredIndex >= 0 && m_hoveredIndex < static_cast<int>(m_filteredItems.size()))
+                        ? m_hoveredIndex
+                        : m_selectedIndex;
+    if (targetIdx >= 0 && targetIdx < static_cast<int>(m_filteredItems.size())) {
+        const auto* desc = m_filteredItems[targetIdx].descriptor;
         if (desc) {
-            toggleFavorite(desc->name);
+            const std::string name = desc->name;
+            toggleFavorite(name);
         }
     }
 }
@@ -229,11 +260,12 @@ int PluginBrowserModal::SearchInputCallback(ImGuiInputTextCallbackData* data) {
 
 void PluginBrowserModal::updateFilteredList() {
     m_filteredItems.clear();
+    m_allPlugins = m_scanner.scannedPlugins();
     const auto& allPlugins = m_allPlugins;
 
     auto matchesScope = [this](const plugins::PluginDescriptor& p) -> bool {
         if (m_currentScope == PaletteScope::Favorites) {
-            return isFavorite(p.name);
+            return isFavorite(p.name) || isFavorite(p.path);
         } else if (m_currentScope == PaletteScope::Recents) {
             return std::find(m_recentPlugins.begin(), m_recentPlugins.end(), p.name) != m_recentPlugins.end();
         }
@@ -246,9 +278,8 @@ void PluginBrowserModal::updateFilteredList() {
             // 1. Favorites pinned at top
             std::vector<const plugins::PluginDescriptor*> favorites;
             for (const auto& favName : m_favoritePlugins) {
-                std::string cleanFav = cleanPluginName(favName);
                 for (const auto& p : allPlugins) {
-                    if (p.name == favName || cleanPluginName(p.name) == cleanFav) {
+                    if (matchesFavorite(favName, p.name) || matchesFavorite(favName, p.path)) {
                         if (std::find(favorites.begin(), favorites.end(), &p) == favorites.end()) {
                             favorites.push_back(&p);
                         }
@@ -287,7 +318,7 @@ void PluginBrowserModal::updateFilteredList() {
                 PaletteItem item;
                 item.descriptor = p;
                 item.score = 1000;
-                item.isFavorite = isFavorite(p->name);
+                item.isFavorite = isFavorite(p->name) || isFavorite(p->path);
                 item.isRecent = true;
                 m_filteredItems.push_back(item);
             }
@@ -309,14 +340,14 @@ void PluginBrowserModal::updateFilteredList() {
                 PaletteItem item;
                 item.descriptor = p;
                 item.score = 0;
-                item.isFavorite = isFavorite(p->name);
+                item.isFavorite = isFavorite(p->name) || isFavorite(p->path);
                 item.isRecent = false;
                 m_filteredItems.push_back(item);
             }
         } else if (m_currentScope == PaletteScope::Favorites) {
             std::vector<const plugins::PluginDescriptor*> favList;
             for (const auto& p : allPlugins) {
-                if (isFavorite(p.name)) {
+                if (isFavorite(p.name) || isFavorite(p.path)) {
                     favList.push_back(&p);
                 }
             }
@@ -338,7 +369,7 @@ void PluginBrowserModal::updateFilteredList() {
                         PaletteItem item;
                         item.descriptor = &p;
                         item.score = 0;
-                        item.isFavorite = isFavorite(p.name);
+                        item.isFavorite = isFavorite(p.name) || isFavorite(p.path);
                         item.isRecent = true;
                         m_filteredItems.push_back(item);
                         break;
@@ -353,7 +384,7 @@ void PluginBrowserModal::updateFilteredList() {
 
             int score = calculateFuzzyScore(m_searchQuery, p);
             if (score > 0) {
-                bool fav = isFavorite(p.name);
+                bool fav = isFavorite(p.name) || isFavorite(p.path);
                 if (fav) {
                     score += 250; // Search score boost for favorites
                 }
@@ -370,6 +401,13 @@ void PluginBrowserModal::updateFilteredList() {
             if (a.score != b.score) return a.score > b.score;
             return a.descriptor->name < b.descriptor->name;
         });
+    }
+
+    for (auto& item : m_filteredItems) {
+        if (item.descriptor) {
+            item.displayName = cleanPluginName(item.descriptor->name);
+            item.categoryName = m_scanner.getPluginCategory(item.descriptor->name, item.descriptor->vendor);
+        }
     }
 
     if (m_selectedIndex >= static_cast<int>(m_filteredItems.size())) {
@@ -401,12 +439,10 @@ void PluginBrowserModal::instantiateSelectedPlugin() {
     const auto* desc = m_filteredItems[m_selectedIndex].descriptor;
     if (!desc) return;
 
-    std::unique_ptr<audio::AudioNode> innerNode;
-    if (desc->type == plugins::PluginType::VST3) {
-        innerNode = plugins::Vst3PluginInstance::loadFromFile(desc->path);
-    } else if (desc->type == plugins::PluginType::CLAP) {
-        innerNode = plugins::ClapPluginInstance::loadFromFile(desc->path);
-    } else {
+    std::string pluginName = desc->name;
+
+    if (desc->type == plugins::PluginType::BuiltIn) {
+        std::unique_ptr<audio::AudioNode> innerNode;
         if (desc->path == "builtin://drive" || desc->name.find("Drive") != std::string::npos || desc->name.find("Overdrive") != std::string::npos) {
             innerNode = std::make_unique<plugins::OverdriveEffect>();
         } else if (desc->path == "builtin://amp" || desc->name.find("Amp") != std::string::npos) {
@@ -416,26 +452,55 @@ void PluginBrowserModal::instantiateSelectedPlugin() {
         } else {
             innerNode = std::make_unique<plugins::OverdriveEffect>();
         }
-    }
 
-    if (!innerNode) {
-        close();
-        return;
-    }
+        auto slot = std::make_unique<audio::PluginSlot>(std::move(innerNode));
 
-    auto slot = std::make_unique<audio::PluginSlot>(std::move(innerNode));
-    std::string pluginName = desc->name;
-
-    if (m_targetBranchIndex != -1 && m_targetBlockIndex != -1) {
-        auto* block = dynamic_cast<audio::ParallelSplitMergeBlock*>(m_graph.getNode(m_targetBlockIndex));
-        if (block) {
-            auto* branch = block->getBranch(m_targetBranchIndex);
-            if (branch) {
-                branch->addSlot(std::move(slot));
+        if (m_targetBranchIndex != -1 && m_targetBlockIndex != -1) {
+            auto* block = dynamic_cast<audio::ParallelSplitMergeBlock*>(m_graph.getNode(m_targetBlockIndex));
+            if (block) {
+                auto* branch = block->getBranch(m_targetBranchIndex);
+                if (branch) {
+                    branch->addSlot(std::move(slot));
+                }
             }
+        } else {
+            m_graph.addSerialNode(std::move(slot));
         }
     } else {
-        m_graph.addSerialNode(std::move(slot));
+        // VST3 or CLAP: Create Loading placeholder & queue background load
+        auto placeholder = std::make_unique<audio::LoadingPluginPlaceholder>(
+            desc->name,
+            desc->vendor,
+            desc->typeString(),
+            desc->path,
+            desc->category
+        );
+        auto slot = std::make_unique<audio::PluginSlot>(std::move(placeholder));
+        audio::PluginSlot* slotPtr = slot.get();
+
+        if (m_targetBranchIndex != -1 && m_targetBlockIndex != -1) {
+            auto* block = dynamic_cast<audio::ParallelSplitMergeBlock*>(m_graph.getNode(m_targetBlockIndex));
+            if (block) {
+                auto* branch = block->getBranch(m_targetBranchIndex);
+                if (branch) {
+                    branch->addSlot(std::move(slot));
+                }
+            }
+        } else {
+            m_graph.addSerialNode(std::move(slot));
+        }
+
+        plugins::AsyncPluginLoader::instance().enqueueLoad(
+            slotPtr,
+            desc->path,
+            desc->type,
+            desc->name,
+            desc->vendor,
+            {},
+            m_graph.sampleRate(),
+            m_graph.maxBlockSize(),
+            true // openGuiWhenDone = true
+        );
     }
 
     recordPluginUsage(*desc);
@@ -454,9 +519,13 @@ void PluginBrowserModal::renderPluginRow(int index, float rowH) {
     const auto& item = m_filteredItems[index];
     const auto* desc = item.descriptor;
     if (!desc) return;
+    const std::string& pluginName = desc->name;
+    const std::string& pluginVendor = desc->vendor;
+    const plugins::PluginType pluginType = desc->type;
 
     const bool isSelected = (index == m_selectedIndex);
     ImGui::PushID(index);
+    ImGui::PushID(desc->path.empty() ? desc->name.c_str() : desc->path.c_str());
 
     ImVec2 rowPos = ImGui::GetCursorScreenPos();
     const float rowW = ImGui::GetContentRegionAvail().x;
@@ -466,7 +535,14 @@ void PluginBrowserModal::renderPluginRow(int index, float rowH) {
     // Selectable background row
     char selId[32];
     std::snprintf(selId, sizeof(selId), "##SelRow_%d", index);
-    bool clicked = ImGui::Selectable(selId, isSelected, ImGuiSelectableFlags_SpanAllColumns, ImVec2(0.0f, rowH));
+    bool clicked = ImGui::Selectable(selId, isSelected,
+                                     ImGuiSelectableFlags_SpanAllColumns |
+                                     ImGuiSelectableFlags_AllowOverlap |
+                                     ImGuiSelectableFlags_NoPadWithHalfSpacing,
+                                     ImVec2(0.0f, rowH));
+    if (ImGui::IsItemHovered()) {
+        m_hoveredIndex = index;
+    }
 
     if (isSelected) {
         dl->AddRectFilled(rowPos, ImVec2(rowPos.x + rowW, rowPos.y + rowH), tokens.surfaces.cardBgSelected, 4.0f);
@@ -474,65 +550,114 @@ void PluginBrowserModal::renderPluginRow(int index, float rowH) {
         dl->AddRectFilled(rowPos, ImVec2(rowPos.x + 3.0f, rowPos.y + rowH), tokens.borders.focus, 2.0f);
     }
 
-    // Row contents
-    ImGui::SameLine(6.0f);
+    // Row contents with unified vertical centering
+    const float starSz = 20.0f;
+    const float badgeH = 18.0f;
+    const float fontH = ImGui::GetFontSize();
 
-    // 1. Star / Favorite Button
+    // 1. Star / Favorite Button (centered in rowH)
+    float curX = rowPos.x + 8.0f;
+    float starY = rowPos.y + (rowH - starSz) * 0.5f;
+    ImGui::SetCursorScreenPos(ImVec2(curX, starY));
     char starId[32];
     std::snprintf(starId, sizeof(starId), "##Star_%d", index);
-    ImGui::AlignTextToFramePadding();
-    if (renderCenteredStarButton(starId, ImVec2(20.0f, 20.0f), item.isFavorite)) {
-        toggleFavorite(desc->name);
+    if (renderCenteredStarButton(starId, ImVec2(starSz, starSz), item.isFavorite)) {
+        toggleFavorite(pluginName);
     }
+    curX += starSz + 8.0f;
 
-    // 2. Format Badge
-    ImGui::SameLine(0, 6.0f);
+    // 2. Format Badge (centered in rowH)
     const char* badgeStr = "DSP";
     ImU32 badgeText = tokens.text.badgeInternal;
-    if (desc->type == plugins::PluginType::VST3) {
+    if (pluginType == plugins::PluginType::VST3) {
         badgeStr = "VST3";
         badgeText = tokens.text.badgeVst3;
-    } else if (desc->type == plugins::PluginType::CLAP) {
+    } else if (pluginType == plugins::PluginType::CLAP) {
         badgeStr = "CLAP";
         badgeText = tokens.text.badgeClap;
     }
-    renderBadgePill(badgeStr, tokens.surfaces.frameBg, tokens.borders.subtle, badgeText, 18.0f);
+    float badgeY = rowPos.y + (rowH - badgeH) * 0.5f;
+    ImGui::SetCursorScreenPos(ImVec2(curX, badgeY));
+    renderBadgePill(badgeStr, tokens.surfaces.frameBg, tokens.borders.subtle, badgeText, badgeH);
+    ImVec2 badgeSz = ImGui::CalcTextSize(badgeStr);
+    curX += (badgeSz.x + 12.0f) + 10.0f;
 
-    // 3. Clean Plugin Title (suffix clutter stripped)
-    ImGui::SameLine(0, 8.0f);
-    ImGui::AlignTextToFramePadding();
-    std::string displayName = cleanPluginName(desc->name);
+    // 3. Clean Plugin Title (cached in PaletteItem during updateFilteredList)
+    float textY = rowPos.y + (rowH - fontH) * 0.5f;
+    ImGui::SetCursorScreenPos(ImVec2(curX, textY));
+    const std::string& displayName = !item.displayName.empty() ? item.displayName : pluginName;
     ImVec4 titleCol = isSelected ? tokens.text.accent.vec4 : tokens.text.primary.vec4;
     ImGui::TextColored(titleCol, "%s", displayName.c_str());
 
     // 4. Vendor / Developer
-    if (!desc->vendor.empty()) {
+    if (!pluginVendor.empty()) {
         ImGui::SameLine(0, 10.0f);
-        ImGui::TextColored(tokens.text.secondary.vec4, "%s", desc->vendor.c_str());
+        ImGui::TextColored(tokens.text.secondary.vec4, "%s", pluginVendor.c_str());
     }
 
-    // 5. Category Badge on right (no double-badging with format badge)
-    if (!desc->category.empty()) {
-        std::string catUpper = desc->category;
-        std::transform(catUpper.begin(), catUpper.end(), catUpper.begin(), [](unsigned char c) {
-            return static_cast<char>(std::toupper(c));
-        });
-        if (catUpper != "VST3" && catUpper != "CLAP" && catUpper != "DSP" && catUpper != badgeStr) {
-            ImVec2 catSz = ImGui::CalcTextSize(desc->category.c_str());
-            float catX = rowPos.x + rowW - catSz.x - 24.0f;
-            if (catX > ImGui::GetCursorScreenPos().x + 20.0f) {
-                ImGui::SameLine(catX - rowPos.x);
-                renderBadgePill(desc->category.c_str(), tokens.surfaces.frameBg, tokens.borders.subtle, tokens.text.muted, 18.0f);
+    // 5. Intelligent Type/Category Capsule on the far right (cached in PaletteItem)
+    const std::string& catName = item.categoryName;
+    bool pillHovered = false;
+    if (!catName.empty()) {
+        ImVec2 catSz = ImGui::CalcTextSize(catName.c_str());
+        const float catPillW = catSz.x + 12.0f;
+        float catX = rowPos.x + rowW - catPillW - 14.0f;
+        if (catX > ImGui::GetCursorScreenPos().x + 20.0f) {
+            float catY = rowPos.y + (rowH - badgeH) * 0.5f;
+            ImGui::SetCursorScreenPos(ImVec2(catX, catY));
+            char catBtnId[64];
+            std::snprintf(catBtnId, sizeof(catBtnId), "##CatPill_%d", index);
+            ImGui::InvisibleButton(catBtnId, ImVec2(catPillW, badgeH));
+            pillHovered = ImGui::IsItemHovered();
+            if (pillHovered) {
+                ImGui::SetTooltip("Category: %s\nRight-click to change category", catName.c_str());
+            }
+
+            ImGui::SetCursorScreenPos(ImVec2(catX, catY));
+            renderBadgePill(catName.c_str(), tokens.surfaces.frameBg,
+                            pillHovered ? tokens.borders.focus : tokens.borders.subtle,
+                            pillHovered ? tokens.text.primary : tokens.text.muted, badgeH);
+
+            if (ImGui::BeginPopupContextItem(catBtnId, ImGuiPopupFlags_MouseButtonRight)) {
+                ImGui::TextDisabled("Category for %s:", pluginName.c_str());
+                ImGui::Separator();
+                const char* kCategories[] = {
+                    "Amp Emulation",
+                    "Distortion",
+                    "Dynamics",
+                    "Equalizer",
+                    "Delay/Echo",
+                    "Reverb",
+                    "Modulation",
+                    "Pitch/Tuning",
+                    "Utility/Metering",
+                    "Audio FX"
+                };
+                for (const char* c : kCategories) {
+                    bool isCur = (catName == c);
+                    if (ImGui::MenuItem(c, nullptr, isCur)) {
+                        m_scanner.setCustomCategory(pluginName, c);
+                        m_filterDirty = true;
+                    }
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Reset to Auto-detected")) {
+                    m_scanner.resetCustomCategory(pluginName);
+                    m_filterDirty = true;
+                }
+                ImGui::EndPopup();
             }
         }
     }
 
-    if (clicked) {
+    if (clicked && !pillHovered) {
         m_selectedIndex = index;
         instantiateSelectedPlugin();
     }
 
     ImGui::PopID();
+    ImGui::PopID();
+    ImGui::SetCursorScreenPos(ImVec2(rowPos.x, rowPos.y + rowH));
 }
 
 void PluginBrowserModal::render() {
@@ -540,15 +665,27 @@ void PluginBrowserModal::render() {
 
     const auto& tokens = themeTokens();
     const ImGuiViewport* vp = ImGui::GetMainViewport();
+    if (vp) {
+        ImGui::GetBackgroundDrawList()->AddRectFilled(
+            vp->Pos,
+            ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y),
+            tokens.surfaces.modalOverlay.u32
+        );
+    }
 
     const float fontSize = ImGui::GetFontSize();
-    const float dpiScale = std::max(1.0f, fontSize / 13.0f);
-    const ImVec2 modalSize(580.0f * dpiScale, 450.0f * dpiScale);
+    const float dpiScale = std::max(ui::dpiScale(), fontSize / 15.0f);
+    const float modalW = std::clamp(vp->Size.x * 0.55f, 620.0f * dpiScale, 860.0f * dpiScale);
+    const float modalH = std::clamp(vp->Size.y * 0.65f, 480.0f * dpiScale, 720.0f * dpiScale);
+    const ImVec2 modalSize(modalW, modalH);
 
     ImGui::SetNextWindowSize(modalSize, ImGuiCond_Always);
     ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
 
     ImGui::PushStyleColor(ImGuiCol_WindowBg, tokens.surfaces.popupBg.vec4);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, tokens.surfaces.panelBg.vec4);
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, tokens.surfaces.popupBg.vec4);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, tokens.surfaces.frameBg.vec4);
     ImGui::PushStyleColor(ImGuiCol_Border, tokens.borders.focus.vec4);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.5f);
@@ -560,12 +697,28 @@ void PluginBrowserModal::render() {
                                   ImGuiWindowFlags_NoScrollbar;
 
     if (ImGui::Begin("##SpotlightCommandPalette", &m_isOpen, flags)) {
+        m_hoveredIndex = -1;
+        // Click outside palette closes it
+        if (m_justOpened) {
+            m_justOpened = false;
+        } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+            if (!ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows) &&
+                !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) {
+                close();
+                ImGui::End();
+                m_tabHandledThisFrame = false;
+                ImGui::PopStyleVar(3);
+                ImGui::PopStyleColor(5);
+                return;
+            }
+        }
+
         // Global shortcut Esc to close
         if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             close();
             ImGui::End();
             ImGui::PopStyleVar(3);
-            ImGui::PopStyleColor(2);
+            ImGui::PopStyleColor(5);
             return;
         }
 
@@ -630,6 +783,17 @@ void PluginBrowserModal::render() {
             std::snprintf(recLabel, sizeof(recLabel), "Recents (%zu)", m_recentPlugins.size());
             renderScopeTab(PaletteScope::Recents, recLabel);
 
+            // Show explicit target destination badge on the right side of the header
+            const char* targetBadge = (m_targetBranchIndex == 0) ? "Target: Branch A"
+                                    : (m_targetBranchIndex == 1) ? "Target: Branch B"
+                                                                 : "Target: Serial Rack";
+            const ImVec2 targetSz = ImGui::CalcTextSize(targetBadge);
+            const float rightX = ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - targetSz.x - 24.0f;
+            if (rightX > ImGui::GetCursorPosX() + 12.0f) {
+                ImGui::SameLine(rightX);
+                renderBadgePill(targetBadge, tokens.surfaces.frameBg, tokens.borders.subtle, tokens.text.secondary, ImGui::GetFrameHeight());
+            }
+
             ImGui::PopStyleVar();
         }
 
@@ -655,9 +819,12 @@ void PluginBrowserModal::render() {
         );
         ImGui::PopStyleVar();
 
-        if (std::strcmp(m_searchQuery, m_lastSearchQuery) != 0) {
+        if (m_filterDirty || std::strcmp(m_searchQuery, m_lastSearchQuery) != 0) {
             std::snprintf(m_lastSearchQuery, sizeof(m_lastSearchQuery), "%s", m_searchQuery);
-            m_selectedIndex = 0;
+            if (!m_filterDirty) {
+                m_selectedIndex = 0;
+            }
+            m_filterDirty = false;
             updateFilteredList();
         }
 
@@ -665,7 +832,7 @@ void PluginBrowserModal::render() {
             instantiateSelectedPlugin();
             ImGui::End();
             ImGui::PopStyleVar(3);
-            ImGui::PopStyleColor(2);
+            ImGui::PopStyleColor(5);
             return;
         }
 
@@ -673,9 +840,13 @@ void PluginBrowserModal::render() {
         ImGui::Separator();
         ImGui::Spacing();
 
-        // Results List Container (Virtualization via ImGuiListClipper)
-        const float listHeight = 290.0f * dpiScale;
+        // Results List Container (Virtualization via ImGuiListClipper) - dynamically scales with window height
+        const float footerH = ImGui::GetTextLineHeightWithSpacing() + 14.0f * dpiScale;
+        const float listHeight = std::max(140.0f * dpiScale, ImGui::GetContentRegionAvail().y - footerH);
         const float rowH = 34.0f * dpiScale;
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, tokens.surfaces.panelBg.vec4);
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 0.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_SelectableRounding, 4.0f);
         ImGui::BeginChild("##PaletteResultsList", ImVec2(0.0f, listHeight), false, ImGuiWindowFlags_AlwaysVerticalScrollbar);
 
         if (m_filteredItems.empty()) {
@@ -684,7 +855,7 @@ void PluginBrowserModal::render() {
             ImGui::TextColored(tokens.text.muted.vec4, "No matching audio plugins found.");
         } else {
             if (m_scrollSelectionIntoView) {
-                float targetScrollY = m_selectedIndex * rowH - (listHeight - rowH) * 0.5f;
+                float targetScrollY = static_cast<float>(m_selectedIndex) * rowH - (listHeight - rowH) * 0.5f;
                 if (targetScrollY < 0.0f) targetScrollY = 0.0f;
                 ImGui::SetScrollY(targetScrollY);
                 m_scrollSelectionIntoView = false;
@@ -700,6 +871,8 @@ void PluginBrowserModal::render() {
             clipper.End();
         }
         ImGui::EndChild();
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor();
 
         // High-DPI collision-free Footer Status Bar
         ImGui::Spacing();
@@ -722,7 +895,7 @@ void PluginBrowserModal::render() {
     m_tabHandledThisFrame = false;
 
     ImGui::PopStyleVar(3);
-    ImGui::PopStyleColor(2);
+    ImGui::PopStyleColor(5);
 }
 
 } // namespace praccy::ui

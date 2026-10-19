@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include "../version.h"
 
 namespace praccy::ui {
 
@@ -28,13 +29,14 @@ enum class UpdateStatus {
 struct UpdateInfo {
     UpdateStatus status{UpdateStatus::Idle};
     bool isBeta{false};
-    std::string currentVersion{"v2.4.0"};
+    std::string currentVersion{praccy::kVersionString};
     std::string latestVersion;   // e.g. "v1.0.1" or "dev (f4610ff)"
     std::string releaseTitle;
     std::string releaseNotes;
     std::string downloadUrl;     // Browser link
     std::string assetUrl;        // Direct download link
     std::string assetName;       // e.g. "Praccy-v1.0.0-windows-x64.zip"
+    std::string expectedSha256;  // Optional SHA-256 digest from release metadata
     int64_t totalBytes{0};
     int64_t downloadedBytes{0};
     float downloadProgress{0.0f}; // 0.0 to 1.0
@@ -47,21 +49,28 @@ class UpdateChecker {
 public:
     static UpdateChecker& instance();
 
+    UpdateChecker();
+    ~UpdateChecker();
+
+    UpdateChecker(const UpdateChecker&) = delete;
+    UpdateChecker& operator=(const UpdateChecker&) = delete;
+    UpdateChecker(UpdateChecker&&) = delete;
+    UpdateChecker& operator=(UpdateChecker&&) = delete;
+
     void checkForUpdates(bool includeBeta);
     void startDownload();
     bool applyUpdateAndRestart();
     UpdateInfo getInfo() const;
 
 private:
-    UpdateChecker();
-    ~UpdateChecker();
-
-    void runCheck(bool includeBeta);
-    void runDownload();
+    void runCheck(bool includeBeta, std::stop_token st);
+    void runDownload(std::stop_token st);
 
     mutable std::mutex m_mutex;
     UpdateInfo m_info;
     std::atomic<bool> m_isBusy{false};
+    std::jthread m_checkThread;
+    std::jthread m_downloadThread;
 };
 
 } // namespace praccy::ui
