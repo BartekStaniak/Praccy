@@ -104,6 +104,9 @@ private:
     std::condition_variable m_cv;
     std::deque<AsyncLoadTask> m_taskQueue;
 
+    mutable std::mutex m_mainThreadMutex;
+    std::deque<AsyncLoadTask> m_mainThreadTasks;
+
     mutable std::mutex m_resultMutex;
     std::vector<AsyncLoadResult> m_completedResults;
 

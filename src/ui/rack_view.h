@@ -53,7 +53,10 @@ public:
     void setDspStats(std::atomic<float>* load, std::atomic<uint32_t>* dropouts) {
         m_dspLoadPercent = load;
         m_dspDropouts = dropouts;
+        m_displayedDspLoad = 0.0f;
+        m_lastDspLoadUpdateTime = {};
     }
+    [[nodiscard]] float displayedDspLoad() const noexcept { return m_displayedDspLoad; }
     void resetDspDropouts() {
         if (m_dspDropouts) {
             m_dspDropouts->store(0, std::memory_order_relaxed);
@@ -80,7 +83,7 @@ public:
     [[nodiscard]] const std::vector<std::string>& favoritePresets() const noexcept { return m_favoritePresets; }
 
 private:
-    bool renderStatusPill(bool isRunning, const char* statusText);
+    bool renderStatusPill(bool isRunning, const char* statusText, float pillWidth = 0.0f);
     void renderPracticeRibbon();
     void renderSignalRack();
     void renderInputCard(float cardY = -1.0f, float cardH = 224.0f);
@@ -124,6 +127,8 @@ private:
 
     std::atomic<float>* m_dspLoadPercent{nullptr};
     std::atomic<uint32_t>* m_dspDropouts{nullptr};
+    float m_displayedDspLoad{0.0f};
+    std::chrono::steady_clock::time_point m_lastDspLoadUpdateTime{};
 
     std::vector<std::chrono::steady_clock::time_point> m_tapTimes;
     std::chrono::steady_clock::time_point m_lastTapFlash{};
@@ -162,6 +167,7 @@ private:
     audio::RetroactiveRiffBuffer m_riffBuffer;
     std::unordered_map<audio::PluginSlot*, std::array<DeviceMacro, 4>> m_slotMacros;
     std::unordered_map<audio::PluginSlot*, std::vector<float>> m_guiParamBaseline;
+    std::chrono::steady_clock::time_point m_lastGuiParamPollTime{};
     audio::PluginSlot* m_pendingGuiEditSlot{nullptr};
     std::string m_pendingGuiEditTargetKey;
     std::string m_pendingGuiEditDesc;

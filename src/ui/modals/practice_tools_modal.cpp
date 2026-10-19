@@ -642,7 +642,7 @@ void PracticeToolsModal::render() {
 
         ImGui::Separator();
         ImGui::Spacing();
-        if (CenteredButton("Close", ImVec2(90, Metrics::buttonHeight()))) {
+        if (CenteredButton("Close", ImVec2(90, Metrics::buttonHeight())) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             close();
             ImGui::CloseCurrentPopup();
         }

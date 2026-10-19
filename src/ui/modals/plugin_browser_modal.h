@@ -87,6 +87,7 @@ private:
     char m_searchQuery[128]{0};
     char m_lastSearchQuery[128]{0};
     int m_selectedIndex{0};
+    int m_hoveredIndex{-1};
     std::vector<PaletteItem> m_filteredItems;
     std::vector<plugins::PluginDescriptor> m_allPlugins;
 

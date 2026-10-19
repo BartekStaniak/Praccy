@@ -109,7 +109,11 @@ public:
 private:
     void addDefaultPaths();
     void runScan();
-    void scanDirectory(const std::filesystem::path& dirPath, std::vector<PluginDescriptor>& outPlugins);
+    void scanDirectory(
+        const std::filesystem::path& dirPath,
+        std::vector<PluginDescriptor>& outPlugins,
+        const std::unordered_map<std::string, std::vector<PluginDescriptor>>& cachedByPath
+    );
     static std::string detectVendor(const std::filesystem::path& path, const std::string& name);
 
     std::vector<std::string> m_searchPaths;

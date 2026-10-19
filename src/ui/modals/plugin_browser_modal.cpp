@@ -229,8 +229,11 @@ void PluginBrowserModal::toggleFavorite(const std::string& pluginName) {
 }
 
 void PluginBrowserModal::toggleFavoriteForSelected() {
-    if (m_selectedIndex >= 0 && m_selectedIndex < static_cast<int>(m_filteredItems.size())) {
-        const auto* desc = m_filteredItems[m_selectedIndex].descriptor;
+    int targetIdx = (m_hoveredIndex >= 0 && m_hoveredIndex < static_cast<int>(m_filteredItems.size()))
+                        ? m_hoveredIndex
+                        : m_selectedIndex;
+    if (targetIdx >= 0 && targetIdx < static_cast<int>(m_filteredItems.size())) {
+        const auto* desc = m_filteredItems[targetIdx].descriptor;
         if (desc) {
             const std::string name = desc->name;
             toggleFavorite(name);
@@ -537,6 +540,9 @@ void PluginBrowserModal::renderPluginRow(int index, float rowH) {
                                      ImGuiSelectableFlags_AllowOverlap |
                                      ImGuiSelectableFlags_NoPadWithHalfSpacing,
                                      ImVec2(0.0f, rowH));
+    if (ImGui::IsItemHovered()) {
+        m_hoveredIndex = index;
+    }
 
     if (isSelected) {
         dl->AddRectFilled(rowPos, ImVec2(rowPos.x + rowW, rowPos.y + rowH), tokens.surfaces.cardBgSelected, 4.0f);
@@ -691,6 +697,7 @@ void PluginBrowserModal::render() {
                                   ImGuiWindowFlags_NoScrollbar;
 
     if (ImGui::Begin("##SpotlightCommandPalette", &m_isOpen, flags)) {
+        m_hoveredIndex = -1;
         // Click outside palette closes it
         if (m_justOpened) {
             m_justOpened = false;

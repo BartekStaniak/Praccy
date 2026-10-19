@@ -668,6 +668,10 @@ bool runSuiteUi() {
 } // namespace
 
 int main(int argc, char** argv) {
+#if defined(_WIN32)
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+    SetThreadErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX, nullptr);
+#endif
     std::string_view suite = "--all";
     if (argc > 1) {
         suite = argv[1];

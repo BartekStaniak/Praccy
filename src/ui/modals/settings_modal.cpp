@@ -358,12 +358,7 @@ void SettingsModal::renderAudioTab() {
     ImGui::Spacing();
     ImGui::Text("Save Destination Directory:");
 
-    std::string displayDir = m_cachedConfig.riffDirectory;
-    if (displayDir.empty()) {
-        const char* up = std::getenv("USERPROFILE");
-        displayDir = (up && *up) ? (std::filesystem::path(up) / "Documents" / "Praccy" / "Riffs").string()
-                                 : "Documents/Praccy/Riffs";
-    }
+    std::string displayDir = m_cachedConfig.getResolvedRiffDirectory();
 
     const float widgetH = Metrics::buttonHeight();
     const float btnBrowseW = 92.0f;
@@ -755,7 +750,7 @@ void SettingsModal::render() {
 
         ImGui::Separator();
         ImGui::Spacing();
-        if (CenteredButton("Close", ImVec2(90, Metrics::buttonHeight()))) {
+        if (CenteredButton("Close", ImVec2(90, Metrics::buttonHeight())) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             close();
             ImGui::CloseCurrentPopup();
         }

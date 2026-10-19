@@ -6,6 +6,7 @@
 #include <vector>
 #include <atomic>
 #include <functional>
+#include <mutex>
 #if defined(_WIN32)
 #include <windows.h>
 #else
@@ -15,6 +16,13 @@ using UINT_PTR = uintptr_t;
 #endif
 
 namespace praccy::plugins {
+
+/// Process-wide mutex to serialize LoadLibrary/FreeLibrary calls across threads,
+/// preventing copy-protection (PACE / Eden / iLok) driver deadlocks.
+inline std::recursive_mutex& pluginDllMutex() {
+    static std::recursive_mutex s_mutex;
+    return s_mutex;
+}
 
 struct FaultState {
     std::atomic<bool> faulted{false};
@@ -62,6 +70,13 @@ public:
     virtual bool adjustSize(int& /*width*/, int& /*height*/) { return false; }
     [[nodiscard]] virtual float getParameterValueByIndex(size_t index) const {
         return getParameterDesc(index).currentValue;
+    }
+    virtual void getAllParameterValues(std::vector<float>& out) const {
+        const size_t n = numParameters();
+        out.resize(n);
+        for (size_t i = 0; i < n; ++i) {
+            out[i] = getParameterValueByIndex(i);
+        }
     }
 
     [[nodiscard]] virtual const std::string& path() const noexcept {

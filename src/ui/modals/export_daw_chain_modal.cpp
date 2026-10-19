@@ -129,7 +129,7 @@ void ExportDawChainModal::render(state::SceneManager& sceneMgr, audio::GraphEngi
         }
 
         ImGui::SameLine();
-        if (CenteredButton("Cancel", ImVec2(100.0f, Metrics::buttonHeight()))) {
+        if (CenteredButton("Cancel", ImVec2(100.0f, Metrics::buttonHeight())) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             m_isOpen = false;
             ImGui::CloseCurrentPopup();
         }

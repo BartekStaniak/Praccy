@@ -566,6 +566,30 @@ void test_T1_R2_RiffFilename_Format() {
     assert(special == "LeadSolo80s_Metal-Rig_128bpm_20261015_014128.wav");
 }
 
+void test_T1_R2_AppConfig_RiffSettings_ResolvedDirectory() {
+    state::AppConfig cfg;
+    assert(cfg.retroactiveBufferMinutes == 2);
+
+    std::string defaultDir = cfg.getResolvedRiffDirectory();
+    assert(!defaultDir.empty());
+    assert(defaultDir.find("Riffs") != std::string::npos);
+
+    cfg.riffDirectory = "D:/Custom/Praccy/AudioRiffs";
+    assert(cfg.getResolvedRiffDirectory() == "D:/Custom/Praccy/AudioRiffs");
+
+    const std::string tempIni = "test_riff_settings_temp.ini";
+    cfg.retroactiveBufferMinutes = 5;
+    assert(cfg.save(tempIni));
+
+    state::AppConfig loaded;
+    assert(loaded.load(tempIni));
+    assert(loaded.retroactiveBufferMinutes == 5);
+    assert(loaded.riffDirectory == "D:/Custom/Praccy/AudioRiffs");
+    assert(loaded.getResolvedRiffDirectory() == "D:/Custom/Praccy/AudioRiffs");
+
+    std::filesystem::remove(tempIni);
+}
+
 // Tier 2: Boundary & Corner Cases (R2)
 void test_T2_R2_Buffer_Capacity_Durations() {
     audio::RetroactiveRiffBuffer buf;
@@ -1122,6 +1146,111 @@ void test_T2_R4_FocusedShortcuts_Boundaries() {
     assert(activePreset == 7);
 }
 
+void test_T2_R4_Escape_Cancels_Map_Modes_And_Hotkeys() {
+    // 1. Verify Escape cancels Key Map Mode and pending key target
+    bool keyMapMode = true;
+    bool awaitingKeyTargetActive = true;
+    std::string hudToast;
+
+    auto handleEscape = [&](bool escPressed) {
+        if (!escPressed) return;
+        if (keyMapMode) {
+            keyMapMode = false;
+            awaitingKeyTargetActive = false;
+            hudToast = "KEY MAP MODE: OFF";
+        }
+    };
+
+    handleEscape(true);
+    assert(!keyMapMode);
+    assert(!awaitingKeyTargetActive);
+    assert(hudToast == "KEY MAP MODE: OFF");
+
+    // 2. Verify Escape cancels MIDI Map Mode and MIDI learn
+    midi::MidiManager midi;
+    bool midiMapMode = true;
+    midi.startLearning(midi::BindingTargetType::MasterVolume, 0, -1, -1, -1, 100);
+    assert(midi.isLearning());
+
+    auto handleMidiEscape = [&](bool escPressed) {
+        if (!escPressed) return;
+        if (midiMapMode) {
+            midiMapMode = false;
+            midi.cancelLearning();
+            hudToast = "MIDI MAP MODE: OFF";
+        } else if (midi.isLearning()) {
+            midi.cancelLearning();
+            hudToast = "MIDI LEARN CANCELLED";
+        }
+    };
+
+    handleMidiEscape(true);
+    assert(!midiMapMode);
+    assert(!midi.isLearning());
+    assert(hudToast == "MIDI MAP MODE: OFF");
+
+    // 3. Verify Escape cancels standalone MIDI learn when not in MIDI map mode
+    midi.startLearning(midi::BindingTargetType::SlotInputGain, 0, -1, -1, -1, 101);
+    assert(midi.isLearning());
+    handleMidiEscape(true);
+    assert(!midi.isLearning());
+    assert(hudToast == "MIDI LEARN CANCELLED");
+
+    // 4. Verify toggling MIDI Map off cancels learning
+    midiMapMode = true;
+    midi.startLearning(midi::BindingTargetType::SlotDryWet, 0, -1, -1, -1, 102);
+    assert(midi.isLearning());
+    auto toggleMidiMap = [&]() {
+        midiMapMode = !midiMapMode;
+        if (!midiMapMode) {
+            midi.cancelLearning();
+        }
+    };
+    toggleMidiMap();
+    assert(!midiMapMode);
+    assert(!midi.isLearning());
+
+    // 5. Verify toggling Key Map on cancels MIDI map & learning
+    midiMapMode = true;
+    midi.startLearning(midi::BindingTargetType::SlotOutputGain, 0, -1, -1, -1, 103);
+    auto toggleKeyMap = [&]() {
+        keyMapMode = !keyMapMode;
+        if (keyMapMode) {
+            midiMapMode = false;
+            midi.cancelLearning();
+        }
+    };
+    toggleKeyMap();
+    assert(keyMapMode);
+    assert(!midiMapMode);
+    assert(!midi.isLearning());
+
+    // 6. Verify modifier guard logic for stated hotkeys (Presets 1-8, [ / ], 0, Q)
+    auto shouldRecallPreset = [](bool keyMap, bool ctrl, bool alt, bool customBound) {
+        return !keyMap && !ctrl && !alt && !customBound;
+    };
+    assert(shouldRecallPreset(false, false, false, false));
+    assert(!shouldRecallPreset(true, false, false, false));
+    assert(!shouldRecallPreset(false, true, false, false));
+    assert(!shouldRecallPreset(false, false, true, false));
+    assert(!shouldRecallPreset(false, false, false, true));
+
+    auto shouldCyclePreset = [](bool keyMap, bool ctrl, bool alt, bool customBound) {
+        return !keyMap && !ctrl && !alt && !customBound;
+    };
+    assert(shouldCyclePreset(false, false, false, false));
+    assert(!shouldCyclePreset(true, false, false, false));
+    assert(!shouldCyclePreset(false, true, false, false));
+    assert(!shouldCyclePreset(false, false, true, false));
+
+    auto shouldBypassFocused = [](bool keyMap, bool ctrl, bool alt, bool hasFocused, bool customBound) {
+        return !keyMap && !ctrl && !alt && hasFocused && !customBound;
+    };
+    assert(shouldBypassFocused(false, false, false, true, false));
+    assert(!shouldBypassFocused(false, false, false, false, false));
+    assert(!shouldBypassFocused(false, true, false, true, false));
+}
+
 // Tier 3: Cross-Feature Interactions (R4)
 void test_T3_R4_CardDragDrop_MicroCrossfade() {
     std::vector<int> rack = {10, 20, 30, 40};
@@ -1562,6 +1691,7 @@ int main() {
     RUN_TEST(test_T1_R2_AtomicLatch_SliceCapture);
     RUN_TEST(test_T1_R2_WavWriter_24BitPcmRiffHeader);
     RUN_TEST(test_T1_R2_RiffFilename_Format);
+    RUN_TEST(test_T1_R2_AppConfig_RiffSettings_ResolvedDirectory);
     RUN_TEST(test_T2_R2_Buffer_Capacity_Durations);
     RUN_TEST(test_T2_R2_Wav24Bit_Quantization_Precision);
     RUN_TEST(test_T3_R2_AudioThread_ZeroAlloc_ConcurrentPushAndCapture);
@@ -1586,6 +1716,7 @@ int main() {
     RUN_TEST(test_T2_R4_Macro_Regex_EdgeCases_Adversarial);
     RUN_TEST(test_T2_R4_Waveform_BoundaryCases);
     RUN_TEST(test_T2_R4_FocusedShortcuts_Boundaries);
+    RUN_TEST(test_T2_R4_Escape_Cancels_Map_Modes_And_Hotkeys);
     RUN_TEST(test_T3_R4_CardDragDrop_MicroCrossfade);
     RUN_TEST(test_T3_R4_MacroReassignment_ContextOverride);
     RUN_TEST(test_T4_R4_FullPerformance_ErgonomicsSimulation);

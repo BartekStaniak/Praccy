@@ -590,16 +590,8 @@ void TunerSettingsModal::render() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Spec::kModalWindowPadding, Spec::kModalWindowPadding));
 
-    bool p_open = m_isOpen;
-    if (ImGui::BeginPopupModal("Tuner Settings##Modal", &p_open, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
-        if (!p_open) {
-            close();
-            ImGui::CloseCurrentPopup();
-            ImGui::EndPopup();
-            ImGui::PopStyleVar(3);
-            ImGui::PopStyleColor(2);
-            return;
-        }
+    const bool wasOpen = m_isOpen;
+    if (ImGui::BeginPopupModal("Tuner Settings##Modal", &m_isOpen, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
         const float footerHeight = Metrics::kFooterHeight;
         const float contentHeight = ImGui::GetContentRegionAvail().y - footerHeight;
 
@@ -662,11 +654,15 @@ void TunerSettingsModal::render() {
 
         ImGui::SameLine(ImGui::GetWindowWidth() - ui::px(110.0f));
         if (CenteredButton("Done", ImVec2(ui::px(90.0f), Metrics::buttonHeight()))) {
-            close();
+            m_isOpen = false;
             ImGui::CloseCurrentPopup();
         }
 
         ImGui::EndPopup();
+    }
+
+    if (wasOpen && !m_isOpen) {
+        close();
     }
 
     ImGui::PopStyleVar(3);

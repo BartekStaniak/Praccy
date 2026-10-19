@@ -53,6 +53,10 @@ void AsyncPluginLoader::shutdown() {
         m_taskQueue.clear();
     }
     {
+        std::lock_guard<std::mutex> lock(m_mainThreadMutex);
+        m_mainThreadTasks.clear();
+    }
+    {
         std::lock_guard<std::mutex> lock(m_resultMutex);
         m_completedResults.clear();
     }
@@ -104,26 +108,47 @@ uint64_t AsyncPluginLoader::enqueueLoad(
         }
     }
 
-    {
+    // CLAP specification requires plugin creation, initialization, and lifecycle to run on the [main-thread].
+    // Run CLAP plugin loads on the UI/main thread via update() to prevent thread affinity crashes with JUCE MessageManager.
+    if (task.type == PluginType::CLAP || task.path.find(".clap") != std::string::npos) {
+        std::lock_guard<std::mutex> lock(m_mainThreadMutex);
+        m_mainThreadTasks.push_back(std::move(task));
+    } else {
         std::lock_guard<std::mutex> lock(m_queueMutex);
         m_taskQueue.push_back(std::move(task));
+        m_cv.notify_one();
     }
-    m_cv.notify_one();
 
     return taskId;
 }
 
 void AsyncPluginLoader::cancelSlot(audio::PluginSlot* slot) {
     if (!slot) return;
-    std::lock_guard<std::mutex> lock(m_cancelMutex);
-    m_latestSlotTaskId.erase(slot);
-    m_activeLoadingSlots.erase(slot);
+    {
+        std::lock_guard<std::mutex> lock(m_cancelMutex);
+        m_latestSlotTaskId.erase(slot);
+        m_activeLoadingSlots.erase(slot);
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_mainThreadMutex);
+        for (auto it = m_mainThreadTasks.begin(); it != m_mainThreadTasks.end(); ) {
+            if (it->targetSlot == slot) {
+                it = m_mainThreadTasks.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
 }
 
 void AsyncPluginLoader::cancelAll() {
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
         m_taskQueue.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_mainThreadMutex);
+        m_mainThreadTasks.clear();
     }
     {
         std::lock_guard<std::mutex> lock(m_resultMutex);
@@ -144,8 +169,16 @@ bool AsyncPluginLoader::isSlotLoading(const audio::PluginSlot* slot) const {
 }
 
 size_t AsyncPluginLoader::pendingTaskCount() const {
-    std::lock_guard<std::mutex> lock(m_queueMutex);
-    return m_taskQueue.size();
+    size_t count = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        count += m_taskQueue.size();
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_mainThreadMutex);
+        count += m_mainThreadTasks.size();
+    }
+    return count;
 }
 
 void AsyncPluginLoader::workerLoop() {
@@ -173,7 +206,7 @@ void AsyncPluginLoader::workerLoop() {
         // Check if task was cancelled or superseded before starting load
         {
             std::lock_guard<std::mutex> lock(m_cancelMutex);
-            if (task.id <= m_cancelAllWatermark) {
+            if (task.id < m_cancelAllWatermark) {
                 continue;
             }
             if (task.targetSlot) {
@@ -229,7 +262,7 @@ void AsyncPluginLoader::workerLoop() {
         bool wasCancelled = false;
         {
             std::lock_guard<std::mutex> lock(m_cancelMutex);
-            if (task.id <= m_cancelAllWatermark) {
+            if (task.id < m_cancelAllWatermark) {
                 wasCancelled = true;
             } else if (task.targetSlot) {
                 auto it = m_latestSlotTaskId.find(task.targetSlot);
@@ -271,6 +304,92 @@ void AsyncPluginLoader::update(std::function<void(
     std::unique_ptr<IPluginInstance> instance,
     bool openGuiWhenDone
 )> onSlotReady) {
+    // 1. Process pending main-thread loads (e.g. CLAP plugins whose lifecycle requires execution on the main thread)
+    std::deque<AsyncLoadTask> mainTasks;
+    {
+        std::lock_guard<std::mutex> lock(m_mainThreadMutex);
+        if (!m_mainThreadTasks.empty()) {
+            mainTasks.swap(m_mainThreadTasks);
+        }
+    }
+
+    for (auto& task : mainTasks) {
+        bool cancelled = false;
+        {
+            std::lock_guard<std::mutex> lock(m_cancelMutex);
+            if (task.id < m_cancelAllWatermark) {
+                cancelled = true;
+            } else if (task.targetSlot) {
+                auto it = m_latestSlotTaskId.find(task.targetSlot);
+                if (it == m_latestSlotTaskId.end() || it->second != task.id) {
+                    cancelled = true;
+                }
+            }
+        }
+
+        if (cancelled) {
+            if (task.completionCallback) task.completionCallback(false);
+            continue;
+        }
+
+        std::unique_ptr<IPluginInstance> inst;
+        DWORD exCode = 0;
+        bool callOk = safeCallPlugin([&]() {
+            inst = ClapPluginInstance::loadFromFile(task.path);
+            if (inst) {
+                inst->prepare(task.sampleRate, task.maxBlockSize);
+                if (!task.initialState.empty()) {
+                    inst->loadState(task.initialState);
+                }
+                for (const auto& [paramId, paramVal] : task.initialParams) {
+                    if (std::isfinite(paramVal)) {
+                        inst->setParameterValue(paramId, paramVal);
+                    }
+                }
+            }
+        }, &exCode);
+
+        {
+            std::lock_guard<std::mutex> lock(m_cancelMutex);
+            if (task.id < m_cancelAllWatermark) {
+                cancelled = true;
+            } else if (task.targetSlot) {
+                auto it = m_latestSlotTaskId.find(task.targetSlot);
+                if (it == m_latestSlotTaskId.end() || it->second != task.id) {
+                    cancelled = true;
+                } else {
+                    m_latestSlotTaskId.erase(it);
+                    m_activeLoadingSlots.erase(task.targetSlot);
+                }
+            }
+        }
+
+        if (cancelled) {
+            inst.reset();
+            if (task.completionCallback) task.completionCallback(false);
+            continue;
+        }
+
+        if (callOk && inst && task.targetSlot) {
+            if (onSlotReady) {
+                onSlotReady(task.targetSlot, std::move(inst), task.openGuiWhenDone);
+            }
+            if (task.completionCallback) task.completionCallback(true);
+        } else {
+            if (task.targetSlot) {
+                std::unique_ptr<audio::AudioNode> oldNode;
+                std::string displayName = task.name.empty() ? "Failed to Load" : task.name;
+                auto missing = std::make_unique<audio::MissingPluginPlaceholder>(
+                    displayName,
+                    "CLAP"
+                );
+                task.targetSlot->replaceInnerNode(std::move(missing), oldNode);
+            }
+            if (task.completionCallback) task.completionCallback(false);
+        }
+    }
+
+    // 2. Process worker-thread completed results (VST3 and BuiltIn)
     std::vector<AsyncLoadResult> completed;
     {
         std::lock_guard<std::mutex> lock(m_resultMutex);
@@ -282,7 +401,7 @@ void AsyncPluginLoader::update(std::function<void(
         bool cancelled = false;
         {
             std::lock_guard<std::mutex> lock(m_cancelMutex);
-            if (res.id <= m_cancelAllWatermark) {
+            if (res.id < m_cancelAllWatermark) {
                 cancelled = true;
             } else if (res.targetSlot) {
                 auto it = m_latestSlotTaskId.find(res.targetSlot);

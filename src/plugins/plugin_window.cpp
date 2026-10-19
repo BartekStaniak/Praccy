@@ -119,7 +119,7 @@ bool PluginWindowManager::openPluginWindowAsync(IPluginInstance* plugin, std::fu
     // Calculate window size including borders for desired client area
     DWORD style = WS_OVERLAPPEDWINDOW;
     // Use m_mainHwnd as owner window instead of global WS_EX_TOPMOST so plugin windows don't cover external apps on Alt-Tab
-    DWORD exStyle = m_mainHwnd ? WS_EX_APPWINDOW : (WS_EX_APPWINDOW | WS_EX_TOPMOST);
+    DWORD exStyle = m_mainHwnd ? 0 : (WS_EX_APPWINDOW | WS_EX_TOPMOST);
     RECT wr = {0, 0, prefW, prefH};
     AdjustWindowRectEx(&wr, style, FALSE, exStyle);
     int winW = wr.right - wr.left;
@@ -186,7 +186,7 @@ bool PluginWindowManager::openPluginWindowAsync(IPluginInstance* plugin, std::fu
         int actualH = 600;
         plugin->getPreferredSize(actualW, actualH);
         DWORD actStyle = WS_OVERLAPPEDWINDOW;
-        DWORD actExStyle = m_mainHwnd ? WS_EX_APPWINDOW : (WS_EX_APPWINDOW | WS_EX_TOPMOST);
+        DWORD actExStyle = m_mainHwnd ? 0 : (WS_EX_APPWINDOW | WS_EX_TOPMOST);
         RECT actualWr = {0, 0, actualW, actualH};
         AdjustWindowRectEx(&actualWr, actStyle, FALSE, actExStyle);
         int actWinW = actualWr.right - actualWr.left;

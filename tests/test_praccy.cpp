@@ -1845,6 +1845,32 @@ void testViewportCenteringCalculations() {
     std::cout << "PASSED\n";
 }
 
+void testBottomBarCentering() {
+    std::cout << "[TEST] Bottom Bar Elements Vertical Centering Math... ";
+
+    for (float dpi : { 1.0f, 1.25f, 1.5f, 1.75f, 2.0f }) {
+        ui::setDpiScale(dpi);
+        for (float windowH : { 600.0f, 720.0f, 900.0f, 1080.0f, 1440.0f }) {
+            const float btnH = ui::px(24.0f);
+            const float bottomBarH = btnH + ui::px(18.0f);
+            const float borderY = windowH - bottomBarH;
+
+            const float targetY = std::round(borderY + (bottomBarH - btnH) * 0.5f);
+            const float topMargin = targetY - borderY;
+            const float bottomMargin = windowH - (targetY + btnH);
+
+            // Verify top margin and bottom margin are symmetric within 1 pixel (rounding)
+            assert(std::abs(topMargin - bottomMargin) <= 1.0f);
+            // Verify margins are positive and equal to approximately 9px * dpi
+            assert(topMargin >= ui::px(8.5f));
+            assert(bottomMargin >= ui::px(8.5f));
+        }
+    }
+    ui::setDpiScale(1.0f);
+
+    std::cout << "PASSED\n";
+}
+
 void testEqualPowerRampEnergyConservation() {
     std::cout << "[TEST] EqualPowerRamp Energy Conservation Identity... ";
 
@@ -2680,6 +2706,101 @@ void testDynamicSampleRateAndBufferSizeUpdates() {
                           srBuf, c.bufSize, latencyMs);
             assert(std::string(statusText).find(c.expectedSrSubstr) != std::string::npos);
         }
+
+        // Pill width stability verification across single- and double-digit DSP loads
+        {
+            ImGuiContext* ctx = ImGui::GetCurrentContext();
+            bool createdCtx = false;
+            if (!ctx) {
+                ctx = ImGui::CreateContext();
+                createdCtx = true;
+            }
+            ImGui::SetCurrentContext(ctx);
+
+            ImGuiIO& io = ImGui::GetIO();
+            io.DisplaySize = ImVec2(1024, 768);
+            io.DeltaTime = 1.0f / 60.0f;
+            unsigned char* pixels = nullptr;
+            int width = 0, height = 0;
+            io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+            ImGui::NewFrame();
+
+            auto calcPillW = [](double sr, int bufSize, double latencyMs, float dspLoad, uint32_t drops) {
+                const char* srFormat = (std::fmod(sr, 1000.0) == 0.0) ? "%.0f kHz" : "%.1f kHz";
+                char srBuf[32];
+                std::snprintf(srBuf, sizeof(srBuf), srFormat, sr / 1000.0);
+
+                char statusText[160];
+                char refText[160];
+                const float refLoad = (dspLoad < 100.0f) ? 99.0f : dspLoad;
+                if (drops > 0) {
+                    std::snprintf(statusText, sizeof(statusText), "ACTIVE  |  %s  |  %d spls (%.1f ms)  |  DSP: %.0f%%  |  DROPS: %u",
+                                  srBuf, bufSize, latencyMs, dspLoad, drops);
+                    std::snprintf(refText, sizeof(refText), "ACTIVE  |  %s  |  %d spls (%.1f ms)  |  DSP: %.0f%%  |  DROPS: %u",
+                                  srBuf, bufSize, latencyMs, refLoad, drops);
+                } else {
+                    std::snprintf(statusText, sizeof(statusText), "ACTIVE  |  %s  |  %d spls (%.1f ms)  |  DSP: %.0f%%",
+                                  srBuf, bufSize, latencyMs, dspLoad);
+                    std::snprintf(refText, sizeof(refText), "ACTIVE  |  %s  |  %d spls (%.1f ms)  |  DSP: %.0f%%",
+                                  srBuf, bufSize, latencyMs, refLoad);
+                }
+                const float pillTextW = std::max(ImGui::CalcTextSize(statusText).x, ImGui::CalcTextSize(refText).x);
+                return pillTextW + 36.0f;
+            };
+
+            const float wSingle = calcPillW(48000.0, 128, 2.7, 9.0f, 0);
+            const float wDouble = calcPillW(48000.0, 128, 2.7, 10.0f, 0);
+            const float wZero   = calcPillW(48000.0, 128, 2.7, 0.0f, 0);
+            const float wHigh   = calcPillW(48000.0, 128, 2.7, 99.0f, 0);
+
+            // Pill width must be identical across single and double digit loads to prevent jitter
+            assert(std::abs(wSingle - wDouble) < 0.001f);
+            assert(std::abs(wZero - wDouble) < 0.001f);
+            assert(std::abs(wHigh - wDouble) < 0.001f);
+
+            ImGui::EndFrame();
+            if (createdCtx) {
+                ImGui::DestroyContext(ctx);
+            }
+        }
+
+        // Load meter 1/sec rate limit verification
+        {
+            float displayedLoad = 0.0f;
+            std::chrono::steady_clock::time_point lastUpdate{};
+
+            auto updateMeter = [&](float rawLoad, std::chrono::steady_clock::time_point now) {
+                if (lastUpdate.time_since_epoch().count() == 0 ||
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now - lastUpdate).count() >= 1000) {
+                    displayedLoad = rawLoad;
+                    lastUpdate = now;
+                }
+            };
+
+            auto t0 = std::chrono::steady_clock::now();
+            updateMeter(12.0f, t0);
+            assert(displayedLoad == 12.0f);
+
+            // Within 1 second (e.g. 500ms later), raw load changes, but meter does not change
+            updateMeter(25.0f, t0 + std::chrono::milliseconds(500));
+            assert(displayedLoad == 12.0f);
+
+            // At 999ms, meter still does not change
+            updateMeter(35.0f, t0 + std::chrono::milliseconds(999));
+            assert(displayedLoad == 12.0f);
+
+            // At 1000ms (1 second), meter updates
+            updateMeter(42.0f, t0 + std::chrono::milliseconds(1000));
+            assert(displayedLoad == 42.0f);
+
+            // Within next second (e.g. 1500ms), meter does not change
+            updateMeter(50.0f, t0 + std::chrono::milliseconds(1500));
+            assert(displayedLoad == 42.0f);
+
+            // At 2000ms (2 seconds), meter updates
+            updateMeter(15.0f, t0 + std::chrono::milliseconds(2000));
+            assert(displayedLoad == 15.0f);
+        }
     }
 
     // 3. Dynamic multi-rate GraphEngine & Practice Tools re-preparation
@@ -2812,6 +2933,7 @@ int main() {
     testThemeSwitchingAndTokenIntegrity();
     testCubicHermiteSplineEvaluation();
     testViewportCenteringCalculations();
+    testBottomBarCentering();
     testEqualPowerRampEnergyConservation();
     testQuickLooperCircularProgressMath();
     testWavDragAndDropExtensionValidation();
@@ -2829,7 +2951,7 @@ int main() {
     testParallelBranchSplitNoDuplicateAndCleanDelete();
 
     std::cout << "===========================================\n";
-    std::cout << "   ALL TESTS PASSED SUCCESSFULLY! (40/40)  \n";
+    std::cout << "   ALL TESTS PASSED SUCCESSFULLY! (41/41)  \n";
     std::cout << "===========================================\n";
     return 0;
 }

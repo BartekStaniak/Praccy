@@ -169,8 +169,8 @@ static void applyPresetToSlot(const PluginSlotPreset& sp,
 }
 
 SceneManager::SceneManager() {
-    initializeDefaultScenes();
     if (!loadFromFile()) {
+        initializeDefaultUserPresets();
         saveToFile();
     }
 }
@@ -599,9 +599,12 @@ bool SceneManager::applyGraphSnapshot(const ScenePreset& scene, audio::GraphEngi
 }
 
 void SceneManager::captureCurrentScene(int sceneIndex, audio::GraphEngine& graph) {
-    if (sceneIndex < 0 || sceneIndex >= static_cast<int>(m_scenes.size())) return;
+    if (sceneIndex < 0 || sceneIndex >= 8) return;
+    if (sceneIndex >= static_cast<int>(m_scenes.size())) {
+        m_scenes.resize(sceneIndex + 1);
+    }
 
-    std::string name = m_scenes[sceneIndex].name;
+    std::string name = m_scenes[sceneIndex].name.empty() ? ("Scene " + std::to_string(sceneIndex + 1)) : m_scenes[sceneIndex].name;
     m_scenes[sceneIndex] = captureGraphSnapshot(graph, name);
     m_statusMessage = "Preset saved: " + name;
     saveToFile();
@@ -1186,9 +1189,6 @@ bool SceneManager::loadFromFile(const std::string& filePath) {
         if (sections.count(sec)) {
             m_scenes.push_back(parsePreset(sections[sec]));
         }
-    }
-    if (m_scenes.empty()) {
-        initializeDefaultScenes();
     }
 
     m_userPresets.clear();

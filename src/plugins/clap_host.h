@@ -103,6 +103,7 @@ public:
     void onGuiResize(int width, int height) override;
     bool adjustSize(int& width, int& height) override;
     [[nodiscard]] float getParameterValueByIndex(size_t index) const override;
+    void getAllParameterValues(std::vector<float>& out) const override;
 
     [[nodiscard]] std::vector<uint8_t> saveState() const override;
     bool loadState(const std::vector<uint8_t>& state) override;

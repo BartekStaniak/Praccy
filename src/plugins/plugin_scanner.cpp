@@ -1,4 +1,5 @@
 #include "plugin_scanner.h"
+#include "plugin_base.h"
 #include "crash_isolation.h"
 #include "../state/app_config.h"
 #include "../utils/guid_utils.h"
@@ -17,6 +18,7 @@ using HMODULE = void*;
 #endif
 #include <pluginterfaces/base/ipluginbase.h>
 #include <clap/clap.h>
+#include <fstream>
 
 namespace praccy::plugins {
 
@@ -63,11 +65,27 @@ bool matchesFavoriteString(const std::string& fav, const std::string& target) {
     return !cleanFav.empty() && cleanFav == cleanTarget;
 }
 
+bool isValidPeBinary(const std::filesystem::path& p) {
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(p, ec)) return false;
+    auto sz = std::filesystem::file_size(p, ec);
+    if (ec || sz < 64) return false;
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return false;
+    char magic[2] = {0};
+    f.read(magic, 2);
+    return (f.gcount() == 2 && magic[0] == 'M' && magic[1] == 'Z');
+}
+
 } // namespace
 
 PluginScanner::PluginScanner(const std::string& configPath)
     : m_configPath(configPath)
 {
+#if defined(_WIN32)
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+    SetThreadErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX, nullptr);
+#endif
     addDefaultPaths();
 
     // Register built-in effects immediately so they are available right away
@@ -190,7 +208,7 @@ void PluginScanner::loadFromConfig(const state::AppConfig& cfg) {
         desc.clapId = sp.clapId;
 
         auto it = std::find_if(m_plugins.begin(), m_plugins.end(), [&](const PluginDescriptor& existing) {
-            return existing.name == desc.name;
+            return existing.name == desc.name && existing.type == desc.type;
         });
         if (it == m_plugins.end()) {
             if (m_plugins.size() == m_plugins.capacity()) {
@@ -202,7 +220,7 @@ void PluginScanner::loadFromConfig(const state::AppConfig& cfg) {
                 m_plugins.push_back(std::move(desc));
             }
         } else {
-            it->type = desc.type;
+            it->path = desc.path;
             it->category = desc.category;
             it->vendor = desc.vendor;
             if (!desc.bundleFileName.empty()) it->bundleFileName = desc.bundleFileName;
@@ -475,12 +493,15 @@ std::string PluginScanner::detectVendor(const std::filesystem::path& path, const
 #if defined(_WIN32)
     HMODULE hLib = nullptr;
     const std::wstring wDllPath = dllPath.wstring();
-    safeCallPlugin([&]() {
-        hLib = LoadLibraryExW(wDllPath.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-        if (!hLib) {
-            hLib = LoadLibraryW(wDllPath.c_str());
-        }
-    });
+    if (isValidPeBinary(dllPath)) {
+        safeCallPlugin([&]() {
+            std::lock_guard<std::recursive_mutex> lock(pluginDllMutex());
+            hLib = LoadLibraryExW(wDllPath.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+            if (!hLib) {
+                hLib = LoadLibraryW(wDllPath.c_str());
+            }
+        });
+    }
     if (hLib) {
         auto* getFactory = reinterpret_cast<GetFactoryProc>(reinterpret_cast<void*>(GetProcAddress(hLib, "GetPluginFactory")));
         std::string fVendor;
@@ -636,9 +657,21 @@ void PluginScanner::runScan() {
     });
 
     std::vector<std::string> pathsCopy;
+    std::unordered_map<std::string, std::vector<PluginDescriptor>> cachedByPath;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         pathsCopy = m_searchPaths;
+        for (const auto& p : m_plugins) {
+            if (!p.path.empty() && p.type != PluginType::BuiltIn) {
+                std::filesystem::path fp(p.path);
+                std::string norm = fp.lexically_normal().string();
+                for (char& c : norm) {
+                    if (c == '/') c = '\\';
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                }
+                cachedByPath[norm].push_back(p);
+            }
+        }
     }
 
     for (const auto& dirStr : pathsCopy) {
@@ -646,7 +679,7 @@ void PluginScanner::runScan() {
         std::error_code ec;
         std::filesystem::path p(dirStr);
         if (std::filesystem::exists(p, ec) && std::filesystem::is_directory(p, ec)) {
-            scanDirectory(p, found);
+            scanDirectory(p, found, cachedByPath);
         }
     }
 
@@ -677,7 +710,11 @@ void PluginScanner::runScan() {
     m_isScanning = false;
 }
 
-void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vector<PluginDescriptor>& outPlugins) {
+void PluginScanner::scanDirectory(
+    const std::filesystem::path& dirPath,
+    std::vector<PluginDescriptor>& outPlugins,
+    const std::unordered_map<std::string, std::vector<PluginDescriptor>>& cachedByPath
+) {
     std::error_code ec;
     try {
         for (auto iter = std::filesystem::recursive_directory_iterator(dirPath, std::filesystem::directory_options::skip_permission_denied, ec);
@@ -688,8 +725,33 @@ void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vec
             std::string ext = path.extension().string();
             for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
+            std::string norm = path.lexically_normal().string();
+            for (char& c : norm) {
+                if (c == '/') c = '\\';
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            }
+
             if (ext == ".clap") {
                 const std::string stemName = path.stem().string();
+                auto cacheIt = cachedByPath.find(norm);
+                bool foundCached = false;
+                if (cacheIt != cachedByPath.end() && !cacheIt->second.empty()) {
+                    for (const auto& cd : cacheIt->second) {
+                        if (cd.type == PluginType::CLAP) {
+                            foundCached = true;
+                            auto itExists = std::find_if(outPlugins.begin(), outPlugins.end(), [&](const PluginDescriptor& d) {
+                                return d.name == cd.name && d.type == PluginType::CLAP;
+                            });
+                            if (itExists == outPlugins.end()) {
+                                outPlugins.push_back(cd);
+                            }
+                        }
+                    }
+                }
+                if (foundCached) {
+                    continue;
+                }
+
                 struct ScannedClapDesc {
                     std::string id;
                     std::string name;
@@ -700,7 +762,12 @@ void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vec
 
 #if defined(_WIN32)
                 try {
-                    if (HMODULE hLib = LoadLibraryExW(path.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH)) {
+                    HMODULE hLib = nullptr;
+                    if (isValidPeBinary(path)) {
+                        std::lock_guard<std::recursive_mutex> lock(pluginDllMutex());
+                        hLib = LoadLibraryExW(path.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+                    }
+                    if (hLib) {
                         const auto* entry = reinterpret_cast<const clap_plugin_entry_t*>(
                             reinterpret_cast<void*>(GetProcAddress(hLib, "clap_entry")));
                         const std::string pathStr = path.string();
@@ -779,6 +846,28 @@ void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vec
                 }
             } else if (ext == ".vst3") {
                 const std::string name = path.stem().string();
+                auto cacheIt = cachedByPath.find(norm);
+                bool foundCached = false;
+                if (cacheIt != cachedByPath.end() && !cacheIt->second.empty()) {
+                    for (const auto& cd : cacheIt->second) {
+                        if (cd.type == PluginType::VST3) {
+                            foundCached = true;
+                            auto itExists = std::find_if(outPlugins.begin(), outPlugins.end(), [&](const PluginDescriptor& d) {
+                                return d.name == cd.name && d.type == PluginType::VST3;
+                            });
+                            if (itExists == outPlugins.end()) {
+                                outPlugins.push_back(cd);
+                            }
+                        }
+                    }
+                }
+                if (foundCached) {
+                    if (iter->is_directory()) {
+                        iter.disable_recursion_pending();
+                    }
+                    continue;
+                }
+
                 auto itExists = std::find_if(outPlugins.begin(), outPlugins.end(), [&](const PluginDescriptor& d) {
                     return d.name == name && d.type == PluginType::VST3;
                 });
@@ -798,7 +887,12 @@ void PluginScanner::scanDirectory(const std::filesystem::path& dirPath, std::vec
                             auto candidate = path / "Contents" / "x86_64-win" / (path.stem().string() + ".vst3");
                             if (std::filesystem::exists(candidate)) dllPath = candidate;
                         }
-                        if (HMODULE hLib = LoadLibraryExW(dllPath.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH)) {
+                        HMODULE hLib = nullptr;
+                        if (isValidPeBinary(dllPath)) {
+                            std::lock_guard<std::recursive_mutex> lock(pluginDllMutex());
+                            hLib = LoadLibraryExW(dllPath.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+                        }
+                        if (hLib) {
                             auto* getFactory = reinterpret_cast<GetFactoryProc>(reinterpret_cast<void*>(GetProcAddress(hLib, "GetPluginFactory")));
                             if (getFactory) {
                                 char hex[33] = {0};

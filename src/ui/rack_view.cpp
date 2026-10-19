@@ -302,14 +302,19 @@ void RackView::applyAudioSettings(double sRate, uint32_t bufSize) {
 }
 
 void RackView::recallScene(size_t index) {
-    if (m_scenes.applyScene(static_cast<int>(index), m_graph, true /* allowAsync */)) {
-        syncMacrosFromGraph();
-        const auto* sc = m_scenes.getScene(index);
-        std::string name = sc ? sc->name : ("Preset " + std::to_string(index + 1));
-        triggerHudToast("SCENE: " + name);
-        m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, name),
-                                   name,
-                                   state::UndoActionType::SceneSwitch);
+    const auto& presetList = (!m_favoritePresets.empty()) ? m_favoritePresets : m_cachedUserPresetNames;
+    if (index < presetList.size()) {
+        loadPresetChain(presetList[index]);
+    } else if (!m_scenes.scenes().empty() && index < m_scenes.scenes().size()) {
+        if (m_scenes.applyScene(static_cast<int>(index), m_graph, true /* allowAsync */)) {
+            syncMacrosFromGraph();
+            const auto* sc = m_scenes.getScene(index);
+            std::string name = sc ? sc->name : ("Preset " + std::to_string(index + 1));
+            triggerHudToast("SCENE: " + name);
+            m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, name),
+                                       name,
+                                       state::UndoActionType::SceneSwitch);
+        }
     }
 }
 
@@ -463,6 +468,8 @@ void RackView::render() {
                 if (m_midiMapMode) {
                     m_keyMapMode = false;
                     m_awaitingKeyTarget.active = false;
+                } else {
+                    m_midi.cancelLearning();
                 }
                 triggerHudToast(m_midiMapMode ? "MIDI MAP MODE: ACTIVE" : "MIDI MAP MODE: OFF");
             }
@@ -470,10 +477,29 @@ void RackView::render() {
                 m_keyMapMode = !m_keyMapMode;
                 if (m_keyMapMode) {
                     m_midiMapMode = false;
+                    m_midi.cancelLearning();
                 } else {
                     m_awaitingKeyTarget.active = false;
                 }
                 triggerHudToast(m_keyMapMode ? "KEY MAP MODE: ACTIVE" : "KEY MAP MODE: OFF");
+            }
+
+            // Escape cancels active MIDI / Key map mode, MIDI learn, or hotkey legend
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+                if (m_keyMapMode) {
+                    m_keyMapMode = false;
+                    m_awaitingKeyTarget.active = false;
+                    triggerHudToast("KEY MAP MODE: OFF");
+                } else if (m_midiMapMode) {
+                    m_midiMapMode = false;
+                    m_midi.cancelLearning();
+                    triggerHudToast("MIDI MAP MODE: OFF");
+                } else if (m_midi.isLearning()) {
+                    m_midi.cancelLearning();
+                    triggerHudToast("MIDI LEARN CANCELLED");
+                } else if (m_showHotkeyLegend) {
+                    m_showHotkeyLegend = false;
+                }
             }
 
             if (m_keyMapMode && m_awaitingKeyTarget.active) {
@@ -505,22 +531,26 @@ void RackView::render() {
             };
 
             // 6. Presets 1-8 (suppressed while Key Map mode is capturing or when key is bound to a custom target)
-            if (!m_keyMapMode) {
-                for (int k = 0; k < 8 && k < static_cast<int>(m_scenes.numScenes()); ++k) {
+            if (!m_keyMapMode && !io.KeyCtrl && !io.KeyAlt) {
+                const auto& presetList = (!m_favoritePresets.empty()) ? m_favoritePresets : m_cachedUserPresetNames;
+                for (int k = 0; k < 8 && k < static_cast<int>(presetList.size()); ++k) {
                     const auto presetKey = static_cast<ImGuiKey>(ImGuiKey_1 + k);
                     if (!isKeyCustomBound(presetKey) && ImGui::IsKeyPressed(presetKey, false)) {
-                        if (m_scenes.applyScene(k, m_graph, true /* allowAsync */)) {
-                            syncMacrosFromGraph();
-                            triggerHudToast("PRESET " + std::to_string(k + 1) + " RECALLED");
-                            m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, "Recall Preset " + std::to_string(k + 1)),
-                                                       "Preset " + std::to_string(k + 1),
-                                                       state::UndoActionType::SceneSwitch);
-                        }
+                        loadPresetChain(presetList[k]);
                     }
                 }
             }
 
-            // 7. Focused Card Shortcuts: [, ], Q, 0
+            // 7. Adjacent preset scene switching: [ and ]
+            if (!m_keyMapMode && !io.KeyCtrl && !io.KeyAlt) {
+                if (!isKeyCustomBound(ImGuiKey_LeftBracket) && ImGui::IsKeyPressed(ImGuiKey_LeftBracket, false)) {
+                    cycleAdjacentScenePreset(-1);
+                } else if (!isKeyCustomBound(ImGuiKey_RightBracket) && ImGui::IsKeyPressed(ImGuiKey_RightBracket, false)) {
+                    cycleAdjacentScenePreset(+1);
+                }
+            }
+
+            // 8. Focused Card Shortcuts: Q, 0
             if (!m_focusedSlot && m_focusedSlotIndex < 0 && m_graph.numNodes() > 0) {
                 for (size_t n = 0; n < m_graph.numNodes(); ++n) {
                     auto* node = m_graph.getNode(n);
@@ -532,13 +562,7 @@ void RackView::render() {
                 }
             }
 
-            if (!m_keyMapMode && (m_focusedSlot || m_focusedSlotIndex >= 0)) {
-                if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket, false)) {
-                    cycleAdjacentScenePreset(-1);
-                } else if (ImGui::IsKeyPressed(ImGuiKey_RightBracket, false)) {
-                    cycleAdjacentScenePreset(+1);
-                }
-
+            if (!m_keyMapMode && !io.KeyCtrl && !io.KeyAlt) {
                 if (!isKeyCustomBound(ImGuiKey_Q) && ImGui::IsKeyPressed(ImGuiKey_Q, false)) {
                     int blockIdx = -1;
                     int branchIdx = -1;
@@ -588,12 +612,12 @@ void RackView::render() {
                 char bannerBuf[128];
                 const char* mapBanner = nullptr;
                 if (m_midiMapMode) {
-                    mapBanner = "● MIDI MAP MODE ACTIVE — CLICK ANY CONTROL TO LEARN MIDI CC";
+                    mapBanner = "● MIDI MAP MODE ACTIVE — CLICK ANY CONTROL TO LEARN MIDI CC (ESC TO CANCEL)";
                 } else if (m_awaitingKeyTarget.active) {
                     std::snprintf(bannerBuf, sizeof(bannerBuf), "● KEY MAP: PRESS KEY FOR [%s] (ESC TO CANCEL)", m_awaitingKeyTarget.targetLabel.c_str());
                     mapBanner = bannerBuf;
                 } else {
-                    mapBanner = "● KEY MAP MODE ACTIVE — CLICK ANY CONTROL TO ASSIGN KEY";
+                    mapBanner = "● KEY MAP MODE ACTIVE — CLICK ANY CONTROL TO ASSIGN KEY (ESC TO CANCEL)";
                 }
                 ImVec2 bSz = ImGui::CalcTextSize(mapBanner);
                 ImVec2 bPos(vp->Pos.x + (vp->Size.x - bSz.x) * 0.5f, vp->Pos.y + 10.0f);
@@ -619,13 +643,13 @@ void RackView::render() {
             bool wasOpen = m_settingsModal->isOpen();
             m_settingsModal->render();
             if (wasOpen && !m_settingsModal->isOpen()) {
+                const uint32_t prevMinutes = m_cachedConfig.retroactiveBufferMinutes;
                 m_config.load();
                 double sr = m_asio.currentSampleRate();
                 if (sr <= 0.0) sr = 48000.0;
-                if (m_config.retroactiveBufferMinutes != m_cachedConfig.retroactiveBufferMinutes) {
-                    m_riffBuffer.prepare(sr, static_cast<int>(m_config.retroactiveBufferMinutes));
+                if (m_cachedConfig.retroactiveBufferMinutes != prevMinutes) {
+                    m_riffBuffer.prepare(sr, static_cast<int>(m_cachedConfig.retroactiveBufferMinutes));
                 }
-                m_cachedConfig = m_config;
             }
         }
         m_practiceToolsModal->render();
@@ -642,12 +666,23 @@ void RackView::render() {
     ImGui::PopStyleColor(2);
 }
 
-bool RackView::renderStatusPill(bool isRunning, const char* statusText) {
+bool RackView::renderStatusPill(bool isRunning, const char* statusText, float pillWidth) {
     if (!statusText) return false;
 
     const ImVec2 textSize = ImGui::CalcTextSize(statusText);
     const float pillH = Metrics::pillHeight();
-    const float pillW = textSize.x + 36.0f;
+    float pillW = (pillWidth > 0.0f) ? pillWidth : (textSize.x + 36.0f);
+    if (pillWidth <= 0.0f && isRunning) {
+        // Fallback: reserve space for 2-digit DSP load if not explicitly passed
+        const char* dspPtr = std::strstr(statusText, "DSP: ");
+        if (dspPtr) {
+            const char* numPtr = dspPtr + 5;
+            if (numPtr[0] >= '0' && numPtr[0] <= '9' && numPtr[1] == '%') {
+                const float digitW = ImGui::CalcTextSize("9").x;
+                pillW += digitW;
+            }
+        }
+    }
     const ImVec2 pos = ImGui::GetCursorScreenPos();
 
     bool clicked = ImGui::InvisibleButton("##DspStatusPill", ImVec2(pillW, pillH));
@@ -3558,8 +3593,17 @@ void RackView::renderParallelBlock(audio::ParallelSplitMergeBlock* block, int bl
 }
 
 void RackView::renderBottomBar() {
+    const float windowBottomY = ImGui::GetWindowPos().y + ImGui::GetWindowHeight();
+    const float btnH = Metrics::buttonHeight();
+    const float bottomBarH = btnH + ui::px(18.0f);
+    const float borderY = windowBottomY - bottomBarH;
+
+    ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x, borderY));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, ui::px(3.0f)));
     ImGui::Separator();
+
+    const float targetY = std::round(borderY + (bottomBarH - btnH) * 0.5f);
+    ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x, targetY));
     const auto& tokens = themeTokens();
 
     // Left side: Settings button (clean name without brackets)
@@ -3602,7 +3646,19 @@ void RackView::renderBottomBar() {
         }
     }
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("%s", "Export circular audio buffer to %USERPROFILE%\\Documents\\Praccy\\Riffs\\ (Ctrl+Shift+R)");
+        std::string riffDir = m_cachedConfig.getResolvedRiffDirectory();
+        if (!riffDir.empty() && riffDir.back() != '\\' && riffDir.back() != '/') {
+#if defined(_WIN32)
+            riffDir += '\\';
+#else
+            riffDir += '/';
+#endif
+        }
+        const uint32_t durMin = (m_cachedConfig.retroactiveBufferMinutes > 0)
+                                    ? m_cachedConfig.retroactiveBufferMinutes
+                                    : 2;
+        ImGui::SetTooltip("Export circular audio buffer (%u min) to %s (Ctrl+Shift+R)",
+                          durMin, riffDir.c_str());
     }
 
     ImGui::SameLine(0, 8);
@@ -3617,6 +3673,8 @@ void RackView::renderBottomBar() {
             if (m_midiMapMode) {
                 m_keyMapMode = false;
                 m_awaitingKeyTarget.active = false;
+            } else {
+                m_midi.cancelLearning();
             }
             triggerHudToast(m_midiMapMode ? "MIDI MAP MODE: ACTIVE" : "MIDI MAP MODE: OFF");
         }
@@ -3636,6 +3694,7 @@ void RackView::renderBottomBar() {
             m_keyMapMode = !m_keyMapMode;
             if (m_keyMapMode) {
                 m_midiMapMode = false;
+                m_midi.cancelLearning();
             } else {
                 m_awaitingKeyTarget.active = false;
             }
@@ -3664,27 +3723,48 @@ void RackView::renderBottomBar() {
     const double sr = m_asio.currentSampleRate();
     const int bufSize = m_asio.currentBufferSize();
     const double latencyMs = (sr > 0.0) ? (static_cast<double>(bufSize) / sr * 1000.0) : 0.0;
-    float dspLoad = m_dspLoadPercent ? m_dspLoadPercent->load(std::memory_order_relaxed) : 0.0f;
+    // Rate limit changes per second of the load meter to 1/sec
+    const float rawDspLoad = m_dspLoadPercent ? m_dspLoadPercent->load(std::memory_order_relaxed) : 0.0f;
+    if (m_asio.isRunning()) {
+        const auto now = std::chrono::steady_clock::now();
+        if (m_lastDspLoadUpdateTime.time_since_epoch().count() == 0 ||
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastDspLoadUpdateTime).count() >= 1000) {
+            m_displayedDspLoad = rawDspLoad;
+            m_lastDspLoadUpdateTime = now;
+        }
+    } else {
+        m_displayedDspLoad = 0.0f;
+        m_lastDspLoadUpdateTime = {};
+    }
+    const float dspLoad = m_displayedDspLoad;
     uint32_t drops = m_dspDropouts ? m_dspDropouts->load(std::memory_order_relaxed) : 0;
 
     char statusText[160];
+    char refText[160];
     if (m_asio.isRunning()) {
         const char* srFormat = (std::fmod(sr, 1000.0) == 0.0) ? "%.0f kHz" : "%.1f kHz";
         char srBuf[32];
         std::snprintf(srBuf, sizeof(srBuf), srFormat, sr / 1000.0);
 
+        const float refLoad = (dspLoad < 100.0f) ? 99.0f : dspLoad;
         if (drops > 0) {
             std::snprintf(statusText, sizeof(statusText), "ACTIVE  |  %s  |  %d spls (%.1f ms)  |  DSP: %.0f%%  |  DROPS: %u",
                           srBuf, bufSize, latencyMs, dspLoad, drops);
+            std::snprintf(refText, sizeof(refText), "ACTIVE  |  %s  |  %d spls (%.1f ms)  |  DSP: %.0f%%  |  DROPS: %u",
+                          srBuf, bufSize, latencyMs, refLoad, drops);
         } else {
             std::snprintf(statusText, sizeof(statusText), "ACTIVE  |  %s  |  %d spls (%.1f ms)  |  DSP: %.0f%%",
                           srBuf, bufSize, latencyMs, dspLoad);
+            std::snprintf(refText, sizeof(refText), "ACTIVE  |  %s  |  %d spls (%.1f ms)  |  DSP: %.0f%%",
+                          srBuf, bufSize, latencyMs, refLoad);
         }
     } else {
         std::snprintf(statusText, sizeof(statusText), "STOPPED");
+        std::snprintf(refText, sizeof(refText), "STOPPED");
     }
 
-    const float pillW = ImGui::CalcTextSize(statusText).x + 36.0f;
+    const float pillTextW = std::max(ImGui::CalcTextSize(statusText).x, ImGui::CalcTextSize(refText).x);
+    const float pillW = pillTextW + 36.0f;
     const float hotkeyBtnW = 28.0f;
     const float spacingBetween = 8.0f;
     const float availW = ImGui::GetContentRegionAvail().x;
@@ -3729,7 +3809,7 @@ void RackView::renderBottomBar() {
     }
 
     ImGui::SameLine(0, spacingBetween);
-    renderStatusPill(m_asio.isRunning(), statusText);
+    renderStatusPill(m_asio.isRunning(), statusText, pillW);
     ImGui::PopStyleVar(); // ItemSpacing
 }
 
@@ -4096,7 +4176,7 @@ void RackView::renderUpdateModal() {
             }
             ImGui::SameLine();
         }
-        if (CenteredButton("Close", ImVec2(90, 26))) {
+        if (CenteredButton("Close", ImVec2(90, 26)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             m_showUpdateModal = false;
             ImGui::CloseCurrentPopup();
         }
@@ -4396,7 +4476,7 @@ void RackView::renderPresetBrowserModal() {
 
         ImGui::Separator();
         ImGui::Spacing();
-        if (CenteredButton("Close", ImVec2(90, Metrics::buttonHeight()))) {
+        if (CenteredButton("Close", ImVec2(90, Metrics::buttonHeight())) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             m_showPresetBrowserModal = false;
             ImGui::CloseCurrentPopup();
         }
@@ -4485,19 +4565,7 @@ void RackView::saveLastRiff() {
     stagingL.resize(capturedFrames);
     stagingR.resize(capturedFrames);
 
-    std::filesystem::path riffDir;
-    if (!m_cachedConfig.riffDirectory.empty()) {
-        riffDir = m_cachedConfig.riffDirectory;
-    } else {
-        std::string userProfile = "";
-        const char* up = std::getenv("USERPROFILE");
-        if (up && *up) {
-            userProfile = up;
-        } else {
-            userProfile = ".";
-        }
-        riffDir = std::filesystem::path(userProfile) / "Documents" / "Praccy" / "Riffs";
-    }
+    std::filesystem::path riffDir = m_cachedConfig.getResolvedRiffDirectory();
     try {
         std::filesystem::create_directories(riffDir);
     } catch (...) {}
@@ -4535,21 +4603,47 @@ void RackView::saveLastRiff() {
 }
 
 void RackView::cycleAdjacentScenePreset(int delta) {
-    if (m_scenes.numScenes() == 0) return;
-    int current = m_scenes.activeSceneIndex();
-    int maxScenes = static_cast<int>(std::min<size_t>(m_scenes.numScenes(), 8));
-    int next = std::clamp(current + delta, 0, maxScenes - 1);
-    if (next != current) {
-        if (m_scenes.applyScene(next, m_graph, true /* allowAsync */)) {
-            syncMacrosFromGraph();
-            const auto* sc = m_scenes.getScene(next);
-            std::string name = sc ? sc->name : ("Preset " + std::to_string(next + 1));
-            triggerHudToast("SCENE: " + name);
-            m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, name),
-                                       name,
-                                       state::UndoActionType::SceneSwitch);
+    const auto& presetList = (!m_favoritePresets.empty()) ? m_favoritePresets : m_cachedUserPresetNames;
+    if (presetList.empty()) {
+        if (m_scenes.numScenes() == 0) return;
+        int current = m_scenes.activeSceneIndex();
+        int maxScenes = static_cast<int>(std::min<size_t>(m_scenes.numScenes(), 8));
+        int next = std::clamp(current + delta, 0, maxScenes - 1);
+        if (next != current) {
+            if (m_scenes.applyScene(next, m_graph, true /* allowAsync */)) {
+                syncMacrosFromGraph();
+                const auto* sc = m_scenes.getScene(next);
+                std::string name = sc ? sc->name : ("Preset " + std::to_string(next + 1));
+                triggerHudToast("SCENE: " + name);
+                m_undoManager.pushSnapshot(state::SceneManager::captureGraphSnapshot(m_graph, name),
+                                           name,
+                                           state::UndoActionType::SceneSwitch);
+            }
+        }
+        return;
+    }
+
+    int currentIdx = -1;
+    for (size_t i = 0; i < presetList.size(); ++i) {
+        if (presetList[i] == m_auditionedPreset) {
+            currentIdx = static_cast<int>(i);
+            break;
         }
     }
+
+    int nextIdx = 0;
+    if (currentIdx >= 0) {
+        nextIdx = currentIdx + delta;
+        if (nextIdx < 0) {
+            nextIdx = static_cast<int>(presetList.size()) - 1;
+        } else if (nextIdx >= static_cast<int>(presetList.size())) {
+            nextIdx = 0;
+        }
+    } else {
+        nextIdx = (delta > 0) ? 0 : static_cast<int>(presetList.size()) - 1;
+    }
+
+    loadPresetChain(presetList[nextIdx]);
 }
 
 void RackView::initMacrosForSlot(audio::PluginSlot* slot) {
@@ -4662,15 +4756,16 @@ void RackView::refreshGuiParamBaseline(audio::PluginSlot* slot) {
     auto* pInst = dynamic_cast<plugins::IPluginInstance*>(slot->innerNode());
     if (!pInst) return;
 
-    const size_t nParams = pInst->numParameters();
-    auto& baseline = m_guiParamBaseline[slot];
-    baseline.resize(nParams);
-    for (size_t p = 0; p < nParams; ++p) {
-        baseline[p] = pInst->getParameterValueByIndex(p);
-    }
+    pInst->getAllParameterValues(m_guiParamBaseline[slot]);
 }
 
 void RackView::pollPluginGuiEdits(bool forceFlushPending) {
+    const auto now = std::chrono::steady_clock::now();
+    const bool throttledPollTick = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastGuiParamPollTime).count() >= 250;
+    if (throttledPollTick) {
+        m_lastGuiParamPollTime = now;
+    }
+
     auto pollSlot = [&](audio::PluginSlot* slot) {
         if (!slot) return;
         initMacrosForSlot(slot);
@@ -4694,14 +4789,15 @@ void RackView::pollPluginGuiEdits(bool forceFlushPending) {
         }
 
         // Only scan the full parameter bank on bulk preset changes (0xFFFFFFFFu) or at a throttled 4 Hz cadence
-        const bool throttledPollTick = (ImGui::GetFrameCount() % 15) == 0;
         if (((isWindowOpen && throttledPollTick) || (hasGuiEdit && editedParamId == 0xFFFFFFFFu)) && !ImGui::IsAnyItemActive()) {
             auto& baseline = m_guiParamBaseline[slot];
             if (baseline.size() != nParams) {
                 refreshGuiParamBaseline(slot);
             } else {
-                for (size_t p = 0; p < nParams; ++p) {
-                    const float curVal = pluginInst->getParameterValueByIndex(p);
+                std::vector<float> curValues;
+                pluginInst->getAllParameterValues(curValues);
+                for (size_t p = 0; p < nParams && p < curValues.size(); ++p) {
+                    const float curVal = curValues[p];
                     if (std::abs(curVal - baseline[p]) > 1e-4f) {
                         baseline[p] = curVal;
                         auto desc = pluginInst->getParameterDesc(p);
@@ -5025,9 +5121,10 @@ void RackView::renderHotkeyLegendOverlay() {
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     if (!vp) return;
 
-    const float overlayW = 440.0f;
-    const ImVec2 anchorPos(vp->Pos.x + vp->Size.x - 14.0f,
-                           vp->Pos.y + vp->Size.y - 42.0f);
+    const float overlayW = ui::px(440.0f);
+    const float bottomBarH = Metrics::buttonHeight() + ui::px(18.0f);
+    const ImVec2 anchorPos(vp->Pos.x + vp->Size.x - ui::px(14.0f),
+                           vp->Pos.y + vp->Size.y - bottomBarH);
 
     ImGui::SetNextWindowPos(anchorPos, ImGuiCond_Always, ImVec2(1.0f, 1.0f));
     ImGui::SetNextWindowSize(ImVec2(overlayW, 0.0f), ImGuiCond_Always);
@@ -5082,14 +5179,14 @@ void RackView::renderHotkeyLegendOverlay() {
             ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthStretch);
 
             renderKeyRow("Ctrl + Z", "Undo last parameter or slot edit");
-            renderKeyRow("Ctrl + Y / Shift+Z", "Redo last action");
+            renderKeyRow("Ctrl + Y / Ctrl+Shift+Z", "Redo last action");
             renderKeyRow("Ctrl + Shift + R", "Save retroactive riff (WAV)");
             renderKeyRow("Ctrl + P / Q", "Spotlight plugin browser & search");
             renderKeyRow("Ctrl + E", "Export signal chain as DAW preset");
             renderKeyRow("Ctrl + M", "Toggle MIDI learn mapping mode");
             renderKeyRow("Ctrl + K", "Toggle key mapping mode");
-            renderKeyRow("1 - 8", "Recall preset scenes 1 through 8");
-            renderKeyRow("[  /  ]", "Switch adjacent preset scene");
+            renderKeyRow("1 - 8", "Recall favorite presets 1 through 8");
+            renderKeyRow("[ / ]", "Switch adjacent favorite preset");
             renderKeyRow("0", "Bypass / activate selected plugin");
             renderKeyRow("Esc", "Close active popup / cancel mode");
             renderKeyRow("Alt", "Hold to show this shortcut legend");
@@ -5110,7 +5207,8 @@ void RackView::processKeyMapCapture() {
 
     if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
         m_awaitingKeyTarget.active = false;
-        triggerHudToast("KEY MAP CANCELLED");
+        m_keyMapMode = false;
+        triggerHudToast("KEY MAP MODE: OFF");
         return;
     }
 

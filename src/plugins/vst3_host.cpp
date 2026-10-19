@@ -38,7 +38,6 @@ struct SyncHostTaskReq {
     std::function<void()> fn;
     HANDLE ackEvent{nullptr};
     std::atomic<int> refCount{2};
-
     void release() {
         if (refCount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
             if (ackEvent) {
@@ -47,6 +46,10 @@ struct SyncHostTaskReq {
             delete this;
         }
     }
+};
+
+struct AsyncHostTaskReq {
+    std::function<void()> fn;
 };
 
 using InitDllProc = bool (PLUGIN_API *)();
@@ -226,11 +229,16 @@ public:
         if (!inResize.compare_exchange_strong(expected, true)) return Steinberg::kResultOk;
         int newW = newSize->right - newSize->left;
         int newH = newSize->bottom - newSize->top;
-        RECT wr = {0, 0, newW, newH};
-        AdjustWindowRectEx(&wr, static_cast<DWORD>(GetWindowLongW(hwnd, GWL_STYLE)), FALSE, static_cast<DWORD>(GetWindowLongW(hwnd, GWL_EXSTYLE)));
-        int totalW = wr.right - wr.left;
-        int totalH = wr.bottom - wr.top;
-        SetWindowPos(hwnd, nullptr, 0, 0, totalW, totalH, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        const DWORD winThread = GetWindowThreadProcessId(hwnd, nullptr);
+        if (GetCurrentThreadId() == winThread) {
+            RECT wr = {0, 0, newW, newH};
+            AdjustWindowRectEx(&wr, static_cast<DWORD>(GetWindowLongW(hwnd, GWL_STYLE)), FALSE, static_cast<DWORD>(GetWindowLongW(hwnd, GWL_EXSTYLE)));
+            int totalW = wr.right - wr.left;
+            int totalH = wr.bottom - wr.top;
+            SetWindowPos(hwnd, nullptr, 0, 0, totalW, totalH, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        } else {
+            PostMessageW(hwnd, WM_USER + 201, static_cast<WPARAM>(newW), static_cast<LPARAM>(newH));
+        }
         view->onSize(newSize);
         inResize.store(false, std::memory_order_release);
         return Steinberg::kResultOk;
@@ -329,6 +337,19 @@ void Vst3PluginInstance::invokeOnHostThread(const std::function<void()>& fn, DWO
     req->release();
 }
 
+void Vst3PluginInstance::postToHostThread(std::function<void()> fn) const {
+    if (!fn) return;
+    const DWORD tid = m_hostThreadId.load(std::memory_order_acquire);
+    if (tid == 0 || GetCurrentThreadId() == tid) {
+        fn();
+        return;
+    }
+    auto* req = new AsyncHostTaskReq{std::move(fn)};
+    if (!PostThreadMessageW(tid, WM_USER + 106, reinterpret_cast<WPARAM>(req), 0)) {
+        delete req;
+    }
+}
+
 void Vst3PluginInstance::onGuiBeginEdit(Steinberg::Vst::ParamID paramId) noexcept {
     if (m_suppressHandlerCallbacks.load(std::memory_order_relaxed)) return;
     setGuiEditingActive(true);
@@ -425,7 +446,11 @@ bool Vst3PluginInstance::initHostInternal(const std::string& path) {
         }
     }
 
-    HMODULE hLib = LoadLibraryW(dllPath.wstring().c_str());
+    HMODULE hLib = nullptr;
+    {
+        std::lock_guard<std::recursive_mutex> lock(pluginDllMutex());
+        hLib = LoadLibraryW(dllPath.wstring().c_str());
+    }
     if (!hLib) {
         std::cerr << "Failed to LoadLibrary for VST3: " << dllPath.string() << "\n";
         return false;
@@ -575,6 +600,14 @@ std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::
                         SetEvent(req->ackEvent);
                     }
                     req->release();
+                }
+            } else if (msg.message == WM_USER + 106) { // ASYNC_HOST_TASK
+                auto* req = reinterpret_cast<AsyncHostTaskReq*>(msg.wParam);
+                if (req) {
+                    if (req->fn) {
+                        req->fn();
+                    }
+                    delete req;
                 }
             }
             TranslateMessage(&msg);
@@ -1006,7 +1039,7 @@ void Vst3PluginInstance::setParameterValue(uint32_t paramId, float value) {
 
     // Only invoke IEditController on GUI/STA host thread, NEVER from the high-priority ASIO audio thread!
     if (m_controller && GetCurrentThreadId() != m_audioThreadId.load(std::memory_order_relaxed)) {
-        invokeOnHostThread([this, paramId, normVal]() {
+        postToHostThread([this, paramId, normVal]() {
             if (!m_controller) return;
             m_suppressHandlerCallbacks.store(true, std::memory_order_relaxed);
             safeCallPlugin([&]() {
@@ -1194,7 +1227,7 @@ void Vst3PluginInstance::onGuiResize(int width, int height) {
         return;
     }
     if (m_plugView && width > 64 && height > 64 && !m_faulted.load(std::memory_order_relaxed)) {
-        invokeOnHostThread([this, width, height]() {
+        postToHostThread([this, width, height]() {
             if (!m_plugView || m_faulted.load(std::memory_order_relaxed)) return;
             safeCallPluginGui([&]() {
                 Steinberg::ViewRect rect{0, 0, width, height};
@@ -1225,6 +1258,14 @@ float Vst3PluginInstance::getParameterValueByIndex(size_t index) const {
         return m_paramDescs[index].currentValue;
     }
     return 0.0f;
+}
+
+void Vst3PluginInstance::getAllParameterValues(std::vector<float>& out) const {
+    std::lock_guard<std::mutex> lock(m_paramCacheMutex);
+    out.resize(m_paramDescs.size());
+    for (size_t i = 0; i < m_paramDescs.size(); ++i) {
+        out[i] = m_paramDescs[i].currentValue;
+    }
 }
 
 void Vst3PluginInstance::closeGuiInternal() {

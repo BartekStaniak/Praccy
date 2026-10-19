@@ -538,6 +538,75 @@ bool test_real_vst3_async_gui_opening() {
     return true;
 }
 
+static bool test_cancel_all_watermark_preserves_new_tasks() {
+    std::cout << "[Test 6] AsyncPluginLoader cancelAll Watermark Semantics...\n";
+
+    auto& loader = praccy::plugins::AsyncPluginLoader::instance();
+
+    // 1. Enqueue task to cancel
+    auto oldPlaceholder = std::make_unique<praccy::audio::LoadingPluginPlaceholder>(
+        "Old Plugin", "Vendor", "Builtin", "builtin://drive"
+    );
+    auto oldSlot = std::make_unique<praccy::audio::PluginSlot>(std::move(oldPlaceholder));
+
+    loader.enqueueLoad(
+        oldSlot.get(),
+        "builtin://drive",
+        praccy::plugins::PluginType::BuiltIn,
+        "Overdrive",
+        "",
+        {},
+        48000.0,
+        256,
+        false
+    );
+
+    // 2. Call cancelAll() simulating preset change
+    loader.cancelAll();
+
+    // 3. Immediately enqueue a new task (like createSlotFromPreset does)
+    auto newPlaceholder = std::make_unique<praccy::audio::LoadingPluginPlaceholder>(
+        "New Plugin", "Vendor", "Builtin", "builtin://drive"
+    );
+    auto newSlot = std::make_unique<praccy::audio::PluginSlot>(std::move(newPlaceholder));
+
+    std::atomic<bool> newSlotReady{false};
+    loader.enqueueLoad(
+        newSlot.get(),
+        "builtin://drive",
+        praccy::plugins::PluginType::BuiltIn,
+        "Overdrive",
+        "",
+        {},
+        48000.0,
+        256,
+        false,
+        [&](bool success) {
+            newSlotReady.store(success);
+        }
+    );
+
+    // Wait up to 500ms for loader to process
+    for (int i = 0; i < 50; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        loader.update([&](praccy::audio::PluginSlot* s, std::unique_ptr<praccy::plugins::IPluginInstance> inst, bool) {
+            std::unique_ptr<praccy::audio::AudioNode> oldNode;
+            s->replaceInnerNode(std::move(inst), oldNode);
+        });
+        if (newSlotReady.load() && !newSlot->isLoading()) {
+            break;
+        }
+    }
+
+    if (!newSlotReady.load() || newSlot->isLoading()) {
+        std::cerr << "  FAIL: Task enqueued immediately after cancelAll was erroneously cancelled!\n";
+        return false;
+    }
+
+    std::cout << "  PASS: Tasks enqueued after cancelAll complete and swap correctly.\n";
+    return true;
+}
+
 int main() {
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
@@ -555,6 +624,8 @@ int main() {
     bool ok4 = test_real_vst3_async_load_and_swap();
     std::cout << "Running Test 5...\n";
     bool ok5 = test_real_vst3_async_gui_opening();
+    std::cout << "Running Test 6...\n";
+    bool ok6 = test_cancel_all_watermark_preserves_new_tasks();
 
     std::cout << "\n================================================================================\n"
               << "SUMMARY RESULTS:\n"
@@ -563,9 +634,10 @@ int main() {
               << "  [3] Async Loader Cancellation:            " << (ok3 ? "PASSED" : "FAILED") << "\n"
               << "  [4] Real VST3 Async Load & Swap:          " << (ok4 ? "PASSED" : "FAILED") << "\n"
               << "  [5] Real VST3 Async GUI Opening:          " << (ok5 ? "PASSED" : "FAILED") << "\n"
+              << "  [6] cancelAll Watermark Preservation:     " << (ok6 ? "PASSED" : "FAILED") << "\n"
               << "================================================================================\n";
 
-    if (ok1 && ok2 && ok3 && ok4 && ok5) {
+    if (ok1 && ok2 && ok3 && ok4 && ok5 && ok6) {
         std::cout << ">> ALL ASYNC PLUGIN LOADING TESTS PASSED CLEANLY.\n";
         return 0;
     } else {

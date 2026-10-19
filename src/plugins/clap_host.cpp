@@ -427,10 +427,14 @@ std::unique_ptr<ClapPluginInstance> ClapPluginInstance::loadFromFile(const std::
     if (wlen > 1) {
         MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, wpath.data(), wlen);
     }
-    HMODULE hLib = LoadLibraryW(wpath.c_str());
-    if (!hLib) {
-        // Fallback to ANSI if UTF-8 conversion fails or module not found
-        hLib = LoadLibraryA(path.c_str());
+    HMODULE hLib = nullptr;
+    {
+        std::lock_guard<std::recursive_mutex> lock(pluginDllMutex());
+        hLib = LoadLibraryW(wpath.c_str());
+        if (!hLib) {
+            // Fallback to ANSI if UTF-8 conversion fails or module not found
+            hLib = LoadLibraryA(path.c_str());
+        }
     }
     if (!hLib) {
         std::cerr << "Failed to LoadLibrary for CLAP: " << path << "\n";
@@ -919,6 +923,32 @@ float ClapPluginInstance::getParameterValueByIndex(size_t index) const {
         return static_cast<float>(info.default_value);
     }
     return 0.0f;
+}
+
+void ClapPluginInstance::getAllParameterValues(std::vector<float>& out) const {
+    if (!m_paramsExt || !m_plugin || m_faulted.load(std::memory_order_relaxed)) {
+        out.clear();
+        return;
+    }
+    std::lock_guard<std::mutex> lock(m_paramCacheMutex);
+    size_t count = 0;
+    safeCallPlugin([&]() {
+        count = m_paramsExt->count(m_plugin);
+    });
+    out.resize(count);
+    for (size_t i = 0; i < count; ++i) {
+        clap_param_info info{};
+        if (m_paramsExt->get_info(m_plugin, static_cast<uint32_t>(i), &info)) {
+            auto it = m_paramCache.find(info.id);
+            if (it != m_paramCache.end()) {
+                out[i] = it->second;
+            } else {
+                out[i] = static_cast<float>(info.default_value);
+            }
+        } else {
+            out[i] = 0.0f;
+        }
+    }
 }
 
 void ClapPluginInstance::openGuiAsync(HWND parentHwnd, std::function<void(bool success)> onComplete) {

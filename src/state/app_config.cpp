@@ -26,6 +26,20 @@ std::string AppConfig::getConfigFilePath() {
     return (std::filesystem::path(getConfigDir()) / "config.ini").string();
 }
 
+std::string AppConfig::getResolvedRiffDirectory() const {
+    if (!riffDirectory.empty()) {
+        return riffDirectory;
+    }
+    const char* userProfile = std::getenv("USERPROFILE");
+    if (!userProfile || !*userProfile) {
+        userProfile = std::getenv("HOME");
+    }
+    if (userProfile && *userProfile) {
+        return (std::filesystem::path(userProfile) / "Documents" / "Praccy" / "Riffs").string();
+    }
+    return "Documents/Praccy/Riffs";
+}
+
 bool AppConfig::load(const std::string& customPath) {
     std::string path = customPath.empty() ? getConfigFilePath() : customPath;
     std::ifstream file(path);

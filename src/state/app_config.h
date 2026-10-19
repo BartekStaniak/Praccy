@@ -113,6 +113,7 @@ struct AppConfig {
 
     static std::string getConfigDir();
     static std::string getConfigFilePath();
+    [[nodiscard]] std::string getResolvedRiffDirectory() const;
     bool load(const std::string& customPath = "");
     bool save(const std::string& customPath = "") const;
 
