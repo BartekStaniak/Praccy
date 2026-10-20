@@ -55,7 +55,10 @@ void Vst3PluginInstance::openGuiAsync(HWND, std::function<void(bool)> cb) { if (
 void Vst3PluginInstance::pollAsyncGuiResults() {}
 void Vst3PluginInstance::closeGui() {}
 void Vst3PluginInstance::getPreferredSize(int& w, int& h) const { w = 800; h = 600; }
+bool Vst3PluginInstance::adjustSize(int&, int&) { return false; }
 void Vst3PluginInstance::onGuiResize(int, int) {}
+float Vst3PluginInstance::getParameterValueByIndex(size_t) const { return 0.0f; }
+void Vst3PluginInstance::getAllParameterValues(std::vector<float>& outValues) const { outValues.clear(); }
 std::vector<uint8_t> Vst3PluginInstance::saveState() const { return {}; }
 bool Vst3PluginInstance::loadState(const std::vector<uint8_t>&) { return false; }
 bool Vst3PluginInstance::ensureControllerInitialized() { return false; }
@@ -63,7 +66,6 @@ void Vst3PluginInstance::resetFault() noexcept {}
 
 } // namespace praccy::plugins
 namespace Steinberg {
-DEF_CLASS_IID(FUnknown)
 namespace Vst {
 DEF_CLASS_IID(IParamValueQueue)
 DEF_CLASS_IID(IParameterChanges)
@@ -86,7 +88,10 @@ void ClapPluginInstance::openGuiAsync(HWND, std::function<void(bool)> cb) { if (
 void ClapPluginInstance::pollAsyncGuiResults() {}
 void ClapPluginInstance::closeGui() {}
 void ClapPluginInstance::getPreferredSize(int& w, int& h) const { w = 800; h = 600; }
+bool ClapPluginInstance::adjustSize(int&, int&) { return false; }
 void ClapPluginInstance::onGuiResize(int, int) {}
+float ClapPluginInstance::getParameterValueByIndex(size_t) const { return 0.0f; }
+void ClapPluginInstance::getAllParameterValues(std::vector<float>& outValues) const { outValues.clear(); }
 std::vector<uint8_t> ClapPluginInstance::saveState() const { return {}; }
 bool ClapPluginInstance::loadState(const std::vector<uint8_t>&) { return false; }
 void ClapPluginInstance::handleMainThreadCallbacks() noexcept {}

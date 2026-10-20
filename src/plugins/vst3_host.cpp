@@ -587,7 +587,7 @@ std::unique_ptr<Vst3PluginInstance> Vst3PluginInstance::loadFromFile(const std::
                 auto* req = reinterpret_cast<AsyncGuiOpenReq*>(msg.wParam);
                 if (req) {
                     bool guiOk = inst->openGuiInternal(req->parentHwnd);
-                    inst->m_asyncGuiResults.try_enqueue({ req->parentHwnd, guiOk, std::move(req->callback) });
+                    inst->m_asyncGuiResults.try_enqueue(AsyncGuiOpenResult{ req->parentHwnd, guiOk, std::move(req->callback) });
                     delete req;
                 }
             } else if (msg.message == WM_USER + 105) { // SYNC_HOST_TASK

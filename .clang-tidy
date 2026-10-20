@@ -4,7 +4,10 @@ Checks: >
   concurrency-*,
   performance-*,
   modernize-*,
+  -modernize-use-trailing-return-type,
   cppcoreguidelines-*,
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
   clang-analyzer-*
 WarningsAsErrors: ''
 HeaderFilterRegex: '^src/.*'

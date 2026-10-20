@@ -65,7 +65,7 @@ bool matchesFavoriteString(const std::string& fav, const std::string& target) {
     return !cleanFav.empty() && cleanFav == cleanTarget;
 }
 
-bool isValidPeBinary(const std::filesystem::path& p) {
+[[maybe_unused]] bool isValidPeBinary(const std::filesystem::path& p) {
     std::error_code ec;
     if (!std::filesystem::is_regular_file(p, ec)) return false;
     auto sz = std::filesystem::file_size(p, ec);

@@ -15,15 +15,20 @@ set(PRACCY_VER_MINOR ${CMAKE_MATCH_1})
 string(REGEX MATCH "#define PRACCY_VERSION_PATCH ([0-9]+)" _ "${_PRACCY_VER_H}")
 set(PRACCY_VER_PATCH ${CMAKE_MATCH_1})
 
-# Version: 2.8
-set(PRACCY_VERSION_STRING "2.8")
+# Version: 2.8.0
+set(PRACCY_VERSION_STRING "${PRACCY_VER_MAJOR}.${PRACCY_VER_MINOR}.${PRACCY_VER_PATCH}")
 
-project(Praccy VERSION ${PRACCY_VER_MAJOR}.${PRACCY_VER_MINOR}.${PRACCY_VER_PATCH} LANGUAGES CXX C RC)
+project(Praccy VERSION ${PRACCY_VER_MAJOR}.${PRACCY_VER_MINOR}.${PRACCY_VER_PATCH} LANGUAGES CXX C)
+if(WIN32)
+    enable_language(RC)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+find_package(Threads REQUIRED)
 
 # Ensure <pluginterfaces/...> resolves cleanly from third_party/vst3_pluginterfaces
 if(NOT EXISTS "${CMAKE_BINARY_DIR}/vst3_sdk/pluginterfaces")
@@ -84,11 +89,15 @@ set(THIRD_PARTY_SOURCES
     third_party/imgui/imgui_draw.cpp
     third_party/imgui/imgui_tables.cpp
     third_party/imgui/imgui_widgets.cpp
-    third_party/imgui/backends/imgui_impl_win32.cpp
-    third_party/imgui/backends/imgui_impl_dx11.cpp
     third_party/vst3_pluginterfaces/base/funknown.cpp
     third_party/vst3_pluginterfaces/base/coreiids.cpp
 )
+if(WIN32)
+    list(APPEND THIRD_PARTY_SOURCES
+        third_party/imgui/backends/imgui_impl_win32.cpp
+        third_party/imgui/backends/imgui_impl_dx11.cpp
+    )
+endif()
 
 if(MSVC)
     set_source_files_properties(${THIRD_PARTY_SOURCES} PROPERTIES COMPILE_OPTIONS "/W0")
@@ -100,12 +109,8 @@ endif()
 # Core Static Library (praccy_core)
 # ============================================================================
 set(PRACCY_CORE_SOURCES
-    src/audio/asio_manager.cpp
     src/audio/graph_engine.cpp
-    src/plugins/clap_host.cpp
     src/plugins/async_plugin_loader.cpp
-    src/plugins/vst3_host.cpp
-    src/plugins/plugin_window.cpp
     src/plugins/builtin_dsp.cpp
     src/plugins/plugin_scanner.cpp
     src/midi/midi_manager.cpp
@@ -116,15 +121,10 @@ set(PRACCY_CORE_SOURCES
     src/state/scene_manager.cpp
     src/state/app_config.cpp
     src/state/undo_manager.cpp
-    src/ui/rack_view.cpp
     src/ui/modals/plugin_browser_modal.cpp
-    src/ui/modals/settings_modal.cpp
     src/ui/modals/practice_tools_modal.cpp
     src/ui/modals/tuner_settings_modal.cpp
-    src/ui/thumbnail_manager.cpp
-    src/ui/update_checker.cpp
     src/ui/drag_drop_router.cpp
-    src/ui/modals/export_daw_chain_modal.cpp
     src/utils/archive_utils.cpp
     src/utils/xml_parser.cpp
     src/state/daw_interop/reaper_adapter.cpp
@@ -134,6 +134,20 @@ set(PRACCY_CORE_SOURCES
     src/state/daw_interop/universal_daw_interop_manager.cpp
     ${THIRD_PARTY_SOURCES}
 )
+
+if(WIN32)
+    list(APPEND PRACCY_CORE_SOURCES
+        src/audio/asio_manager.cpp
+        src/plugins/clap_host.cpp
+        src/plugins/vst3_host.cpp
+        src/plugins/plugin_window.cpp
+        src/ui/rack_view.cpp
+        src/ui/modals/settings_modal.cpp
+        src/ui/thumbnail_manager.cpp
+        src/ui/update_checker.cpp
+        src/ui/modals/export_daw_chain_modal.cpp
+    )
+endif()
 
 add_library(praccy_core STATIC ${PRACCY_CORE_SOURCES})
 
@@ -150,142 +164,149 @@ target_include_directories(praccy_core SYSTEM PUBLIC
     third_party/readerwriterqueue
 )
 
-target_link_libraries(praccy_core PUBLIC
-    d3d11
-    d3dcompiler
-    dxgi
-    dwmapi
-    winmm
-    avrt
-    ole32
-    uuid
-    gdi32
-    gdiplus
-    wininet
-    user32
-    kernel32
-    shell32
-)
+if(WIN32)
+    target_link_libraries(praccy_core PUBLIC
+        d3d11
+        d3dcompiler
+        dxgi
+        dwmapi
+        winmm
+        avrt
+        ole32
+        uuid
+        gdi32
+        gdiplus
+        wininet
+        user32
+        kernel32
+        shell32
+    )
+else()
+    target_link_libraries(praccy_core PUBLIC Threads::Threads)
+endif()
 
 target_compile_options(praccy_core PRIVATE ${PRACCY_STRICT_FLAGS})
 
 # ============================================================================
 # Main Application Target (Praccy)
 # ============================================================================
-add_executable(Praccy WIN32
-    src/main.cpp
-    resources/praccy.rc
-)
+if(WIN32)
+    add_executable(Praccy WIN32
+        src/main.cpp
+        resources/praccy.rc
+    )
 
-# Copy bundled resources to build output
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/thumbnails")
-    file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/resources/thumbnails" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/resources")
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/thumbnails")
+        file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/resources/thumbnails" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/resources")
+    endif()
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/text.png")
+        file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/resources/text.png" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/resources")
+    endif()
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/icon_512.png")
+        file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/resources/icon_512.png" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/resources")
+    endif()
+
+    target_include_directories(Praccy PRIVATE
+        resources
+    )
+
+    target_link_libraries(Praccy PRIVATE
+        praccy_core
+    )
+
+    target_compile_options(Praccy PRIVATE ${PRACCY_STRICT_FLAGS})
 endif()
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/text.png")
-    file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/resources/text.png" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/resources")
-endif()
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/icon_512.png")
-    file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/resources/icon_512.png" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/resources")
-endif()
-
-target_include_directories(Praccy PRIVATE
-    resources
-)
-
-target_link_libraries(Praccy PRIVATE
-    praccy_core
-)
-
-target_compile_options(Praccy PRIVATE ${PRACCY_STRICT_FLAGS})
 
 # ============================================================================
-# Test Targets (17 test targets)
+# Test Targets (19 test executables / 22 CTest suites)
 # ============================================================================
 enable_testing()
 
-# 1. Core Unit Tests
-add_executable(test_praccy tests/test_praccy.cpp)
-target_include_directories(test_praccy PRIVATE tests)
-target_link_libraries(test_praccy PRIVATE praccy_core)
-target_compile_options(test_praccy PRIVATE ${PRACCY_STRICT_FLAGS})
-add_test(NAME test_praccy COMMAND test_praccy)
+if(WIN32)
+    # 1. Core Unit Tests
+    add_executable(test_praccy tests/test_praccy.cpp)
+    target_include_directories(test_praccy PRIVATE tests)
+    target_link_libraries(test_praccy PRIVATE praccy_core)
+    target_compile_options(test_praccy PRIVATE ${PRACCY_STRICT_FLAGS})
+    add_test(NAME test_praccy COMMAND test_praccy)
 
-# 2. ASIO Driver Tests
-add_executable(test_asio_driver tests/test_asio_driver.cpp)
-target_include_directories(test_asio_driver PRIVATE tests)
-target_link_libraries(test_asio_driver PRIVATE praccy_core)
-target_compile_options(test_asio_driver PRIVATE ${PRACCY_STRICT_FLAGS})
-add_test(NAME test_asio_driver COMMAND test_asio_driver)
+    # 2. ASIO Driver Tests
+    add_executable(test_asio_driver tests/test_asio_driver.cpp)
+    target_include_directories(test_asio_driver PRIVATE tests)
+    target_link_libraries(test_asio_driver PRIVATE praccy_core)
+    target_compile_options(test_asio_driver PRIVATE ${PRACCY_STRICT_FLAGS})
+    add_test(NAME test_asio_driver COMMAND test_asio_driver)
 
-# 3. Challenger M1 Tests
-add_executable(test_challenger_m1 tests/test_challenger_m1.cpp)
-target_include_directories(test_challenger_m1 PRIVATE tests)
-target_link_libraries(test_challenger_m1 PRIVATE praccy_core)
-target_compile_options(test_challenger_m1 PRIVATE ${PRACCY_STRICT_FLAGS})
-add_test(NAME test_challenger_m1 COMMAND test_challenger_m1)
+    # 3. Challenger M1 Tests
+    add_executable(test_challenger_m1 tests/test_challenger_m1.cpp)
+    target_include_directories(test_challenger_m1 PRIVATE tests)
+    target_link_libraries(test_challenger_m1 PRIVATE praccy_core)
+    target_compile_options(test_challenger_m1 PRIVATE ${PRACCY_STRICT_FLAGS})
+    add_test(NAME test_challenger_m1 COMMAND test_challenger_m1)
 
-# 4. Challenger M1.2 Tests
-add_executable(test_challenger_m1_2 tests/test_challenger_m1_2.cpp)
-target_include_directories(test_challenger_m1_2 PRIVATE tests)
-target_link_libraries(test_challenger_m1_2 PRIVATE praccy_core)
-target_compile_options(test_challenger_m1_2 PRIVATE ${PRACCY_STRICT_FLAGS})
-add_test(NAME test_challenger_m1_2 COMMAND test_challenger_m1_2)
+    # 4. Challenger M1.2 Tests
+    add_executable(test_challenger_m1_2 tests/test_challenger_m1_2.cpp)
+    target_include_directories(test_challenger_m1_2 PRIVATE tests)
+    target_link_libraries(test_challenger_m1_2 PRIVATE praccy_core)
+    target_compile_options(test_challenger_m1_2 PRIVATE ${PRACCY_STRICT_FLAGS})
+    add_test(NAME test_challenger_m1_2 COMMAND test_challenger_m1_2)
 
-# 5. Challenger M2 Tests
-add_executable(test_challenger_m2 tests/test_challenger_m2.cpp)
-target_include_directories(test_challenger_m2 PRIVATE tests)
-target_link_libraries(test_challenger_m2 PRIVATE praccy_core)
-target_compile_options(test_challenger_m2 PRIVATE ${PRACCY_STRICT_FLAGS})
-add_test(NAME test_challenger_m2 COMMAND test_challenger_m2)
+    # 5. Challenger M2 Tests
+    add_executable(test_challenger_m2 tests/test_challenger_m2.cpp)
+    target_include_directories(test_challenger_m2 PRIVATE tests)
+    target_link_libraries(test_challenger_m2 PRIVATE praccy_core)
+    target_compile_options(test_challenger_m2 PRIVATE ${PRACCY_STRICT_FLAGS})
+    add_test(NAME test_challenger_m2 COMMAND test_challenger_m2)
 
-# 6. Challenger M2.1 Tests
-add_executable(test_challenger_m2_1 tests/test_challenger_m2_1.cpp)
-target_include_directories(test_challenger_m2_1 PRIVATE tests)
-target_link_libraries(test_challenger_m2_1 PRIVATE praccy_core)
-target_compile_options(test_challenger_m2_1 PRIVATE ${PRACCY_STRICT_FLAGS})
-add_test(NAME test_challenger_m2_1 COMMAND test_challenger_m2_1)
+    # 6. Challenger M2.1 Tests
+    add_executable(test_challenger_m2_1 tests/test_challenger_m2_1.cpp)
+    target_include_directories(test_challenger_m2_1 PRIVATE tests)
+    target_link_libraries(test_challenger_m2_1 PRIVATE praccy_core)
+    target_compile_options(test_challenger_m2_1 PRIVATE ${PRACCY_STRICT_FLAGS})
+    add_test(NAME test_challenger_m2_1 COMMAND test_challenger_m2_1)
 
-# 7. Challenger M2.2 Tests
-add_executable(test_challenger_m2_2 tests/test_challenger_m2_2.cpp)
-target_include_directories(test_challenger_m2_2 PRIVATE tests)
-target_link_libraries(test_challenger_m2_2 PRIVATE praccy_core)
-target_compile_options(test_challenger_m2_2 PRIVATE ${PRACCY_STRICT_FLAGS})
-add_test(NAME test_challenger_m2_2 COMMAND test_challenger_m2_2)
+    # 7. Challenger M2.2 Tests
+    add_executable(test_challenger_m2_2 tests/test_challenger_m2_2.cpp)
+    target_include_directories(test_challenger_m2_2 PRIVATE tests)
+    target_link_libraries(test_challenger_m2_2 PRIVATE praccy_core)
+    target_compile_options(test_challenger_m2_2 PRIVATE ${PRACCY_STRICT_FLAGS})
+    add_test(NAME test_challenger_m2_2 COMMAND test_challenger_m2_2)
 
-# 8. Challenger M3.1 Tests
-add_executable(test_challenger_m3_1 tests/test_challenger_m3_1.cpp)
-target_include_directories(test_challenger_m3_1 PRIVATE tests)
-target_link_libraries(test_challenger_m3_1 PRIVATE praccy_core)
-target_compile_options(test_challenger_m3_1 PRIVATE ${PRACCY_STRICT_FLAGS})
-add_test(NAME test_challenger_m3_1 COMMAND test_challenger_m3_1)
+    # 8. Challenger M3.1 Tests
+    add_executable(test_challenger_m3_1 tests/test_challenger_m3_1.cpp)
+    target_include_directories(test_challenger_m3_1 PRIVATE tests)
+    target_link_libraries(test_challenger_m3_1 PRIVATE praccy_core)
+    target_compile_options(test_challenger_m3_1 PRIVATE ${PRACCY_STRICT_FLAGS})
+    add_test(NAME test_challenger_m3_1 COMMAND test_challenger_m3_1)
 
-# 9. Challenger M3.2 Tests
-add_executable(test_challenger_m3_2 tests/test_challenger_m3_2.cpp)
-target_include_directories(test_challenger_m3_2 PRIVATE tests)
-target_link_libraries(test_challenger_m3_2 PRIVATE praccy_core)
-target_compile_options(test_challenger_m3_2 PRIVATE ${PRACCY_STRICT_FLAGS})
-add_test(NAME test_challenger_m3_2 COMMAND test_challenger_m3_2)
+    # 9. Challenger M3.2 Tests
+    add_executable(test_challenger_m3_2 tests/test_challenger_m3_2.cpp)
+    target_include_directories(test_challenger_m3_2 PRIVATE tests)
+    target_link_libraries(test_challenger_m3_2 PRIVATE praccy_core)
+    target_compile_options(test_challenger_m3_2 PRIVATE ${PRACCY_STRICT_FLAGS})
+    add_test(NAME test_challenger_m3_2 COMMAND test_challenger_m3_2)
 
-# 10. Challenger M4.1 Tests
-add_executable(test_challenger_m4_1 tests/test_challenger_m4_1.cpp)
-target_include_directories(test_challenger_m4_1 PRIVATE tests)
-target_link_libraries(test_challenger_m4_1 PRIVATE praccy_core)
-target_compile_options(test_challenger_m4_1 PRIVATE ${PRACCY_STRICT_FLAGS})
-add_test(NAME test_challenger_m4_1 COMMAND test_challenger_m4_1)
+    # 10. Challenger M4.1 Tests
+    add_executable(test_challenger_m4_1 tests/test_challenger_m4_1.cpp)
+    target_include_directories(test_challenger_m4_1 PRIVATE tests)
+    target_link_libraries(test_challenger_m4_1 PRIVATE praccy_core)
+    target_compile_options(test_challenger_m4_1 PRIVATE ${PRACCY_STRICT_FLAGS})
+    add_test(NAME test_challenger_m4_1 COMMAND test_challenger_m4_1)
 
-# 11. Challenger M4.2 Tests
-add_executable(test_challenger_m4_2 tests/test_challenger_m4_2.cpp)
-target_include_directories(test_challenger_m4_2 PRIVATE tests)
-target_link_libraries(test_challenger_m4_2 PRIVATE praccy_core)
-target_compile_options(test_challenger_m4_2 PRIVATE ${PRACCY_STRICT_FLAGS})
-add_test(NAME test_challenger_m4_2 COMMAND test_challenger_m4_2)
+    # 11. Challenger M4.2 Tests
+    add_executable(test_challenger_m4_2 tests/test_challenger_m4_2.cpp)
+    target_include_directories(test_challenger_m4_2 PRIVATE tests)
+    target_link_libraries(test_challenger_m4_2 PRIVATE praccy_core)
+    target_compile_options(test_challenger_m4_2 PRIVATE ${PRACCY_STRICT_FLAGS})
+    add_test(NAME test_challenger_m4_2 COMMAND test_challenger_m4_2)
 
-# 12. Praccy v2.1 Tests
-add_executable(test_praccy_v2_1 tests/test_praccy_v2_1.cpp)
-target_include_directories(test_praccy_v2_1 PRIVATE tests)
-target_link_libraries(test_praccy_v2_1 PRIVATE praccy_core)
-target_compile_options(test_praccy_v2_1 PRIVATE ${PRACCY_STRICT_FLAGS})
-add_test(NAME test_praccy_v2_1 COMMAND test_praccy_v2_1)
+    # 12. Praccy v2.1 Tests
+    add_executable(test_praccy_v2_1 tests/test_praccy_v2_1.cpp)
+    target_include_directories(test_praccy_v2_1 PRIVATE tests)
+    target_link_libraries(test_praccy_v2_1 PRIVATE praccy_core)
+    target_compile_options(test_praccy_v2_1 PRIVATE ${PRACCY_STRICT_FLAGS})
+    add_test(NAME test_praccy_v2_1 COMMAND test_praccy_v2_1)
+endif()
 
 # 13. Interop Fuzz Tests
 add_executable(test_interop_fuzz tests/test_interop_fuzz.cpp)
@@ -301,33 +322,35 @@ target_link_libraries(test_interop_roundtrip PRIVATE praccy_core)
 target_compile_options(test_interop_roundtrip PRIVATE ${PRACCY_STRICT_FLAGS})
 add_test(NAME test_interop_roundtrip COMMAND test_interop_roundtrip --all)
 
-# 15. Challenger Stage 1.2 Tests
-add_executable(test_challenger_stage1_2 tests/test_challenger_stage1_2.cpp)
-target_include_directories(test_challenger_stage1_2 PRIVATE tests)
-target_link_libraries(test_challenger_stage1_2 PRIVATE praccy_core)
-target_compile_options(test_challenger_stage1_2 PRIVATE ${PRACCY_STRICT_FLAGS})
-add_test(NAME test_challenger_stage1_2 COMMAND test_challenger_stage1_2)
+if(WIN32)
+    # 15. Challenger Stage 1.2 Tests
+    add_executable(test_challenger_stage1_2 tests/test_challenger_stage1_2.cpp)
+    target_include_directories(test_challenger_stage1_2 PRIVATE tests)
+    target_link_libraries(test_challenger_stage1_2 PRIVATE praccy_core)
+    target_compile_options(test_challenger_stage1_2 PRIVATE ${PRACCY_STRICT_FLAGS})
+    add_test(NAME test_challenger_stage1_2 COMMAND test_challenger_stage1_2)
 
-# 16. Challenger Stage 1 Audio Tests
-add_executable(test_challenger_stage1_audio tests/test_challenger_stage1_audio.cpp)
-target_include_directories(test_challenger_stage1_audio PRIVATE tests)
-target_link_libraries(test_challenger_stage1_audio PRIVATE praccy_core)
-target_compile_options(test_challenger_stage1_audio PRIVATE ${PRACCY_STRICT_FLAGS})
-add_test(NAME test_challenger_stage1_audio COMMAND test_challenger_stage1_audio)
+    # 16. Challenger Stage 1 Audio Tests
+    add_executable(test_challenger_stage1_audio tests/test_challenger_stage1_audio.cpp)
+    target_include_directories(test_challenger_stage1_audio PRIVATE tests)
+    target_link_libraries(test_challenger_stage1_audio PRIVATE praccy_core)
+    target_compile_options(test_challenger_stage1_audio PRIVATE ${PRACCY_STRICT_FLAGS})
+    add_test(NAME test_challenger_stage1_audio COMMAND test_challenger_stage1_audio)
 
-# 17. Remediation Characterization Tests
-add_executable(test_remediation_characterization tests/test_remediation_characterization.cpp)
-target_include_directories(test_remediation_characterization PRIVATE tests)
-target_link_libraries(test_remediation_characterization PRIVATE praccy_core)
-target_compile_options(test_remediation_characterization PRIVATE ${PRACCY_STRICT_FLAGS})
-add_test(NAME test_remediation_characterization COMMAND test_remediation_characterization --verify-fixed)
+    # 17. Remediation Characterization Tests
+    add_executable(test_remediation_characterization tests/test_remediation_characterization.cpp)
+    target_include_directories(test_remediation_characterization PRIVATE tests)
+    target_link_libraries(test_remediation_characterization PRIVATE praccy_core)
+    target_compile_options(test_remediation_characterization PRIVATE ${PRACCY_STRICT_FLAGS})
+    add_test(NAME test_remediation_characterization COMMAND test_remediation_characterization --verify-fixed)
 
-# 18. Async Plugin Loading Tests
-add_executable(test_async_plugin_loading tests/test_async_plugin_loading.cpp)
-target_include_directories(test_async_plugin_loading PRIVATE tests)
-target_link_libraries(test_async_plugin_loading PRIVATE praccy_core)
-target_compile_options(test_async_plugin_loading PRIVATE ${PRACCY_STRICT_FLAGS})
-add_test(NAME test_async_plugin_loading COMMAND test_async_plugin_loading)
+    # 18. Async Plugin Loading Tests
+    add_executable(test_async_plugin_loading tests/test_async_plugin_loading.cpp)
+    target_include_directories(test_async_plugin_loading PRIVATE tests)
+    target_link_libraries(test_async_plugin_loading PRIVATE praccy_core)
+    target_compile_options(test_async_plugin_loading PRIVATE ${PRACCY_STRICT_FLAGS})
+    add_test(NAME test_async_plugin_loading COMMAND test_async_plugin_loading)
+endif()
 
 # 19. Audit Remediation Regression Tests
 add_executable(test_audit_remediation tests/test_audit_remediation.cpp)

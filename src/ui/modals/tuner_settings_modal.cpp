@@ -473,7 +473,7 @@ void TunerSettingsModal::renderCustomTuningSection() {
             // 2. Note Dropdown combo (Vertically centered)
             ImGui::TableNextColumn();
             Spec::alignTableCellCenter(Spec::comboHeight(), Spec::tableRowHeight());
-            char comboId[32];
+            char comboId[48];
             std::snprintf(comboId, sizeof(comboId), "##StrNoteCombo_%zu", i);
             ImGui::SetNextItemWidth(ui::px(110.0f));
 
@@ -495,7 +495,7 @@ void TunerSettingsModal::renderCustomTuningSection() {
             // 3. Semitone +/- buttons (Vertically centered)
             ImGui::TableNextColumn();
             Spec::alignTableCellCenter(Spec::buttonHeight(), Spec::tableRowHeight());
-            char minusId[32], plusId[32];
+            char minusId[48], plusId[48];
             std::snprintf(minusId, sizeof(minusId), "-1 st##Minus_%zu", i);
             std::snprintf(plusId, sizeof(plusId), "+1 st##Plus_%zu", i);
 
@@ -514,7 +514,7 @@ void TunerSettingsModal::renderCustomTuningSection() {
             // 4. Octave +/- buttons (Vertically centered)
             ImGui::TableNextColumn();
             Spec::alignTableCellCenter(Spec::buttonHeight(), Spec::tableRowHeight());
-            char octMinusId[32], octPlusId[32];
+            char octMinusId[48], octPlusId[48];
             std::snprintf(octMinusId, sizeof(octMinusId), "- Oct##OctMinus_%zu", i);
             std::snprintf(octPlusId, sizeof(octPlusId), "+ Oct##OctPlus_%zu", i);
 

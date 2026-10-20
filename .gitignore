@@ -1,5 +1,6 @@
 # Build directories
 build/
+build_*/
 bin/
 out/
 .vs/
@@ -47,4 +48,3 @@ test_archive_sandbox_legit/
 # Internal audit/agent directives
 *swarm*directive*.md
 praccy*.md
-
