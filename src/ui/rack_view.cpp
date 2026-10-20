@@ -204,9 +204,8 @@ RackView::RackView(audio::GraphEngine& graph,
     m_cachedUserPresetNames = m_scenes.savedPresetNames();
     m_userPresetsValid = true;
 
-    state::AppConfig cfg;
-    cfg.load();
-    m_cachedConfig = cfg;
+    m_cachedConfig.load();
+    state::AppConfig& cfg = m_cachedConfig;
 
     // Restore Tuner Configuration
     m_tuner.setEnabled(cfg.tunerEnabled);
@@ -329,12 +328,9 @@ void RackView::toggleFavoritePreset(const std::string& name) {
     } else {
         m_favoritePresets.push_back(name);
     }
-    state::AppConfig cfg;
-    cfg.load();
-    cfg.presetFavoritesInitialized = true;
-    cfg.favoritePresets = m_favoritePresets;
-    cfg.save();
-    m_cachedConfig = cfg;
+    m_cachedConfig.presetFavoritesInitialized = true;
+    m_cachedConfig.favoritePresets = m_favoritePresets;
+    m_cachedConfig.save();
 }
 
 bool RackView::loadPresetChain(const std::string& name) {
@@ -346,11 +342,8 @@ bool RackView::loadPresetChain(const std::string& name) {
             "Preset: " + name,
             state::UndoActionType::SceneSwitch
         );
-        state::AppConfig cfg;
-        cfg.load();
-        cfg.lastLoadedPreset = name;
-        cfg.save();
-        m_cachedConfig = cfg;
+        m_cachedConfig.lastLoadedPreset = name;
+        m_cachedConfig.save();
         triggerHudToast("Loaded " + name);
         return true;
     }
@@ -1534,11 +1527,8 @@ void RackView::renderSceneBar() {
                     m_scenes.savePresetChain(m_presetNameBuffer, m_graph);
                     m_userPresetsValid = false;
                     m_auditionedPreset = m_presetNameBuffer;
-                    state::AppConfig cfg;
-                    cfg.load();
-                    cfg.lastLoadedPreset = m_presetNameBuffer;
-                    cfg.save();
-                    m_cachedConfig = cfg;
+                    m_cachedConfig.lastLoadedPreset = m_presetNameBuffer;
+                    m_cachedConfig.save();
                     triggerHudToast(std::string("Preset '") + m_presetNameBuffer + "' saved!");
                     m_showSavePresetModal = false;
                     ImGui::CloseCurrentPopup();
@@ -1843,10 +1833,8 @@ void RackView::renderInputCard(float cardY, float cardH) {
         else if (currentModeIdx == 2) inputConfig.mode = audio::InputRoutingMode::Stereo;
         m_graph.setInputRouting(inputConfig);
 
-        state::AppConfig cfg;
-        cfg.load();
-        cfg.inputMode = inputConfig.mode;
-        cfg.save();
+        m_cachedConfig.inputMode = inputConfig.mode;
+        m_cachedConfig.save();
     }
 
     float inGain = m_graph.inputGainDb();
