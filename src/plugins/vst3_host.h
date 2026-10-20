@@ -140,6 +140,8 @@ private:
 
     std::thread m_hostThread;
     std::atomic<DWORD> m_hostThreadId{0};
+    bool m_componentInitialized{false};
+    bool m_controllerSessionInitialized{false};
 
     bool initHostInternal(const std::string& path);
     void teardownHostInternal();

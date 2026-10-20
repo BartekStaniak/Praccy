@@ -361,7 +361,6 @@ target_compile_options(test_audit_remediation PRIVATE ${PRACCY_STRICT_FLAGS})
 add_test(NAME audit_regression_rt COMMAND test_audit_remediation --suite=rt)
 
 add_test(NAME audit_regression_mem COMMAND test_audit_remediation --suite=mem)
-set_tests_properties(audit_regression_mem PROPERTIES WILL_FAIL TRUE)
 
 add_test(NAME audit_regression_host COMMAND test_audit_remediation --suite=host)
 set_tests_properties(audit_regression_host PROPERTIES WILL_FAIL TRUE)

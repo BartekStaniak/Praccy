@@ -521,13 +521,17 @@ bool Vst3PluginInstance::initHostInternal(const std::string& path) {
         return false;
     }
 
-    // Query Audio Processor
+    if (m_component->initialize(nullptr) != Steinberg::kResultOk) {
+        std::cerr << "Failed to initialize IComponent for: " << m_name << "\n";
+        return false;
+    }
+    m_componentInitialized = true;
+
+    // Query Audio Processor after IComponent::initialize per VST3 lifecycle contract
     if (m_component->queryInterface(Steinberg::Vst::IAudioProcessor::iid, reinterpret_cast<void**>(&m_processor)) != Steinberg::kResultOk || !m_processor) {
         std::cerr << "Failed to query IAudioProcessor for: " << m_name << "\n";
         return false;
     }
-
-    m_component->initialize(nullptr);
 
     m_impl->processContext.state = Steinberg::Vst::ProcessContext::kPlaying |
                                    Steinberg::Vst::ProcessContext::kTempoValid |
@@ -664,7 +668,9 @@ bool Vst3PluginInstance::ensureControllerInitialized() {
     }
 
     if (m_controller) {
-        m_controller->initialize(nullptr);
+        if (m_controller->initialize(nullptr) == Steinberg::kResultOk) {
+            m_controllerSessionInitialized = true;
+        }
         m_controller->setComponentHandler(&m_impl->componentHandler);
 
         // Connect IConnectionPoint between component and controller
@@ -745,7 +751,7 @@ void Vst3PluginInstance::teardownHostInternal() {
     if (m_processor) {
         m_processor->setProcessing(false);
     }
-    if (m_component) {
+    if (m_component && m_componentInitialized) {
         m_component->setActive(false);
     }
 
@@ -766,11 +772,12 @@ void Vst3PluginInstance::teardownHostInternal() {
         }
     }
 
-    // 5. Terminate and release controller (only terminate if separate from component)
+    // 5. Terminate and release controller (only terminate if initialized and separate from component)
     if (m_controller) {
-        if (!isSingleComponent) {
+        if (!isSingleComponent && m_controllerSessionInitialized) {
             m_controller->terminate();
         }
+        m_controllerSessionInitialized = false;
         m_controller->release();
         m_controller = nullptr;
     }
@@ -781,9 +788,12 @@ void Vst3PluginInstance::teardownHostInternal() {
         m_processor = nullptr;
     }
 
-    // 7. Terminate and release component
+    // 7. Terminate and release component (only terminate if initialize() succeeded)
     if (m_component) {
-        m_component->terminate();
+        if (m_componentInitialized) {
+            m_component->terminate();
+            m_componentInitialized = false;
+        }
         m_component->release();
         m_component = nullptr;
     }
@@ -1127,36 +1137,9 @@ bool Vst3PluginInstance::openGui(HWND parentHwnd) {
     if (m_faulted.load(std::memory_order_acquire)) return false;
     if (!parentHwnd) return false;
 
-    const DWORD tid = m_hostThreadId.load(std::memory_order_acquire);
-    if (tid == 0 || GetCurrentThreadId() == tid) {
-        return openGuiInternal(parentHwnd);
-    }
-
-    HANDLE ack = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    PostThreadMessageW(tid, WM_USER + 101, reinterpret_cast<WPARAM>(ack), reinterpret_cast<LPARAM>(parentHwnd));
-
-    const auto startTime = std::chrono::steady_clock::now();
-    const DWORD timeoutMs = 30000;
-    while (true) {
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startTime).count();
-        if (elapsed >= timeoutMs) {
-            break;
-        }
-        DWORD remainingMs = static_cast<DWORD>(timeoutMs - elapsed);
-        DWORD waitRes = MsgWaitForMultipleObjectsEx(1, &ack, remainingMs, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
-        if (waitRes == WAIT_OBJECT_0) {
-            break;
-        } else if (waitRes == WAIT_OBJECT_0 + 1) {
-            MSG m;
-            while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
-                TranslateMessage(&m);
-                DispatchMessageW(&m);
-            }
-        } else {
-            break;
-        }
-    }
-    CloseHandle(ack);
+    invokeOnHostThread([this, parentHwnd]() {
+        openGuiInternal(parentHwnd);
+    }, 30000);
     return m_guiParentHwnd != nullptr;
 }
 
@@ -1284,30 +1267,9 @@ void Vst3PluginInstance::closeGuiInternal() {
 }
 
 void Vst3PluginInstance::closeGui() {
-    const DWORD tid = m_hostThreadId.load(std::memory_order_acquire);
-    if (tid == 0 || GetCurrentThreadId() == tid) {
+    invokeOnHostThread([this]() {
         closeGuiInternal();
-        return;
-    }
-
-    HANDLE ack = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    PostThreadMessageW(tid, WM_USER + 102, reinterpret_cast<WPARAM>(ack), 0);
-
-    while (true) {
-        DWORD waitRes = MsgWaitForMultipleObjectsEx(1, &ack, 5000, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
-        if (waitRes == WAIT_OBJECT_0) {
-            break;
-        } else if (waitRes == WAIT_OBJECT_0 + 1) {
-            MSG m;
-            while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
-                TranslateMessage(&m);
-                DispatchMessageW(&m);
-            }
-        } else {
-            break;
-        }
-    }
-    CloseHandle(ack);
+    }, 5000);
 }
 
 std::vector<uint8_t> Vst3PluginInstance::saveState() const {

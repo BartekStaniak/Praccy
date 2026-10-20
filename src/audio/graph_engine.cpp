@@ -888,6 +888,9 @@ void ParallelSplitMergeBlock::collectReclaimedBranches() noexcept {
     while (m_branchReclaimQueue.try_dequeue(reclaimed)) {
         reclaimed.reset();
     }
+    if (!m_isAudioRunning.load(std::memory_order_acquire)) {
+        m_deferredReclaimBranches.clear();
+    }
 }
 
 void ParallelSplitMergeBlock::collectReclaimedSlots() noexcept {
@@ -914,7 +917,11 @@ void ParallelSplitMergeBlock::drainCommandQueueIntoActive() {
         switch (cmd.type) {
             case BranchCommandType::Add: {
                 if (cmd.branch) {
-                    m_activeBranches.push_back(std::move(cmd.branch));
+                    if (m_activeBranches.size() < MAX_BRANCHES) {
+                        m_activeBranches.push_back(std::move(cmd.branch));
+                    } else {
+                        stashBranchForReclamation(std::move(cmd.branch));
+                    }
                 }
                 break;
             }
@@ -1271,7 +1278,11 @@ void GraphEngine::drainCommandQueueIntoActive() {
                     it = m_activeNodes.begin() + cmd.indexA;
                 }
                 if (it != m_activeNodes.end()) {
+                    auto removed = std::move(*it);
                     m_activeNodes.erase(it);
+                    if (!m_reclaimQueue.try_enqueue(std::move(removed))) {
+                        stashForReclamation(std::move(removed));
+                    }
                 }
                 break;
             }
@@ -1290,11 +1301,25 @@ void GraphEngine::drainCommandQueueIntoActive() {
                 break;
             }
             case GraphCommandType::Clear: {
+                for (auto& n : m_activeNodes) {
+                    if (n) {
+                        if (!m_reclaimQueue.try_enqueue(std::move(n))) {
+                            stashForReclamation(std::move(n));
+                        }
+                    }
+                }
                 m_activeNodes.clear();
                 break;
             }
             case GraphCommandType::CrossfadeTo: {
                 if (cmd.chainPayload) {
+                    for (auto& n : m_activeNodes) {
+                        if (n) {
+                            if (!m_reclaimQueue.try_enqueue(std::move(n))) {
+                                stashForReclamation(std::move(n));
+                            }
+                        }
+                    }
                     m_activeNodes.clear();
                     for (auto& n : cmd.chainPayload->nodes) {
                         if (n) {
@@ -1304,6 +1329,9 @@ void GraphEngine::drainCommandQueueIntoActive() {
                                 stashForReclamation(std::move(n));
                             }
                         }
+                    }
+                    if (!m_chainReclaimQueue.try_enqueue(std::move(cmd.chainPayload))) {
+                        stashChainForReclamation(std::move(cmd.chainPayload));
                     }
                 }
                 break;
@@ -1412,6 +1440,13 @@ void GraphEngine::reset() {
     m_inputMeter.reset();
     m_outputMeter.reset();
     m_activeNodes.reserve(MAX_GRAPH_NODES);
+    for (auto& n : m_fadingOutNodes) {
+        if (n) {
+            if (!m_reclaimQueue.try_enqueue(std::move(n))) {
+                stashForReclamation(std::move(n));
+            }
+        }
+    }
     m_fadingOutNodes.clear();
     m_fadingOutNodes.reserve(MAX_GRAPH_NODES);
     m_deferredReclaim.reserve(DEFERRED_RECLAIM_CAPACITY);
