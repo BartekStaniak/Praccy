@@ -304,33 +304,38 @@ void AsyncPluginLoader::update(std::function<void(
     std::unique_ptr<IPluginInstance> instance,
     bool openGuiWhenDone
 )> onSlotReady) {
-    // 1. Process pending main-thread loads (e.g. CLAP plugins whose lifecycle requires execution on the main thread)
+    // 1. Process pending main-thread loads (e.g. CLAP plugins whose lifecycle requires execution on the main thread).
+    // Bound execution to at most 1 active CLAP instantiation per UI frame (F-001) so multi-plugin
+    // scene loads never stall 60 Hz UI frame pacing.
     std::deque<AsyncLoadTask> mainTasks;
     {
         std::lock_guard<std::mutex> lock(m_mainThreadMutex);
-        if (!m_mainThreadTasks.empty()) {
-            mainTasks.swap(m_mainThreadTasks);
+        while (!m_mainThreadTasks.empty()) {
+            AsyncLoadTask nextTask = std::move(m_mainThreadTasks.front());
+            m_mainThreadTasks.pop_front();
+            bool cancelled = false;
+            {
+                std::lock_guard<std::mutex> cLock(m_cancelMutex);
+                if (nextTask.id < m_cancelAllWatermark) {
+                    cancelled = true;
+                } else if (nextTask.targetSlot) {
+                    auto it = m_latestSlotTaskId.find(nextTask.targetSlot);
+                    if (it == m_latestSlotTaskId.end() || it->second != nextTask.id) {
+                        cancelled = true;
+                    }
+                }
+            }
+            if (cancelled) {
+                if (nextTask.completionCallback) nextTask.completionCallback(false);
+                continue;
+            }
+            mainTasks.push_back(std::move(nextTask));
+            break;
         }
     }
 
     for (auto& task : mainTasks) {
         bool cancelled = false;
-        {
-            std::lock_guard<std::mutex> lock(m_cancelMutex);
-            if (task.id < m_cancelAllWatermark) {
-                cancelled = true;
-            } else if (task.targetSlot) {
-                auto it = m_latestSlotTaskId.find(task.targetSlot);
-                if (it == m_latestSlotTaskId.end() || it->second != task.id) {
-                    cancelled = true;
-                }
-            }
-        }
-
-        if (cancelled) {
-            if (task.completionCallback) task.completionCallback(false);
-            continue;
-        }
 
         std::unique_ptr<IPluginInstance> inst;
         DWORD exCode = 0;

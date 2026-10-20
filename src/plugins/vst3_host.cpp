@@ -249,7 +249,44 @@ public:
 #pragma GCC diagnostic pop
 #endif
 
+class PraccyHostApplication : public Steinberg::Vst::IHostApplication {
+public:
+    std::atomic<uint32_t> m_refCount{1};
+    virtual ~PraccyHostApplication() = default;
+
+    Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID _iid, void** obj) override {
+        if (std::memcmp(_iid, Steinberg::Vst::IHostApplication::iid, sizeof(Steinberg::TUID)) == 0 ||
+            std::memcmp(_iid, Steinberg::FUnknown::iid, sizeof(Steinberg::TUID)) == 0) {
+            addRef();
+            *obj = static_cast<Steinberg::Vst::IHostApplication*>(this);
+            return Steinberg::kResultOk;
+        }
+        *obj = nullptr;
+        return Steinberg::kNoInterface;
+    }
+    Steinberg::uint32 PLUGIN_API addRef() override {
+        return m_refCount.fetch_add(1, std::memory_order_relaxed) + 1;
+    }
+    Steinberg::uint32 PLUGIN_API release() override {
+        const uint32_t prev = m_refCount.fetch_sub(1, std::memory_order_acq_rel);
+        return (prev > 0) ? (prev - 1) : 0;
+    }
+    Steinberg::tresult PLUGIN_API getName(Steinberg::Vst::String128 name) override {
+        if (!name) return Steinberg::kInvalidArgument;
+        static constexpr char kHostName[] = "Praccy";
+        for (size_t i = 0; i < sizeof(kHostName); ++i) {
+            name[i] = static_cast<Steinberg::char16>(kHostName[i]);
+        }
+        return Steinberg::kResultOk;
+    }
+    Steinberg::tresult PLUGIN_API createInstance(Steinberg::TUID /*cid*/, Steinberg::TUID /*_iid*/, void** obj) override {
+        if (obj) *obj = nullptr;
+        return Steinberg::kNotImplemented;
+    }
+};
+
 struct Vst3PluginInstance::Impl {
+    PraccyHostApplication hostApp;
     PraccyComponentHandler componentHandler;
     PraccyPlugFrame plugFrame;
     Steinberg::Vst::ProcessContext processContext{};
@@ -521,7 +558,7 @@ bool Vst3PluginInstance::initHostInternal(const std::string& path) {
         return false;
     }
 
-    if (m_component->initialize(nullptr) != Steinberg::kResultOk) {
+    if (m_component->initialize(static_cast<Steinberg::Vst::IHostApplication*>(&m_impl->hostApp)) != Steinberg::kResultOk) {
         std::cerr << "Failed to initialize IComponent for: " << m_name << "\n";
         return false;
     }
@@ -668,7 +705,7 @@ bool Vst3PluginInstance::ensureControllerInitialized() {
     }
 
     if (m_controller) {
-        if (m_controller->initialize(nullptr) == Steinberg::kResultOk) {
+        if (m_controller->initialize(static_cast<Steinberg::Vst::IHostApplication*>(&m_impl->hostApp)) == Steinberg::kResultOk) {
             m_controllerSessionInitialized = true;
         }
         m_controller->setComponentHandler(&m_impl->componentHandler);

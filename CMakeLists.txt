@@ -363,7 +363,6 @@ add_test(NAME audit_regression_rt COMMAND test_audit_remediation --suite=rt)
 add_test(NAME audit_regression_mem COMMAND test_audit_remediation --suite=mem)
 
 add_test(NAME audit_regression_host COMMAND test_audit_remediation --suite=host)
-set_tests_properties(audit_regression_host PROPERTIES WILL_FAIL TRUE)
 
 add_test(NAME audit_regression_ui COMMAND test_audit_remediation --suite=ui)
 set_tests_properties(audit_regression_ui PROPERTIES WILL_FAIL TRUE)

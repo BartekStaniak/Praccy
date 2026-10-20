@@ -24,13 +24,19 @@
 namespace praccy::plugins {
 
 struct ClapEventBuffer {
-    static constexpr size_t kMaxEvents = 128;
+    static constexpr size_t kMaxEvents = 512;
     std::array<clap_event_param_value_t, kMaxEvents> events{};
     uint32_t count{0};
 
     void clear() noexcept { count = 0; }
 
     bool pushParam(clap_id paramId, double val) noexcept {
+        for (uint32_t i = 0; i < count; ++i) {
+            if (events[i].param_id == paramId) {
+                events[i].value = val;
+                return true;
+            }
+        }
         if (count >= kMaxEvents) return false;
         auto& ev = events[count++];
         ev.header.size = sizeof(clap_event_param_value_t);
@@ -192,7 +198,7 @@ private:
     std::unordered_map<clap_id, UINT_PTR> m_activeTimers;
     std::shared_ptr<std::atomic<ClapPluginInstance*>> m_timerLifetimeToken;
 
-    moodycamel::ReaderWriterQueue<std::pair<clap_id, double>> m_paramQueue{128};
+    moodycamel::ReaderWriterQueue<std::pair<clap_id, double>> m_paramQueue{512};
     mutable moodycamel::ReaderWriterQueue<std::pair<clap_id, double>> m_guiOutParamQueue{128};
 
     struct ClapAudioParamEvent {
