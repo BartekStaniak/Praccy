@@ -10,11 +10,11 @@ namespace praccy::utils {
 
 class Base64 {
 public:
-    static std::string encode(const std::vector<uint8_t>& data) {
+    [[nodiscard]] static std::string encode(const std::vector<uint8_t>& data) {
         return encode(data.data(), data.size());
     }
 
-    static std::string encode(const uint8_t* data, size_t length) {
+    [[nodiscard]] static std::string encode(const uint8_t* data, size_t length) {
         if (!data || length == 0) return {};
 
         static constexpr char kTable[] =
@@ -45,7 +45,7 @@ public:
         return result;
     }
 
-    static bool decode(std::string_view base64Str, std::vector<uint8_t>& outBytes) {
+    [[nodiscard]] static bool decode(std::string_view base64Str, std::vector<uint8_t>& outBytes) {
         outBytes.clear();
         if (base64Str.empty()) return true;
 

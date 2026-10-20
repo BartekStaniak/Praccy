@@ -19,7 +19,7 @@ enum class DawGuidFormat {
 class GuidUtils {
 public:
     // Normalizes foreign representations to lowercase 32-char hex string
-    static std::string normalizeToCanonicalGuid(std::string_view input, DawGuidFormat format = DawGuidFormat::SteinbergFUID) {
+    [[nodiscard]] static std::string normalizeToCanonicalGuid(std::string_view input, DawGuidFormat format = DawGuidFormat::SteinbergFUID) {
         std::string hex;
         hex.reserve(32);
 
@@ -53,7 +53,7 @@ public:
         return hex;
     }
 
-    static std::string toSteinbergGuidString(std::string_view canonicalGuid) {
+    [[nodiscard]] static std::string toSteinbergGuidString(std::string_view canonicalGuid) {
         std::string clean = normalizeToCanonicalGuid(canonicalGuid, DawGuidFormat::AbletonBigEndian);
         if (clean.size() != 32) return {};
 
@@ -79,13 +79,13 @@ public:
         return out;
     }
 
-    static std::string toAbletonGuidString(std::string_view canonicalGuid) {
+    [[nodiscard]] static std::string toAbletonGuidString(std::string_view canonicalGuid) {
         std::string clean = normalizeToCanonicalGuid(canonicalGuid, DawGuidFormat::AbletonBigEndian);
         for (char& c : clean) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
         return clean;
     }
 
-    static std::string toDawprojectUuidString(std::string_view canonicalGuid) {
+    [[nodiscard]] static std::string toDawprojectUuidString(std::string_view canonicalGuid) {
         std::string clean = normalizeToCanonicalGuid(canonicalGuid, DawGuidFormat::AbletonBigEndian);
         if (clean.size() != 32) return {};
 

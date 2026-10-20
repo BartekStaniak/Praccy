@@ -18,7 +18,7 @@
 namespace praccy::utils {
 
 /// Strips leading and trailing whitespace characters (' ', '\t', '\r', '\n')
-inline std::string_view trim(std::string_view sv) noexcept {
+[[nodiscard]] constexpr std::string_view trim(std::string_view sv) noexcept {
     while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t' || sv.front() == '\r' || sv.front() == '\n')) {
         sv.remove_prefix(1);
     }
@@ -30,7 +30,7 @@ inline std::string_view trim(std::string_view sv) noexcept {
 
 /// Non-throwing integer parser using C++20 std::from_chars with safe fallback default
 template <typename T>
-inline T parseInteger(std::string_view sv, T defaultValue = T{}, int base = 10) noexcept {
+[[nodiscard]] inline T parseInteger(std::string_view sv, T defaultValue = T{}, int base = 10) noexcept {
     static_assert(std::is_integral_v<T>, "parseInteger requires an integral type");
     sv = trim(sv);
     if (sv.empty()) return defaultValue;
@@ -61,7 +61,7 @@ inline T parseInteger(std::string_view sv, T defaultValue = T{}, int base = 10) 
 }
 
 /// Non-throwing float parser using C++20 std::from_chars with safe fallback default
-inline float parseFloat(std::string_view sv, float defaultValue = 0.0f) noexcept {
+[[nodiscard]] inline float parseFloat(std::string_view sv, float defaultValue = 0.0f) noexcept {
     sv = trim(sv);
     if (sv.empty()) return defaultValue;
 
@@ -82,7 +82,7 @@ inline float parseFloat(std::string_view sv, float defaultValue = 0.0f) noexcept
 }
 
 /// Non-throwing double parser using C++20 std::from_chars with safe fallback default
-inline double parseDouble(std::string_view sv, double defaultValue = 0.0) noexcept {
+[[nodiscard]] inline double parseDouble(std::string_view sv, double defaultValue = 0.0) noexcept {
     sv = trim(sv);
     if (sv.empty()) return defaultValue;
 
@@ -103,7 +103,7 @@ inline double parseDouble(std::string_view sv, double defaultValue = 0.0) noexce
 }
 
 /// Non-throwing 2-character hex byte parser (e.g. "A5" -> 0xA5)
-inline bool parseHexByte(std::string_view sv, uint8_t& outByte) noexcept {
+[[nodiscard]] inline bool parseHexByte(std::string_view sv, uint8_t& outByte) noexcept {
     if (sv.size() != 2) return false;
     uint8_t val = 0;
     auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + 2, val, 16);
@@ -116,7 +116,7 @@ inline bool parseHexByte(std::string_view sv, uint8_t& outByte) noexcept {
 
 /// Non-throwing hex string to byte vector decoder
 /// Returns empty vector on odd length or corrupted non-hex characters
-inline std::vector<uint8_t> hexToBytes(std::string_view hex) {
+[[nodiscard]] inline std::vector<uint8_t> hexToBytes(std::string_view hex) {
     hex = trim(hex);
     std::vector<uint8_t> bytes;
     if (hex.length() % 2 != 0) return bytes;
@@ -133,7 +133,7 @@ inline std::vector<uint8_t> hexToBytes(std::string_view hex) {
 }
 
 /// Escapes delimiter characters ('\', '|', '=', ',', '\n', '\r') in INI field values using collision-free hex escapes
-inline std::string escapeIniField(std::string_view input) {
+[[nodiscard]] inline std::string escapeIniField(std::string_view input) {
     std::string out;
     out.reserve(input.size() + 8);
     for (unsigned char c : input) {
@@ -151,7 +151,7 @@ inline std::string escapeIniField(std::string_view input) {
 }
 
 /// Decodes hex-escaped delimiter sequences in INI field values while preserving unescaped Windows paths untouched
-inline std::string unescapeIniField(std::string_view input) {
+[[nodiscard]] inline std::string unescapeIniField(std::string_view input) {
     std::string out;
     out.reserve(input.size());
     for (size_t i = 0; i < input.size(); ++i) {
