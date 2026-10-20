@@ -214,16 +214,20 @@ void QuickLooper::executeCommand(LooperCommand cmd) noexcept {
                     break;
 
                 case LooperState::Playing: {
-                    // Switch to Overdubbing: if an undone layer is active, stage its mask for lazy per-block commit
+                    // Switch to Overdubbing: bound mask scan strictly to active loop words (F-007)
+                    const size_t loopLen = m_loopLength.load(std::memory_order_relaxed);
+                    const size_t activeBlocks = (loopLen + kUndoBlockSize - 1) / kUndoBlockSize;
+                    const size_t activeWords = std::min(m_overdubbedBlockMask.size(), (activeBlocks + 63) / 64 + 1);
                     if (m_undoLayerActive) {
-                        for (size_t i = 0; i < m_pendingCommitBlockMask.size() && i < m_overdubbedBlockMask.size(); ++i) {
+                        for (size_t i = 0; i < activeWords && i < m_pendingCommitBlockMask.size(); ++i) {
                             m_pendingCommitBlockMask[i] |= m_overdubbedBlockMask[i];
                         }
                         m_undoLayerActive = false;
                     } else {
-                        std::fill(m_pendingCommitBlockMask.begin(), m_pendingCommitBlockMask.end(), 0ULL);
+                        std::fill_n(m_pendingCommitBlockMask.begin(),
+                                    std::min(activeWords, m_pendingCommitBlockMask.size()), 0ULL);
                     }
-                    std::fill(m_overdubbedBlockMask.begin(), m_overdubbedBlockMask.end(), 0ULL);
+                    std::fill_n(m_overdubbedBlockMask.begin(), activeWords, 0ULL);
                     m_canUndo.store(true, std::memory_order_relaxed);
                     m_canRedo.store(false, std::memory_order_relaxed);
                     m_state.store(LooperState::Overdubbing, std::memory_order_relaxed);

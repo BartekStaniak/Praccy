@@ -314,12 +314,11 @@ void InstrumentTuner::workerLoop() {
 
         if (!m_workerRunning.load(std::memory_order_acquire)) break;
 
+        std::lock_guard<std::mutex> dspLock(m_dspMutex);
         if (!m_enabled.load(std::memory_order_relaxed)) {
             publishResult(false, 0.0f, 0, 0.0f);
             continue;
         }
-
-        std::lock_guard<std::mutex> dspLock(m_dspMutex);
         size_t available = m_ringBuffer.availableToRead();
         if (available == 0) continue;
 
@@ -431,13 +430,14 @@ void InstrumentTuner::detectPitchYin() {
 }
 
 void InstrumentTuner::publishResult(bool hasPitch, float freq, int note, float cents) {
-    uint32_t seq = m_resultSeq.load(std::memory_order_relaxed);
-    m_resultSeq.store(seq + 1, std::memory_order_seq_cst);
+    const uint32_t seq = m_resultSeq.load(std::memory_order_relaxed);
+    m_resultSeq.store(seq + 1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
 
     m_detectedFreq.store(freq, std::memory_order_relaxed);
     m_detectedMidiNote.store(note, std::memory_order_relaxed);
     m_detectedCents.store(cents, std::memory_order_relaxed);
-    m_hasPitch.store(hasPitch, std::memory_order_release);
+    m_hasPitch.store(hasPitch, std::memory_order_relaxed);
 
     m_resultSeq.store(seq + 2, std::memory_order_release);
 }
@@ -468,12 +468,13 @@ TunerResult InstrumentTuner::currentResult() const {
             continue;
         }
 
-        hasPitch = m_hasPitch.load(std::memory_order_acquire);
+        hasPitch = m_hasPitch.load(std::memory_order_relaxed);
         freq = m_detectedFreq.load(std::memory_order_relaxed);
         note = m_detectedMidiNote.load(std::memory_order_relaxed);
         cents = m_detectedCents.load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);
 
-        seq2 = m_resultSeq.load(std::memory_order_seq_cst);
+        seq2 = m_resultSeq.load(std::memory_order_relaxed);
     } while (seq1 != seq2 && ++retryCount < 10);
 
     if (seq1 != seq2 || (seq1 & 1)) {

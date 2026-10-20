@@ -27,6 +27,7 @@ void MidiManager::acquireSeqlockWrite() noexcept {
 #endif
     }
     m_ccTableSeq.fetch_add(1, std::memory_order_acq_rel);
+    std::atomic_thread_fence(std::memory_order_release);
 }
 
 void MidiManager::releaseSeqlockWrite() noexcept {
@@ -86,13 +87,18 @@ void MidiManager::closeDevice() {
 void MidiManager::drainLearnedPodFromMidiThread() {
     uint32_t r = m_learnedReadIdx.load(std::memory_order_relaxed);
     const uint32_t w = m_learnedWriteIdx.load(std::memory_order_acquire);
+    bool drainedAny = false;
     while (r != w) {
         PodCcBinding pod{};
         m_learnedPodQueue[r % LEARN_QUEUE_CAPACITY].load(pod);
         m_bindings.push_back(pod.toMidiBinding());
+        drainedAny = true;
         ++r;
     }
     m_learnedReadIdx.store(r, std::memory_order_release);
+    if (drainedAny) {
+        rebuildCcTable();
+    }
 }
 
 void MidiManager::addBinding(const MidiBinding& binding) {
@@ -306,7 +312,8 @@ FlatCcBinding MidiManager::getCcBinding(uint8_t channel, uint8_t cc) const noexc
             continue;
         }
         m_atomicCcTable[channel][cc].load(out);
-        const uint32_t seq2 = m_ccTableSeq.load(std::memory_order_acquire);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        const uint32_t seq2 = m_ccTableSeq.load(std::memory_order_relaxed);
         if (seq1 == seq2) {
             return out;
         }
@@ -380,8 +387,8 @@ void MidiManager::handleControlChange(uint8_t channel, uint8_t cc, uint8_t val) 
         }
 
         m_atomicCcTable[0][cc].load(omniSlot);
-
-        const uint32_t seq2 = m_ccTableSeq.load(std::memory_order_acquire);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        const uint32_t seq2 = m_ccTableSeq.load(std::memory_order_relaxed);
         if (seq2 == seq1) {
             valid = true;
             break;
@@ -449,9 +456,9 @@ void MidiManager::handleMidiMessage(uint8_t status, uint8_t d1, uint8_t d2) {
             learnedPod.triggerType = type;
             learnedPod.triggerNumber = (type == MidiMessageType::ProgramChange) ? msg.programNumber() : d1;
 
-            // Wait-free try-lock update of atomic fast-path tables on real-time MIDI thread
-            if (!m_seqlockWriteFlag.test_and_set(std::memory_order_acquire)) {
-                m_ccTableSeq.fetch_add(1, std::memory_order_acq_rel);
+            // Deterministic seqlock update of atomic fast-path tables on real-time MIDI thread
+            {
+                acquireSeqlockWrite();
                 if (type == MidiMessageType::ControlChange && learnedPod.triggerNumber < NUM_CC_NUMBERS) {
                     const uint8_t ch = (channel <= 16) ? channel : 0;
                     const uint8_t cc = learnedPod.triggerNumber;
@@ -510,8 +517,8 @@ void MidiManager::handleMidiMessage(uint8_t status, uint8_t d1, uint8_t d2) {
         for (uint32_t i = 0; i < count; ++i) {
             m_atomicNonCcBindings[i].load(localPods[i]);
         }
-
-        const uint32_t seq2 = m_ccTableSeq.load(std::memory_order_acquire);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        const uint32_t seq2 = m_ccTableSeq.load(std::memory_order_relaxed);
         if (seq2 == seq1) {
             valid = true;
             break;

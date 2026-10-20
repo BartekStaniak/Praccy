@@ -610,7 +610,13 @@ void ParallelBranch::drainSlotCommandsIntoActive() noexcept {
 
 void ParallelBranch::process(AudioProcessContext& ctx) {
     const uint32_t numSamples = ctx.numSamples;
-    if (numSamples == 0 || m_branchSuspendDepth.load(std::memory_order_acquire) != 0) {
+    if (numSamples == 0) {
+        return;
+    }
+    if (m_branchSuspendDepth.load(std::memory_order_acquire) != 0) {
+        AudioBufferView dryView = m_branchBuffer.view(numSamples);
+        dryView.copyFrom(ctx.input);
+        m_meter.reset();
         return;
     }
 
@@ -623,6 +629,9 @@ void ParallelBranch::process(AudioProcessContext& ctx) {
     } branchGuard{m_branchActiveCallbacks};
 
     if (m_branchSuspendDepth.load(std::memory_order_seq_cst) != 0) {
+        AudioBufferView dryView = m_branchBuffer.view(numSamples);
+        dryView.copyFrom(ctx.input);
+        m_meter.reset();
         return;
     }
 
