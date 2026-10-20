@@ -36,7 +36,7 @@ With **Version 2.8**, Praccy bridges the gap between practice and professional s
 ## What's New in Version 2.8
 
 ### ⚡ Non-Blocking Asynchronous Plugin Loading & GUI Initialization
-- **Zero-Block Asynchronous Plugin Loading**: Heavy plugins (e.g. Archetype Gojira X, large convolution reverbs) initialize entirely on a background thread pool without freezing the main UI or stalling the audio engine.
+- **Zero-Block Asynchronous Plugin Loading**: Heavy VST3 plugins (e.g. Archetype Gojira X, large convolution reverbs) initialize on dedicated STA background threads, while CLAP plugins (which mandate `[main-thread]` creation per the CLAP specification) are throttled to at most one instantiation per UI frame so multi-plugin scene loads never stall the audio engine or freeze the UI.
 - **Animated Loading & Opening Slot States**: Live arc-spinner and pulsing focus border while plugins and their heavy GPU interfaces compile and attach in the background.
 - **Asynchronous GUI View Attachment**: `openPluginWindowAsync` returns in `< 1 ms`, isolating VST3 Win32 view initialization to the plugin's dedicated STA host thread and deferring CLAP GUI attachment to the main-thread poll cycle, smoothly presenting the window when ready while guarding against mid-flight window cancellation.
 - **Bit-Exact Dry Audio Pass-Through**: Signal continues uninterrupted during loading and GUI opening with zero buffer dropouts and zero real-time audio thread allocations.
@@ -181,7 +181,7 @@ The resulting executable will be generated at `build/Praccy.exe`.
 Praccy enforces strict real-time safety, SecOps fuzzing, and cross-DAW roundtrip parity gates:
 
 ```powershell
-# 1. Run complete CTest regression suite (17 test targets)
+# 1. Run complete CTest regression suite (19 test executables / 22 CTest suites)
 ctest --test-dir build -C Release --output-on-failure
 
 # 2. Gate 2.1: Interop SecOps Fuzzing (10,000 malformed inputs)
