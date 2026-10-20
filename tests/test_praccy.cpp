@@ -30,6 +30,7 @@
 #include "ui/widgets/rotary_knob.h"
 #include "ui/widgets/strobe_tuner.h"
 #include "ui/modals/tuner_settings_modal.h"
+#include "ui/modals/settings_modal.h"
 #include <imgui_internal.h>
 #include "utils/parse_utils.h"
 #include "utils/archive_utils.h"
@@ -2903,6 +2904,42 @@ void testParallelBranchSplitNoDuplicateAndCleanDelete() {
     std::cout << "PASSED\n";
 }
 
+void testVersionAndSettingsUpdatesConfirmation() {
+    std::cout << "[TEST] Version 2.8.1 & SettingsModal Updates Confirmation State... ";
+
+    // 1. Verify version definitions
+    assert(std::string(praccy::kVersionString) == "v2.8.1");
+    assert(std::string(praccy::kVersionRaw) == "2.8.1");
+    assert(std::string(praccy::kDawprojectAppVersion) == "2.8.1");
+    assert(praccy::kVersionMajor == 2);
+    assert(praccy::kVersionMinor == 8);
+    assert(praccy::kVersionPatch == 1);
+    assert(praccy::kVersionBuild == 0);
+
+    // 2. Verify SettingsModal lifecycle and update confirmation state flags
+    audio::AsioManager asio;
+    const std::filesystem::path dummyIni = "dummy_test_scanner.ini";
+    plugins::PluginScanner scanner(dummyIni.string());
+    ui::SettingsModal modal(asio, scanner);
+
+    assert(!modal.isOpen());
+    assert(!modal.isUpdateConfirmModalOpen());
+    assert(!modal.isUpdateCheckPending());
+
+    modal.open();
+    assert(modal.isOpen());
+
+    modal.close();
+    assert(!modal.isOpen());
+    assert(!modal.isUpdateConfirmModalOpen());
+    assert(!modal.isUpdateCheckPending());
+
+    std::error_code ec;
+    std::filesystem::remove(dummyIni, ec);
+
+    std::cout << "PASSED\n";
+}
+
 int main() {
     std::cout << "===========================================\n";
     std::cout << "   PRACCY CORE AUDIO ENGINE TEST SUITE   \n";
@@ -2949,9 +2986,10 @@ int main() {
     testDawInteropSecurityAndOverflowRejection();
     testDynamicSampleRateAndBufferSizeUpdates();
     testParallelBranchSplitNoDuplicateAndCleanDelete();
+    testVersionAndSettingsUpdatesConfirmation();
 
     std::cout << "===========================================\n";
-    std::cout << "   ALL TESTS PASSED SUCCESSFULLY! (41/41)  \n";
+    std::cout << "   ALL TESTS PASSED SUCCESSFULLY! (42/42)  \n";
     std::cout << "===========================================\n";
     return 0;
 }

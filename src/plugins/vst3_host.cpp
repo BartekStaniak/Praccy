@@ -11,6 +11,7 @@
 #include <pluginterfaces/base/ibstream.h>
 #include <pluginterfaces/vst/ivstmessage.h>
 #include <pluginterfaces/vst/ivstprocesscontext.h>
+#include <pluginterfaces/vst/ivsthostapplication.h>
 
 namespace Steinberg {
 DEF_CLASS_IID (IPlugView)
@@ -24,6 +25,7 @@ DEF_CLASS_IID (IConnectionPoint)
 DEF_CLASS_IID (IMessage)
 DEF_CLASS_IID (IParameterChanges)
 DEF_CLASS_IID (IParamValueQueue)
+DEF_CLASS_IID (IHostApplication)
 }
 }
 

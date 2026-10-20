@@ -106,7 +106,7 @@ static void parseAbletonPluginDevice(const std::shared_ptr<utils::XmlNode>& node
     // 2. Binary processor state
     auto procState = node->firstChild("ProcessorState");
     if (procState && !procState->text.empty()) {
-        utils::Base64::decode(procState->text, slot.state);
+        (void)utils::Base64::decode(procState->text, slot.state);
     }
 }
 

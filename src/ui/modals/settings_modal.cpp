@@ -134,6 +134,8 @@ void SettingsModal::open() {
 
 void SettingsModal::close() {
     m_isOpen = false;
+    m_showUpdateConfirmModal = false;
+    m_openUpdatePopupPending = false;
 }
 
 void SettingsModal::renderAudioTab() {
@@ -663,8 +665,144 @@ void SettingsModal::renderUpdatesTab() {
     }
 
     ImGui::Spacing();
-    if (CenteredButton("Check for Updates Now...", ImVec2(200, Metrics::buttonHeight()))) {
-        UpdateChecker::instance().checkForUpdates(includeBeta);
+
+    auto info = UpdateChecker::instance().getInfo();
+
+    // Trigger update check completion detection
+    if (m_updateCheckPending) {
+        if (info.status != UpdateStatus::Checking) {
+            m_updateCheckPending = false;
+            m_showUpdateConfirmModal = true;
+            m_openUpdatePopupPending = true;
+            m_updateConfirmed = false;
+        }
+    }
+
+    if (m_updateCheckPending || info.status == UpdateStatus::Checking) {
+        ImGui::TextColored(tokens.text.accent.vec4, "Checking GitHub repository for %s updates...", includeBeta ? "beta" : "stable");
+        ImGui::Spacing();
+        ImGui::ProgressBar(-1.0f * static_cast<float>(ImGui::GetTime()), ImVec2(-1, 8));
+        ImGui::Spacing();
+    } else if (info.status == UpdateStatus::UpdateAvailable && !m_updateConfirmed) {
+        // Confirmation in the updates tab when there is a new version with an option to download or cancel
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, tokens.surfaces.cardBg.vec4);
+        ImGui::PushStyleColor(ImGuiCol_Border, tokens.borders.focus.vec4);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Metrics::kCardPaddingX, Metrics::kCardPaddingY));
+
+        const float cardH = (!info.releaseTitle.empty() && info.releaseTitle != info.latestVersion) ? 140.0f : 120.0f;
+        ImGui::BeginChild("##NewVersionConfirmationCard", ImVec2(0.0f, cardH), true);
+        ImGui::TextColored(tokens.text.accent.vec4, "NEW VERSION AVAILABLE: %s", info.latestVersion.c_str());
+        if (!info.releaseTitle.empty() && info.releaseTitle != info.latestVersion) {
+            ImGui::TextColored(tokens.text.primary.vec4, "%s", info.releaseTitle.c_str());
+        }
+        if (!info.publishedDate.empty()) {
+            ImGui::TextDisabled("Release Date: %s", info.publishedDate.c_str());
+        }
+        ImGui::Spacing();
+        ImGui::TextWrapped("A new version of Praccy is available. Would you like to download it now?");
+        ImGui::Spacing();
+
+        ImGui::PushStyleColor(ImGuiCol_Button, tokens.signal.active.withAlpha(0.45f).vec4);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, tokens.signal.active.withAlpha(0.65f).vec4);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, tokens.signal.active.withAlpha(0.85f).vec4);
+        if (CenteredButton("Download", ImVec2(120.0f, Metrics::buttonHeight()))) {
+            UpdateChecker::instance().startDownload();
+            m_showUpdateConfirmModal = false;
+            m_updateConfirmed = true;
+        }
+        ImGui::PopStyleColor(3);
+
+        ImGui::SameLine(0, 12.0f);
+        if (CenteredButton("Cancel", ImVec2(100.0f, Metrics::buttonHeight()))) {
+            m_showUpdateConfirmModal = false;
+            m_updateConfirmed = true;
+        }
+
+        ImGui::EndChild();
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(2);
+        ImGui::Spacing();
+    } else if (info.status == UpdateStatus::UpToDate && !m_updateConfirmed) {
+        // Confirmation in the updates tab when there is no new version with an "okay" confirmation
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, tokens.surfaces.cardBg.vec4);
+        ImGui::PushStyleColor(ImGuiCol_Border, tokens.signal.active.vec4);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Metrics::kCardPaddingX, Metrics::kCardPaddingY));
+
+        ImGui::BeginChild("##UpToDateConfirmationCard", ImVec2(0.0f, 100.0f), true);
+        ImGui::TextColored(tokens.text.success.vec4, "PRACCY IS UP TO DATE");
+        ImGui::Spacing();
+        ImGui::TextWrapped("You are already using the newest version of Praccy (%s).", praccy::kVersionString);
+        ImGui::Spacing();
+
+        if (CenteredButton("Okay", ImVec2(100.0f, Metrics::buttonHeight()))) {
+            m_showUpdateConfirmModal = false;
+            m_updateConfirmed = true;
+        }
+
+        ImGui::EndChild();
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(2);
+        ImGui::Spacing();
+    } else if (info.status == UpdateStatus::Downloading) {
+        ImGui::TextColored(tokens.text.accent.vec4, "Downloading update package...");
+        if (!info.assetName.empty()) {
+            ImGui::TextDisabled("File: %s", info.assetName.c_str());
+        }
+
+        char progBuf[64];
+        if (info.totalBytes > 0) {
+            float dlMB = static_cast<float>(info.downloadedBytes) / (1024.0f * 1024.0f);
+            float totMB = static_cast<float>(info.totalBytes) / (1024.0f * 1024.0f);
+            std::snprintf(progBuf, sizeof(progBuf), "%.1f / %.1f MB (%.0f%%)", dlMB, totMB, info.downloadProgress * 100.0f);
+        } else if (info.downloadedBytes > 0) {
+            float dlMB = static_cast<float>(info.downloadedBytes) / (1024.0f * 1024.0f);
+            std::snprintf(progBuf, sizeof(progBuf), "%.1f MB downloaded", dlMB);
+        } else {
+            std::snprintf(progBuf, sizeof(progBuf), "Connecting...");
+        }
+
+        ImGui::Spacing();
+        ImGui::ProgressBar(info.downloadProgress, ImVec2(-1, 22), progBuf);
+        ImGui::Spacing();
+
+        if (info.downloadProgress >= 1.0f) {
+            ImGui::TextColored(tokens.text.warning.vec4, "Extracting and verifying package files...");
+        } else {
+            ImGui::TextDisabled("Please wait while Praccy streams the update package...");
+        }
+        ImGui::Spacing();
+    } else if (info.status == UpdateStatus::ReadyToInstall) {
+        ImGui::TextColored(tokens.text.success.vec4, "[v] Update downloaded and ready to apply!");
+        ImGui::TextWrapped("Praccy will now close, copy the updated files into place, and restart automatically.");
+        ImGui::Spacing();
+
+        ImGui::PushStyleColor(ImGuiCol_Button, tokens.signal.active.withAlpha(0.45f).vec4);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, tokens.signal.active.withAlpha(0.65f).vec4);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, tokens.signal.active.withAlpha(0.85f).vec4);
+        if (CenteredButton("Restart & Apply Update Now", ImVec2(230, Metrics::buttonHeight()))) {
+            UpdateChecker::instance().applyUpdateAndRestart();
+        }
+        ImGui::PopStyleColor(3);
+        ImGui::Spacing();
+    } else if (info.status == UpdateStatus::Error && !m_updateConfirmed) {
+        ImGui::TextColored(tokens.text.error.vec4, "[!] Update check / download failed");
+        ImGui::TextWrapped("%s", info.errorMessage.c_str());
+        ImGui::Spacing();
+        if (CenteredButton("Okay", ImVec2(100.0f, Metrics::buttonHeight()))) {
+            m_showUpdateConfirmModal = false;
+            m_updateConfirmed = true;
+        }
+        ImGui::Spacing();
+    }
+
+    if (!m_updateCheckPending && info.status != UpdateStatus::Checking && info.status != UpdateStatus::Downloading) {
+        if (CenteredButton("Check for Updates Now...", ImVec2(200, Metrics::buttonHeight()))) {
+            m_updateCheckPending = true;
+            m_updateConfirmed = false;
+            UpdateChecker::instance().checkForUpdates(includeBeta);
+        }
     }
 
     ImGui::Spacing();
@@ -755,11 +893,144 @@ void SettingsModal::render() {
             ImGui::CloseCurrentPopup();
         }
 
+        renderUpdateConfirmModal();
+
         ImGui::EndPopup();
     }
 
     ImGui::PopStyleVar(3);
     ImGui::PopStyleColor(2);
+}
+
+void SettingsModal::renderUpdateConfirmModal() {
+    if (!m_showUpdateConfirmModal) return;
+
+    auto info = UpdateChecker::instance().getInfo();
+    const auto& tokens = themeTokens();
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImVec2 center = vp ? vp->GetCenter() : ImVec2(100.0f, 100.0f);
+
+    if (m_openUpdatePopupPending) {
+        if (info.status == UpdateStatus::UpdateAvailable) {
+            ImGui::OpenPopup("Update Available##SettingsModal");
+        } else if (info.status == UpdateStatus::UpToDate) {
+            ImGui::OpenPopup("Praccy Up to Date##SettingsModal");
+        } else if (info.status == UpdateStatus::Error) {
+            ImGui::OpenPopup("Update Status##SettingsModal");
+        }
+        m_openUpdatePopupPending = false;
+    }
+
+    if (info.status == UpdateStatus::UpdateAvailable) {
+        ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(440.0f, 0.0f), ImGuiCond_Appearing);
+
+        ScopedStyleVar winPad(ImGuiStyleVar_WindowPadding, ImVec2(Metrics::kCardPaddingX, Metrics::kCardPaddingY));
+        ScopedStyleColor modalColors({
+            {ImGuiCol_PopupBg, tokens.surfaces.popupBg.vec4},
+            {ImGuiCol_Border, tokens.borders.focus.vec4}
+        });
+
+        if (ImGui::BeginPopupModal("Update Available##SettingsModal", &m_showUpdateConfirmModal, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
+            ImGui::TextColored(tokens.text.accent.vec4, "NEW VERSION AVAILABLE");
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::Text("Current Version: %s", praccy::kVersionString);
+            ImGui::Text("Latest Version:  %s", info.latestVersion.c_str());
+            if (!info.releaseTitle.empty() && info.releaseTitle != info.latestVersion) {
+                ImGui::Spacing();
+                ImGui::TextColored(tokens.text.primary.vec4, "%s", info.releaseTitle.c_str());
+            }
+            if (!info.publishedDate.empty()) {
+                ImGui::TextDisabled("Release Date: %s", info.publishedDate.c_str());
+            }
+
+            ImGui::Spacing();
+            ImGui::TextWrapped("A new version of Praccy is available. Would you like to download it now?");
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::PushStyleColor(ImGuiCol_Button, tokens.signal.active.withAlpha(0.45f).vec4);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, tokens.signal.active.withAlpha(0.65f).vec4);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, tokens.signal.active.withAlpha(0.85f).vec4);
+            if (CenteredButton("Download", ImVec2(120.0f, Metrics::buttonHeight()))) {
+                UpdateChecker::instance().startDownload();
+                m_showUpdateConfirmModal = false;
+                m_updateConfirmed = true;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::PopStyleColor(3);
+
+            ImGui::SameLine(0, 12.0f);
+            if (CenteredButton("Cancel", ImVec2(100.0f, Metrics::buttonHeight())) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                m_showUpdateConfirmModal = false;
+                m_updateConfirmed = true;
+                ImGui::CloseCurrentPopup();
+            }
+
+            ImGui::EndPopup();
+        }
+    } else if (info.status == UpdateStatus::UpToDate) {
+        ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(380.0f, 0.0f), ImGuiCond_Appearing);
+
+        ScopedStyleVar winPad(ImGuiStyleVar_WindowPadding, ImVec2(Metrics::kCardPaddingX, Metrics::kCardPaddingY));
+        ScopedStyleColor modalColors({
+            {ImGuiCol_PopupBg, tokens.surfaces.popupBg.vec4},
+            {ImGuiCol_Border, tokens.signal.active.vec4}
+        });
+
+        if (ImGui::BeginPopupModal("Praccy Up to Date##SettingsModal", &m_showUpdateConfirmModal, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
+            ImGui::TextColored(tokens.text.success.vec4, "PRACCY IS UP TO DATE");
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::TextWrapped("You are currently running the latest version of Praccy (%s).", praccy::kVersionString);
+            ImGui::Spacing();
+            ImGui::TextDisabled("Channel: %s", info.isBeta ? "Beta (dev branch)" : "Stable (Releases)");
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            if (CenteredButton("Okay", ImVec2(100.0f, Metrics::buttonHeight())) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                m_showUpdateConfirmModal = false;
+                m_updateConfirmed = true;
+                ImGui::CloseCurrentPopup();
+            }
+
+            ImGui::EndPopup();
+        }
+    } else if (info.status == UpdateStatus::Error) {
+        ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(400.0f, 0.0f), ImGuiCond_Appearing);
+
+        ScopedStyleVar winPad(ImGuiStyleVar_WindowPadding, ImVec2(Metrics::kCardPaddingX, Metrics::kCardPaddingY));
+        ScopedStyleColor modalColors({
+            {ImGuiCol_PopupBg, tokens.surfaces.popupBg.vec4},
+            {ImGuiCol_Border, tokens.text.error.vec4}
+        });
+
+        if (ImGui::BeginPopupModal("Update Status##SettingsModal", &m_showUpdateConfirmModal, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
+            ImGui::TextColored(tokens.text.error.vec4, "UPDATE CHECK FAILED");
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::TextWrapped("%s", info.errorMessage.c_str());
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            if (CenteredButton("Okay", ImVec2(100.0f, Metrics::buttonHeight())) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                m_showUpdateConfirmModal = false;
+                m_updateConfirmed = true;
+                ImGui::CloseCurrentPopup();
+            }
+
+            ImGui::EndPopup();
+        }
+    }
 }
 
 } // namespace praccy::ui
