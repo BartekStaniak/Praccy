@@ -139,6 +139,46 @@ struct TunerMutexTag {
 };
 template struct MemberRobber<TunerMutexTag, &praccy::tools::InstrumentTuner::m_configMutex>;
 
+struct BranchSuspendTag {
+    using type = std::atomic<uint32_t> praccy::audio::ParallelBranch::*;
+};
+template struct MemberRobber<BranchSuspendTag, &praccy::audio::ParallelBranch::m_branchSuspendDepth>;
+
+struct MidiSeqlockFlagTag {
+    using type = std::atomic_flag praccy::midi::MidiManager::*;
+};
+template struct MemberRobber<MidiSeqlockFlagTag, &praccy::midi::MidiManager::m_seqlockWriteFlag>;
+
+struct DestructionTrackerNode final : public praccy::audio::AudioNode {
+    std::string m_nodeName{"DestructionTrackerNode"};
+    std::atomic<int>* destroyedCounter{nullptr};
+    explicit DestructionTrackerNode(std::atomic<int>* d) : destroyedCounter(d) {}
+    ~DestructionTrackerNode() override {
+        if (destroyedCounter) destroyedCounter->fetch_add(1, std::memory_order_relaxed);
+    }
+    void prepare(double, uint32_t) override {}
+    void process(praccy::audio::AudioProcessContext&) override {}
+    void reset() override {}
+    praccy::audio::NodeType type() const noexcept override { return praccy::audio::NodeType::Plugin; }
+    const std::string& name() const noexcept override { return m_nodeName; }
+};
+
+template <typename T>
+bool checkDebugIdCollisionDetector() {
+    if constexpr (requires(T det) {
+        det.recordId("##A");
+        det.collisionCount();
+    }) {
+        T scope;
+        const bool firstOk = scope.recordId("##UniqueWidget_1");
+        const bool secondOk = scope.recordId("##UniqueWidget_2");
+        const bool dupDetected = !scope.recordId("##UniqueWidget_1");
+        return firstOk && secondOk && dupDetected && (scope.collisionCount() == 1u);
+    } else {
+        return false;
+    }
+}
+
 template <typename T>
 bool checkScopedDenormalGuard() {
     if constexpr (requires { typename T::ScopedDenormalGuard; }) {
@@ -367,6 +407,69 @@ bool runSuiteRt() {
         }
     }
 
+    // 7. F-005: ParallelBranch fenced early-exit must not leave stale audio in m_branchBuffer
+    {
+        audio::ParallelSplitMergeBlock block("ParTest");
+        block.prepare(48000.0, 64);
+        auto* br0 = block.addBranch("Branch A");
+        block.addBranch("Branch B");
+
+        float inL[64]{}, inR[64]{}, outL[64]{}, outR[64]{};
+        float* inCh[2] = { inL, inR };
+        float* outCh[2] = { outL, outR };
+        audio::AudioBufferView inView(inCh, 2, 64);
+        audio::AudioBufferView outView(outCh, 2, 64);
+
+        // Prime branch buffers with loud 0.8f signal
+        std::fill_n(inL, 64, 0.8f);
+        std::fill_n(inR, 64, 0.8f);
+        audio::AudioProcessContext ctxPrime{inView, outView, 48000.0, 64};
+        block.process(ctxPrime);
+
+        // Now fence Branch 0 and feed 0.0f silence into the parallel block
+        (br0->*MemberAccess<BranchSuspendTag>::ptr).store(1u, std::memory_order_seq_cst);
+        std::fill_n(inL, 64, 0.0f);
+        std::fill_n(inR, 64, 0.0f);
+        std::fill_n(outL, 64, 0.0f);
+        std::fill_n(outR, 64, 0.0f);
+        audio::AudioProcessContext ctxSilent{inView, outView, 48000.0, 64};
+        block.process(ctxSilent);
+        (br0->*MemberAccess<BranchSuspendTag>::ptr).store(0u, std::memory_order_seq_cst);
+
+        float maxStaleLeak = 0.0f;
+        for (uint32_t i = 0; i < 64; ++i) {
+            maxStaleLeak = std::max(maxStaleLeak, std::abs(outL[i]));
+        }
+        if (maxStaleLeak > 1e-5f) {
+            std::cout << "  [FAIL] F-005: Fenced ParallelBranch leaked stale audio buffer (peak="
+                      << maxStaleLeak << ")!\n";
+            allPassed = false;
+        } else {
+            std::cout << "  [PASS] F-005: Fenced ParallelBranch cleanly passed dry input without stale buffer leak.\n";
+        }
+    }
+
+    // 8. F-008: Contended MIDI Learn must not drop atomic CC table updates
+    {
+        midi::MidiManager mgr;
+        mgr.startLearning(midi::BindingTargetType::SlotBypass, 0);
+        (mgr.*MemberAccess<MidiSeqlockFlagTag>::ptr).test_and_set(std::memory_order_acquire);
+        std::thread releaser([&]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            (mgr.*MemberAccess<MidiSeqlockFlagTag>::ptr).clear(std::memory_order_release);
+        });
+        mgr.handleMidiMessage(0xB0, 55, 127);
+        releaser.join();
+        const auto learnedCc = mgr.getCcBinding(1, 55);
+
+        if (!learnedCc.active) {
+            std::cout << "  [FAIL] F-008: Contended MIDI Learn dropped atomic CC binding (active=0).\n";
+            allPassed = false;
+        } else {
+            std::cout << "  [PASS] F-008: Contended MIDI Learn deterministically updated atomic CC binding.\n";
+        }
+    }
+
     return allPassed;
 }
 
@@ -467,6 +570,32 @@ bool runSuiteMem() {
         running.store(false, std::memory_order_release);
         audioThread.join();
         std::cout << "  [PASS] F-012/F-026: InstrumentTuner prepare() vs pushSamples() completed cleanly.\n";
+    }
+
+    // 4. F-004 / F-018: GraphEngine::drainCommandQueueIntoActive (via reset) must stash removed nodes for reclamation
+    {
+        audio::GraphEngine engine;
+        engine.prepare(48000.0, 64);
+        std::atomic<int> destroyedCount{0};
+        engine.addSerialNode(std::make_unique<audio::PluginSlot>(
+            std::make_unique<DestructionTrackerNode>(&destroyedCount)));
+        engine.reset(); // Drains Add command into m_activeNodes
+        engine.setAudioRunning(true);
+        engine.removeSerialNode(0);
+
+        // Calling reset() invokes drainCommandQueueIntoActive() on Remove; node must be stashed, not destroyed inline
+        engine.reset();
+        const int destroyedDuringDrain = destroyedCount.load(std::memory_order_relaxed);
+        engine.processReclamation();
+        const int destroyedAfterReclaim = destroyedCount.load(std::memory_order_relaxed);
+
+        if (destroyedDuringDrain != 0 || destroyedAfterReclaim != 1) {
+            std::cout << "  [FAIL] F-018: drainCommandQueueIntoActive destroyed node inline (duringDrain="
+                      << destroyedDuringDrain << ", afterReclaim=" << destroyedAfterReclaim << ").\n";
+            allPassed = false;
+        } else {
+            std::cout << "  [PASS] F-018: drainCommandQueueIntoActive deferred node reclamation cleanly.\n";
+        }
     }
 
     return allPassed;
@@ -624,6 +753,36 @@ bool runSuiteHost() {
         }
     }
 
+    // 5. F-001: AsyncPluginLoader bounded main-thread CLAP frame budget (at most 1 main-thread instantiation per update)
+    {
+        auto& loader = plugins::AsyncPluginLoader::instance();
+        loader.cancelAll();
+
+        std::vector<std::unique_ptr<audio::PluginSlot>> slots;
+        for (int i = 0; i < 4; ++i) {
+            slots.push_back(std::make_unique<audio::PluginSlot>(std::make_unique<plugins::OverdriveEffect>()));
+            loader.enqueueLoad(slots.back().get(), "C:/NonExistent/Test_" + std::to_string(i) + ".clap",
+                               plugins::PluginType::CLAP, "ClapTest", "Vendor", {}, 48000.0, 64);
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+        int completionsInFirstFrame = 0;
+        loader.update([&](audio::PluginSlot*, std::unique_ptr<plugins::IPluginInstance>, bool) {
+            completionsInFirstFrame++;
+        });
+        const bool remainingStillQueued = loader.isSlotLoading(slots[3].get());
+        loader.cancelAll();
+
+        if (completionsInFirstFrame > 1 || !remainingStillQueued) {
+            std::cout << "  [FAIL] F-001: AsyncPluginLoader executed " << completionsInFirstFrame
+                      << " main-thread CLAP loads in a single frame (remainingQueued=" << remainingStillQueued << ").\n";
+            allPassed = false;
+        } else {
+            std::cout << "  [PASS] F-001: AsyncPluginLoader throttled main-thread CLAP instantiation to 1 per UI frame.\n";
+        }
+    }
+
     return allPassed;
 }
 
@@ -664,6 +823,17 @@ bool runSuiteUi() {
             allPassed = false;
         } else {
             std::cout << "  [PASS] F-025: LevelMeter DIN IEC 60268-10 PPM ballistics verified.\n";
+        }
+    }
+
+    // 3. F-014: DebugIdCheckScope duplicate ImGui ID collision detector
+    {
+        const bool idDetectorWorks = checkDebugIdCollisionDetector<ui::ColorToken>();
+        if (!idDetectorWorks) {
+            std::cout << "  [FAIL] F-014: DebugIdCheckScope duplicate ImGui ID collision detector missing.\n";
+            allPassed = false;
+        } else {
+            std::cout << "  [PASS] F-014: DebugIdCheckScope detected duplicate ImGui widget IDs.\n";
         }
     }
 
