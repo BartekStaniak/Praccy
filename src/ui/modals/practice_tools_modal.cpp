@@ -87,9 +87,9 @@ void PracticeToolsModal::renderLooperCircularProgressRing() {
     const float progress = std::clamp(m_looper.playheadNormalized(), 0.0f, 1.0f);
     const double loopSec = m_looper.loopLengthSeconds();
 
-    const float widgetSize = 140.0f;
-    const float radius = 54.0f;
-    const float thickness = 6.0f;
+    const float widgetSize = ui::px(140.0f);
+    const float radius = ui::px(54.0f);
+    const float thickness = ui::px(6.0f);
 
     const ImVec2 screenPos = ImGui::GetCursorScreenPos();
     const ImVec2 center(screenPos.x + widgetSize * 0.5f, screenPos.y + widgetSize * 0.5f);

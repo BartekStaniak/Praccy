@@ -68,6 +68,18 @@ private:
     int m_count{0};
 };
 
+class DebugIdCheckScope {
+public:
+    constexpr bool recordId(const char* idStr) noexcept {
+        return m_tracker.recordId(idStr);
+    }
+    [[nodiscard]] constexpr uint32_t collisionCount() const noexcept {
+        return m_tracker.collisionCount();
+    }
+private:
+    ColorToken m_tracker{};
+};
+
 // State tracking for double-click resets to suppress subsequent mouse-drag overrides
 // Uses per-window/context ImGui state storage keyed by ##PraccySuppressResetId
 inline ImGuiID getSuppressResetId() {
@@ -318,10 +330,10 @@ inline bool renderCenteredStarButton(const char* id, const ImVec2& size = ImVec2
 
     if (isFavorite) {
         ImU32 fillCol = held ? static_cast<ImU32>(tokens.text.accent) : (hovered ? static_cast<ImU32>(tokens.borders.cardGlowActive) : static_cast<ImU32>(tokens.text.accent));
-        drawStarGeometry(dl, ImVec2(cx, cy), 6.8f, 2.9f, fillCol, 0, 1.4f);
+        drawStarGeometry(dl, ImVec2(cx, cy), ui::px(6.8f), ui::px(2.9f), fillCol, 0, ui::px(1.4f));
     } else {
         ImU32 strokeCol = held ? static_cast<ImU32>(tokens.borders.focus) : (hovered ? static_cast<ImU32>(tokens.text.primary) : static_cast<ImU32>(tokens.text.muted));
-        drawStarGeometry(dl, ImVec2(cx, cy), 6.8f, 2.9f, 0, strokeCol, 1.4f);
+        drawStarGeometry(dl, ImVec2(cx, cy), ui::px(6.8f), ui::px(2.9f), 0, strokeCol, ui::px(1.4f));
     }
 
     return clicked;
@@ -494,7 +506,7 @@ inline void renderBadgePill(const char* label, ImU32 bgCol, ImU32 borderCol, ImU
     float actualH = (height > 0.0f) ? height : ImGui::GetFrameHeight();
     ImVec2 badgePos = ImGui::GetCursorScreenPos();
     ImVec2 textSz = ImGui::CalcTextSize(label);
-    const float padX = 10.0f;
+    const float padX = ui::px(10.0f);
     float badgeW = textSz.x + padX * 2.0f;
 
     ImDrawList* dl = ImGui::GetWindowDrawList();

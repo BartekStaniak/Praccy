@@ -139,8 +139,9 @@ void SettingsModal::close() {
 void SettingsModal::renderAudioTab() {
     const auto& tokens = themeTokens();
     ImGui::Spacing();
-    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(14.0f, 4.0f));
-    if (ImGui::BeginTable("##AudioSettingsTwoCol", 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersInnerV)) {
+    ScopedStyleVar cellPadGuard(ImGuiStyleVar_CellPadding, ImVec2(ui::px(14.0f), ui::px(4.0f)));
+    const bool tableOpen = ImGui::BeginTable("##AudioSettingsTwoCol", 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersInnerV);
+    if (tableOpen) {
         ImGui::TableSetupColumn("AsioCol", ImGuiTableColumnFlags_WidthStretch, 0.48f);
         ImGui::TableSetupColumn("RiffCol", ImGuiTableColumnFlags_WidthStretch, 0.52f);
         ImGui::TableNextColumn();
@@ -314,7 +315,7 @@ void SettingsModal::renderAudioTab() {
         ImGui::BulletText("Audio Engine State: STOPPED (Driver loaded: %s)", m_asio.isLoaded() ? "Yes" : "No");
     }
 
-    if (ImGui::GetCurrentTable() != nullptr) {
+    if (tableOpen) {
         ImGui::TableNextColumn();
     } else {
         ImGui::Spacing();
@@ -420,10 +421,9 @@ void SettingsModal::renderAudioTab() {
             ImGui::SetTooltip("Reset to default Praccy Documents/Riffs folder");
         }
     }
-    if (ImGui::GetCurrentTable() != nullptr) {
+    if (tableOpen) {
         ImGui::EndTable();
     }
-    ImGui::PopStyleVar(); // CellPadding
 }
 
 void SettingsModal::renderPluginsTab() {

@@ -1561,14 +1561,14 @@ float calculateParallelEnvelopeWidth(size_t numSlots0, size_t numSlots1) {
     // Buttons: Mute(24) + Spacing(4) + Solo(24) + Spacing(4) + Phase(24) + Spacing(8)
     // Sliders: 2 * minComfortableSliderW(72) + sliderGap(6) = 150
     // Right: Safety(16) + Minimise(24) + Spacing(4) + Delete(24) + RightMargin(14) = 82
-    const float badgeW = ImGui::CalcTextSize("BRANCH A").x + 20.0f;
+    const float badgeW = ImGui::CalcTextSize("BRANCH A").x + ui::px(20.0f);
     const float slotTextW = ImGui::CalcTextSize("(99 Slots)").x;
-    const float minSlidersW = (72.0f * 2.0f) + 6.0f;
-    const float headerRequiredW = 12.0f + badgeW + 8.0f + slotTextW + 10.0f
-                                + (24.0f * 3.0f + 8.0f) + 8.0f
-                                + minSlidersW + 16.0f + 52.0f + 14.0f;
+    const float minSlidersW = (ui::px(72.0f) * 2.0f) + ui::px(6.0f);
+    const float headerRequiredW = ui::px(12.0f) + badgeW + ui::px(8.0f) + slotTextW + ui::px(10.0f)
+                                + (ui::px(24.0f) * 3.0f + ui::px(8.0f)) + ui::px(8.0f)
+                                + minSlidersW + ui::px(16.0f) + ui::px(52.0f) + ui::px(14.0f);
 
-    const float minEnvelopeW = std::max(540.0f, headerRequiredW);
+    const float minEnvelopeW = std::max(ui::px(540.0f), headerRequiredW);
     return std::max({ w0, w1, minEnvelopeW });
 }
 } // namespace
@@ -4354,13 +4354,13 @@ void RackView::renderPresetBrowserModal() {
                         ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, highlightCol);
                     }
 
+                    ImGui::PushID(pName.c_str());
                     // Column 0: Row Click Target & Favorite Star
                     ImGui::TableNextColumn();
                     const ImVec2 cellStart = ImGui::GetCursorPos();
 
                     const float selectH = std::max(0.0f, rowH - ImGui::GetStyle().ItemSpacing.y);
-                    std::string selectId = "##SelectPresetRow_" + std::to_string(displayedCount);
-                    if (ImGui::Selectable(selectId.c_str(), false, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap, ImVec2(0.0f, selectH))) {
+                    if (ImGui::Selectable("##SelectPresetRow", false, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap, ImVec2(0.0f, selectH))) {
                         loadPresetChain(pName);
                     }
                     if (ImGui::IsItemHovered()) {
@@ -4371,15 +4371,14 @@ void RackView::renderPresetBrowserModal() {
                         ImVec2 rMin = ImGui::GetItemRectMin();
                         ImVec2 rMax = ImGui::GetItemRectMax();
                         ImDrawList* dl = ImGui::GetWindowDrawList();
-                        dl->AddRectFilled(rMin, ImVec2(rMin.x + 3.5f, rMax.y), tokens.borders.focus.u32, 1.5f);
+                        dl->AddRectFilled(rMin, ImVec2(rMin.x + ui::px(3.5f), rMax.y), tokens.borders.focus.u32, 1.5f);
                     }
 
                     // Reset cursor back to start of cell so star is on the SAME row as the text and category
                     ImGui::SetCursorPos(cellStart);
-                    Spec::alignTableCellCenter(20.0f, rowH);
-                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 6.0f);
-                    std::string starId = "##Fav_" + pName;
-                    if (renderCenteredStarButton(starId.c_str(), ImVec2(20.0f, 20.0f), isFav)) {
+                    Spec::alignTableCellCenter(ui::px(20.0f), rowH);
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ui::px(6.0f));
+                    if (renderCenteredStarButton("##Fav", ImVec2(ui::px(20.0f), ui::px(20.0f)), isFav)) {
                         toggleFavoritePreset(pName);
                     }
                     if (ImGui::IsItemHovered()) {
@@ -4420,8 +4419,7 @@ void RackView::renderPresetBrowserModal() {
                         ImGui::SetTooltip("Category: %s\nRight-click to change or create new category", category.c_str());
                     }
 
-                    std::string catPopupId = "##CatPopup_" + pName;
-                    if (ImGui::BeginPopupContextItem(catPopupId.c_str())) {
+                    if (ImGui::BeginPopupContextItem("##CatPopup")) {
                         ImGui::TextColored(tokens.text.accent.vec4, "Set Category for '%s':", pName.c_str());
                         ImGui::Separator();
                         auto availableCats = m_scenes.allPresetCategories();
@@ -4448,6 +4446,7 @@ void RackView::renderPresetBrowserModal() {
                         }
                         ImGui::EndPopup();
                     }
+                    ImGui::PopID();
                 }
                 ImGui::EndTable();
                 ImGui::PopStyleVar();

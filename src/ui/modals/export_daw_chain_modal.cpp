@@ -26,9 +26,11 @@ void ExportDawChainModal::render(state::SceneManager& sceneMgr, audio::GraphEngi
         ImGui::SetNextWindowSizeConstraints(ImVec2(440.0f, 280.0f), ImVec2(vp->Size.x * 0.95f, vp->Size.y * 0.95f));
     }
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.0f, 16.0f));
-    ImGui::PushStyleColor(ImGuiCol_PopupBg, static_cast<ImVec4>(tokens.surfaces.popupBg));
-    ImGui::PushStyleColor(ImGuiCol_Border, static_cast<ImVec4>(tokens.borders.focus));
+    ScopedStyleVar winPadGuard(ImGuiStyleVar_WindowPadding, ImVec2(ui::px(16.0f), ui::px(16.0f)));
+    ScopedStyleColor modalColGuard({
+        {ImGuiCol_PopupBg, tokens.surfaces.popupBg.vec4},
+        {ImGuiCol_Border, tokens.borders.focus.vec4}
+    });
 
     if (ImGui::BeginPopupModal("Export Chain as DAW Preset", &m_isOpen, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
         // 1. Format Selection
@@ -137,8 +139,6 @@ void ExportDawChainModal::render(state::SceneManager& sceneMgr, audio::GraphEngi
         ImGui::EndPopup();
     }
 
-    ImGui::PopStyleColor(2);
-    ImGui::PopStyleVar();
 }
 
 } // namespace praccy::ui

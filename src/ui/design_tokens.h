@@ -75,6 +75,31 @@ struct ColorToken {
 
     constexpr operator ImU32() const noexcept { return u32; }
     constexpr operator ImVec4() const noexcept { return vec4; }
+
+    // Debug ID collision tracking hooks (F-014)
+    uint64_t m_recordedHashes[32]{};
+    uint32_t m_recordedCount{0};
+    uint32_t m_collisions{0};
+
+    constexpr bool recordId(const char* idStr) noexcept {
+        if (!idStr) return true;
+        uint64_t h = 14695981039346656037ULL;
+        for (const char* p = idStr; *p != '\0'; ++p) {
+            h ^= static_cast<uint64_t>(static_cast<unsigned char>(*p));
+            h *= 1099511628211ULL;
+        }
+        for (uint32_t i = 0; i < m_recordedCount; ++i) {
+            if (m_recordedHashes[i] == h) {
+                ++m_collisions;
+                return false;
+            }
+        }
+        if (m_recordedCount < 32) {
+            m_recordedHashes[m_recordedCount++] = h;
+        }
+        return true;
+    }
+    [[nodiscard]] constexpr uint32_t collisionCount() const noexcept { return m_collisions; }
 };
 
 struct SurfaceTokens {
@@ -433,7 +458,7 @@ inline const ThemeTokens& themeTokens() noexcept {
 }
 
 inline ImVec2 ribbonFramePadding() noexcept {
-    return ImVec2(6.0f, 4.0f);
+    return ImVec2(px(6.0f), px(4.0f));
 }
 
 inline void applyTheme(ThemeId id) {

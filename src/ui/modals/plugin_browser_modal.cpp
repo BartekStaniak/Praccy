@@ -682,14 +682,16 @@ void PluginBrowserModal::render() {
     ImGui::SetNextWindowSize(modalSize, ImGuiCond_Always);
     ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
 
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, tokens.surfaces.popupBg.vec4);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, tokens.surfaces.panelBg.vec4);
-    ImGui::PushStyleColor(ImGuiCol_PopupBg, tokens.surfaces.popupBg.vec4);
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, tokens.surfaces.frameBg.vec4);
-    ImGui::PushStyleColor(ImGuiCol_Border, tokens.borders.focus.vec4);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.5f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.0f * dpiScale, 14.0f * dpiScale));
+    ScopedStyleColor paletteColors({
+        {ImGuiCol_WindowBg, tokens.surfaces.popupBg.vec4},
+        {ImGuiCol_ChildBg, tokens.surfaces.panelBg.vec4},
+        {ImGuiCol_PopupBg, tokens.surfaces.popupBg.vec4},
+        {ImGuiCol_FrameBg, tokens.surfaces.frameBg.vec4},
+        {ImGuiCol_Border, tokens.borders.focus.vec4}
+    });
+    ScopedStyleVar winRounding(ImGuiStyleVar_WindowRounding, ui::px(8.0f));
+    ScopedStyleVar winBorder(ImGuiStyleVar_WindowBorderSize, 1.5f);
+    ScopedStyleVar winPadding(ImGuiStyleVar_WindowPadding, ImVec2(14.0f * dpiScale, 14.0f * dpiScale));
 
     const ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar |
                                   ImGuiWindowFlags_NoResize |
@@ -707,8 +709,6 @@ void PluginBrowserModal::render() {
                 close();
                 ImGui::End();
                 m_tabHandledThisFrame = false;
-                ImGui::PopStyleVar(3);
-                ImGui::PopStyleColor(5);
                 return;
             }
         }
@@ -717,8 +717,6 @@ void PluginBrowserModal::render() {
         if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             close();
             ImGui::End();
-            ImGui::PopStyleVar(3);
-            ImGui::PopStyleColor(5);
             return;
         }
 
@@ -831,8 +829,6 @@ void PluginBrowserModal::render() {
         if (enterPressed || ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) {
             instantiateSelectedPlugin();
             ImGui::End();
-            ImGui::PopStyleVar(3);
-            ImGui::PopStyleColor(5);
             return;
         }
 
@@ -893,9 +889,6 @@ void PluginBrowserModal::render() {
     ImGui::End();
 
     m_tabHandledThisFrame = false;
-
-    ImGui::PopStyleVar(3);
-    ImGui::PopStyleColor(5);
 }
 
 } // namespace praccy::ui
