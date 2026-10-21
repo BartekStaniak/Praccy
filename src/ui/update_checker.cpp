@@ -221,6 +221,74 @@ static std::string httpGet(const std::string& url) {
     return response;
 }
 
+std::string resolveCurrentGitCommit() {
+    // 1. Check if running from a working git repository (e.g. dev/build environment)
+    try {
+        wchar_t exePathBuf[MAX_PATH] = {0};
+        if (GetModuleFileNameW(nullptr, exePathBuf, MAX_PATH) > 0) {
+            std::filesystem::path cur = std::filesystem::path(exePathBuf).parent_path();
+            for (int depth = 0; depth < 4; ++depth) {
+                auto gitDir = cur / ".git";
+                std::error_code ec;
+                if (std::filesystem::is_directory(gitDir, ec)) {
+                    auto headFile = gitDir / "HEAD";
+                    if (std::filesystem::is_regular_file(headFile, ec)) {
+                        std::ifstream inHead(headFile);
+                        std::string line;
+                        if (std::getline(inHead, line)) {
+                            while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) {
+                                line.pop_back();
+                            }
+                            if (line.rfind("ref: ", 0) == 0) {
+                                std::string refPath = line.substr(5);
+                                auto refFile = gitDir / refPath;
+                                if (std::filesystem::is_regular_file(refFile, ec)) {
+                                    std::ifstream inRef(refFile);
+                                    std::string commitSha;
+                                    if (std::getline(inRef, commitSha) && commitSha.length() >= 7) {
+                                        return commitSha.substr(0, 7);
+                                    }
+                                } else {
+                                    auto packedFile = gitDir / "packed-refs";
+                                    if (std::filesystem::is_regular_file(packedFile, ec)) {
+                                        std::ifstream inPacked(packedFile);
+                                        std::string pLine;
+                                        while (std::getline(inPacked, pLine)) {
+                                            if (pLine.find(refPath) != std::string::npos) {
+                                                size_t sp = pLine.find(' ');
+                                                if (sp >= 7) {
+                                                    return pLine.substr(0, 7);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else if (line.length() >= 7) {
+                                return line.substr(0, 7);
+                            }
+                        }
+                    }
+                    break;
+                }
+                if (cur.has_parent_path() && cur != cur.parent_path()) {
+                    cur = cur.parent_path();
+                } else {
+                    break;
+                }
+            }
+        }
+    } catch (...) {
+        // Fall back to compiled macro
+    }
+
+    // 2. Fall back to compile-time defined commit
+    std::string compiled = praccy::kGitCommit;
+    if (!compiled.empty() && compiled != "unknown" && compiled != "dev") {
+        return compiled.substr(0, std::min<size_t>(7, compiled.length()));
+    }
+    return {};
+}
+
 void UpdateChecker::checkForUpdates(bool includeBeta) {
     if (m_isBusy.exchange(true)) {
         return; // Already busy checking or downloading
@@ -412,8 +480,8 @@ void UpdateChecker::runCheck(bool includeBeta, std::stop_token st) {
                     result.expectedSha256.clear();
                     result.totalBytes = 0;
 
-                    std::string currentCommit = praccy::kGitCommit;
-                    if (!currentCommit.empty() && currentCommit != "dev" && currentCommit != "unknown" &&
+                    std::string currentCommit = resolveCurrentGitCommit();
+                    if (!currentCommit.empty() &&
                         shortSha == currentCommit.substr(0, std::min<size_t>(7, currentCommit.length()))) {
                         result.status = UpdateStatus::UpToDate;
                     } else {

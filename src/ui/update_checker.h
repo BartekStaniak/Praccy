@@ -16,6 +16,7 @@ bool extractZipArchive(const std::filesystem::path& zipPath,
                        const std::filesystem::path& destDir,
                        std::string& outError);
 bool isVersionNewer(std::string_view remoteVer, std::string_view currentVer);
+std::string resolveCurrentGitCommit();
 
 enum class UpdateStatus {
     Idle,

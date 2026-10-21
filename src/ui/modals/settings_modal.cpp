@@ -714,7 +714,7 @@ void SettingsModal::renderUpdatesTab() {
             ImGui::PopStyleColor(3);
             ImGui::SameLine(0, 12.0f);
         } else {
-            if (CenteredButton("Open in GitHub ->", ImVec2(150.0f, Metrics::buttonHeight()))) {
+            if (CenteredButton("Open in GitHub", ImVec2(150.0f, Metrics::buttonHeight()))) {
 #if defined(_WIN32)
                 ShellExecuteA(nullptr, "open", info.downloadUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 #endif
@@ -977,7 +977,7 @@ void SettingsModal::renderUpdateConfirmModal() {
                 ImGui::PopStyleColor(3);
                 ImGui::SameLine(0, 12.0f);
             } else {
-                if (CenteredButton("Open in GitHub ->", ImVec2(150.0f, Metrics::buttonHeight()))) {
+                if (CenteredButton("Open in GitHub", ImVec2(150.0f, Metrics::buttonHeight()))) {
 #if defined(_WIN32)
                     ShellExecuteA(nullptr, "open", info.downloadUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 #endif

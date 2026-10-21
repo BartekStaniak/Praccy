@@ -2905,15 +2905,15 @@ void testParallelBranchSplitNoDuplicateAndCleanDelete() {
 }
 
 void testVersionAndSettingsUpdatesConfirmation() {
-    std::cout << "[TEST] Version 2.8.1 & SettingsModal Updates Confirmation State... ";
+    std::cout << "[TEST] Version 2.8.2 & SettingsModal Updates Confirmation State... ";
 
     // 1. Verify version definitions
-    assert(std::string(praccy::kVersionString) == "v2.8.1");
-    assert(std::string(praccy::kVersionRaw) == "2.8.1");
-    assert(std::string(praccy::kDawprojectAppVersion) == "2.8.1");
+    assert(std::string(praccy::kVersionString) == "v2.8.2");
+    assert(std::string(praccy::kVersionRaw) == "2.8.2");
+    assert(std::string(praccy::kDawprojectAppVersion) == "2.8.2");
     assert(praccy::kVersionMajor == 2);
     assert(praccy::kVersionMinor == 8);
-    assert(praccy::kVersionPatch == 1);
+    assert(praccy::kVersionPatch == 2);
     assert(praccy::kVersionBuild == 0);
 
     // 2. Verify SettingsModal lifecycle and update confirmation state flags
@@ -2938,23 +2938,31 @@ void testVersionAndSettingsUpdatesConfirmation() {
     std::filesystem::remove(dummyIni, ec);
 
     // 3. Verify semantic version comparison logic (older / equal versions must never report update available)
-    assert(!ui::isVersionNewer("2.8.0", "2.8.1"));
-    assert(!ui::isVersionNewer("v2.8.0", "v2.8.1"));
-    assert(!ui::isVersionNewer("2.8.1", "2.8.1"));
-    assert(!ui::isVersionNewer("v2.8.1", "2.8.1"));
-    assert(!ui::isVersionNewer("2.7.0", "2.8.1"));
-    assert(!ui::isVersionNewer("2.7-beta3", "2.8.1"));
+    assert(!ui::isVersionNewer("2.8.0", "2.8.2"));
+    assert(!ui::isVersionNewer("v2.8.0", "v2.8.2"));
+    assert(!ui::isVersionNewer("2.8.1", "2.8.2"));
+    assert(!ui::isVersionNewer("v2.8.1", "2.8.2"));
+    assert(!ui::isVersionNewer("2.8.2", "2.8.2"));
+    assert(!ui::isVersionNewer("v2.8.2", "2.8.2"));
+    assert(!ui::isVersionNewer("2.7.0", "2.8.2"));
+    assert(!ui::isVersionNewer("2.7-beta3", "2.8.2"));
+    assert(ui::isVersionNewer("2.8.3", "2.8.2"));
+    assert(ui::isVersionNewer("v2.8.3", "2.8.2"));
+    assert(ui::isVersionNewer("2.9.0", "2.8.2"));
+    assert(ui::isVersionNewer("3.0.0", "2.8.2"));
     assert(ui::isVersionNewer("2.8.2", "2.8.1"));
-    assert(ui::isVersionNewer("v2.8.2", "2.8.1"));
-    assert(ui::isVersionNewer("2.9.0", "2.8.1"));
-    assert(ui::isVersionNewer("3.0.0", "2.8.1"));
     assert(ui::isVersionNewer("2.8.1", "2.8.0"));
     assert(ui::isVersionNewer("2.8.0", "2.8.0-beta3"));
     assert(!ui::isVersionNewer("2.8.0-beta3", "2.8.0"));
     assert(ui::isVersionNewer("2.8.0-beta4", "2.8.0-beta3"));
     assert(!ui::isVersionNewer("2.8.0-beta2", "2.8.0-beta3"));
 
-    std::cout << "PASSED\n";
+    // 4. Verify runtime git commit resolution matches repository HEAD
+    std::string detectedCommit = ui::resolveCurrentGitCommit();
+    assert(!detectedCommit.empty());
+    assert(detectedCommit.length() >= 7);
+
+    std::cout << "PASSED (resolved git commit: " << detectedCommit << ")\n";
 }
 
 int main() {

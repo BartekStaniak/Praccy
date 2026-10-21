@@ -4096,7 +4096,7 @@ void RackView::renderUpdateModal() {
                 ImGui::PopStyleColor(3);
                 ImGui::SameLine(0, 10);
             }
-            if (CenteredButton("Open in GitHub ->", ImVec2(150, 30))) {
+            if (CenteredButton("Open in GitHub", ImVec2(150, 30))) {
                 ShellExecuteA(nullptr, "open", info.downloadUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             }
             if (info.assetUrl.empty()) {
