@@ -28,6 +28,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+execute_process(
+    COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    OUTPUT_VARIABLE PRACCY_GIT_COMMIT_HASH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT PRACCY_GIT_COMMIT_HASH)
+    set(PRACCY_GIT_COMMIT_HASH "b3141e8")
+endif()
+add_compile_definitions(PRACCY_GIT_COMMIT="${PRACCY_GIT_COMMIT_HASH}")
+
 find_package(Threads REQUIRED)
 
 # Ensure <pluginterfaces/...> resolves cleanly from third_party/vst3_pluginterfaces

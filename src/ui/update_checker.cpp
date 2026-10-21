@@ -35,6 +35,73 @@ bool extractZipArchive(const std::filesystem::path& zipPath,
     return praccy::utils::extractZipArchive(zipPath, destDir, outError, guards);
 }
 
+struct ParsedVersion {
+    int major{0};
+    int minor{0};
+    int patch{0};
+    int build{0};
+    bool isPrerelease{false};
+    int prereleaseNum{0};
+};
+
+static ParsedVersion parseVersion(std::string_view s) {
+    ParsedVersion v;
+    while (!s.empty() && (s.front() == 'v' || s.front() == 'V' || s.front() == ' ')) {
+        s.remove_prefix(1);
+    }
+
+    size_t i = 0;
+    auto readInt = [&]() -> int {
+        int val = 0;
+        bool hasDigits = false;
+        while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) {
+            val = val * 10 + (s[i] - '0');
+            hasDigits = true;
+            ++i;
+        }
+        return hasDigits ? val : 0;
+    };
+
+    v.major = readInt();
+    if (i < s.size() && s[i] == '.') { ++i; v.minor = readInt(); }
+    if (i < s.size() && s[i] == '.') { ++i; v.patch = readInt(); }
+    if (i < s.size() && s[i] == '.') { ++i; v.build = readInt(); }
+
+    if (i < s.size() && (s[i] == '-' || s[i] == '+' || s[i] == 'b' || s[i] == 'a' || s[i] == 'r')) {
+        v.isPrerelease = true;
+        while (i < s.size()) {
+            if (std::isdigit(static_cast<unsigned char>(s[i]))) {
+                v.prereleaseNum = readInt();
+                break;
+            }
+            ++i;
+        }
+    }
+    return v;
+}
+
+bool isVersionNewer(std::string_view remoteVer, std::string_view currentVer) {
+    if (remoteVer.empty()) return false;
+    if (currentVer.empty()) return true;
+
+    ParsedVersion r = parseVersion(remoteVer);
+    ParsedVersion c = parseVersion(currentVer);
+
+    if (r.major != c.major) return r.major > c.major;
+    if (r.minor != c.minor) return r.minor > c.minor;
+    if (r.patch != c.patch) return r.patch > c.patch;
+    if (r.build != c.build) return r.build > c.build;
+
+    if (!r.isPrerelease && c.isPrerelease) return true;
+    if (r.isPrerelease && !c.isPrerelease) return false;
+
+    if (r.isPrerelease && c.isPrerelease) {
+        return r.prereleaseNum > c.prereleaseNum;
+    }
+
+    return false;
+}
+
 UpdateChecker& UpdateChecker::instance() {
     static UpdateChecker s_instance;
     return s_instance;
@@ -210,51 +277,81 @@ void UpdateChecker::runCheck(bool includeBeta, std::stop_token st) {
         }
     };
 
-    std::string apiUrl = includeBeta ?
-        "https://api.github.com/repos/BartekStaniak/Praccy/releases" :
-        "https://api.github.com/repos/BartekStaniak/Praccy/releases/latest";
+    if (includeBeta) {
+        // Query latest commit on 'dev' branch
+        std::string json = httpGet("https://api.github.com/repos/BartekStaniak/Praccy/commits/dev");
+        if (st.stop_requested()) {
+            return;
+        }
+        if (json.empty()) {
+            result.status = UpdateStatus::Error;
+            result.errorMessage = "Unable to connect to GitHub. Check your network connection.";
+        } else {
+            std::string sha = extractJsonField(json, "sha");
+            std::string message = extractJsonField(json, "message");
+            std::string date = extractJsonField(json, "date");
 
-    std::string json = httpGet(apiUrl);
-    if (st.stop_requested()) {
-        return;
-    }
-    if (json.empty()) {
-        result.status = UpdateStatus::Error;
-        result.errorMessage = "Unable to connect to GitHub. Check your network connection.";
-    } else {
-        size_t entryStart = 0;
-        if (includeBeta) {
-            size_t firstObj = json.find('{');
-            if (firstObj != std::string::npos) {
-                entryStart = firstObj;
+            if (sha.empty()) {
+                result.status = UpdateStatus::Error;
+                result.errorMessage = "Could not parse GitHub API dev response.";
+            } else {
+                std::string shortSha = sha.substr(0, std::min<size_t>(7, sha.length()));
+                result.latestVersion = "dev (" + shortSha + ")";
+                auto newline = message.find('\n');
+                result.releaseTitle = (newline != std::string::npos) ? message.substr(0, newline) : message;
+                result.publishedDate = date;
+                result.downloadUrl = "https://github.com/BartekStaniak/Praccy/commit/" + sha;
+
+                // Check if any release asset is available (e.g. from matching pre-release or latest release package)
+                if (!st.stop_requested()) {
+                    std::string allReleases = httpGet("https://api.github.com/repos/BartekStaniak/Praccy/releases");
+                    if (!allReleases.empty()) {
+                        parseReleaseAsset(allReleases, result);
+                    }
+                }
+
+                std::string currentCommit = praccy::kGitCommit;
+                if (!currentCommit.empty() && currentCommit != "dev" && currentCommit != "unknown" &&
+                    shortSha == currentCommit.substr(0, std::min<size_t>(7, currentCommit.length()))) {
+                    result.status = UpdateStatus::UpToDate;
+                } else {
+                    result.status = UpdateStatus::UpdateAvailable;
+                }
             }
         }
-
-        std::string tag = extractJsonField(json, "tag_name", entryStart);
-        std::string name = extractJsonField(json, "name", entryStart);
-        std::string htmlUrl = extractJsonField(json, "html_url", entryStart);
-        std::string publishedAt = extractJsonField(json, "published_at", entryStart);
-        std::string body = extractJsonField(json, "body", entryStart);
-
-        if (tag.empty()) {
+    } else {
+        // Query latest official release on main
+        std::string json = httpGet("https://api.github.com/repos/BartekStaniak/Praccy/releases/latest");
+        if (st.stop_requested()) {
+            return;
+        }
+        if (json.empty()) {
             result.status = UpdateStatus::Error;
-            result.errorMessage = "Could not parse GitHub release information.";
+            result.errorMessage = "Unable to connect to GitHub. Check your network connection.";
         } else {
-            result.latestVersion = tag;
-            result.releaseTitle = name.empty() ? tag : name;
-            result.downloadUrl = htmlUrl.empty() ? "https://github.com/BartekStaniak/Praccy/releases" : htmlUrl;
-            result.publishedDate = publishedAt;
-            result.releaseNotes = body;
+            std::string tag = extractJsonField(json, "tag_name");
+            std::string name = extractJsonField(json, "name");
+            std::string htmlUrl = extractJsonField(json, "html_url");
+            std::string publishedAt = extractJsonField(json, "published_at");
+            std::string body = extractJsonField(json, "body");
 
-            parseReleaseAsset(json, result, entryStart);
-
-            std::string cleanTag = (!tag.empty() && (tag[0] == 'v' || tag[0] == 'V')) ? tag.substr(1) : tag;
-            std::string cleanCurrent = (!result.currentVersion.empty() && (result.currentVersion[0] == 'v' || result.currentVersion[0] == 'V')) ? result.currentVersion.substr(1) : result.currentVersion;
-
-            if (cleanTag != cleanCurrent) {
-                result.status = UpdateStatus::UpdateAvailable;
+            if (tag.empty()) {
+                result.status = UpdateStatus::Error;
+                result.errorMessage = "Could not parse GitHub release information.";
             } else {
-                result.status = UpdateStatus::UpToDate;
+                result.latestVersion = tag;
+                result.releaseTitle = name.empty() ? tag : name;
+                result.downloadUrl = htmlUrl.empty() ? "https://github.com/BartekStaniak/Praccy/releases" : htmlUrl;
+                result.publishedDate = publishedAt;
+                result.releaseNotes = body;
+
+                parseReleaseAsset(json, result);
+
+                if (isVersionNewer(tag, result.currentVersion)) {
+                    result.status = UpdateStatus::UpdateAvailable;
+                } else {
+                    result.status = UpdateStatus::UpToDate;
+                }
             }
         }
     }

@@ -690,8 +690,7 @@ void SettingsModal::renderUpdatesTab() {
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Metrics::kCardPaddingX, Metrics::kCardPaddingY));
 
-        const float cardH = (!info.releaseTitle.empty() && info.releaseTitle != info.latestVersion) ? 140.0f : 120.0f;
-        ImGui::BeginChild("##NewVersionConfirmationCard", ImVec2(0.0f, cardH), true);
+        ImGui::BeginChild("##NewVersionConfirmationCard", ImVec2(0.0f, 0.0f), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         ImGui::TextColored(tokens.text.accent.vec4, "NEW VERSION AVAILABLE: %s", info.latestVersion.c_str());
         if (!info.releaseTitle.empty() && info.releaseTitle != info.latestVersion) {
             ImGui::TextColored(tokens.text.primary.vec4, "%s", info.releaseTitle.c_str());
@@ -703,17 +702,26 @@ void SettingsModal::renderUpdatesTab() {
         ImGui::TextWrapped("A new version of Praccy is available. Would you like to download it now?");
         ImGui::Spacing();
 
-        ImGui::PushStyleColor(ImGuiCol_Button, tokens.signal.active.withAlpha(0.45f).vec4);
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, tokens.signal.active.withAlpha(0.65f).vec4);
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, tokens.signal.active.withAlpha(0.85f).vec4);
-        if (CenteredButton("Download", ImVec2(120.0f, Metrics::buttonHeight()))) {
-            UpdateChecker::instance().startDownload();
-            m_showUpdateConfirmModal = false;
-            m_updateConfirmed = true;
+        if (!info.assetUrl.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Button, tokens.signal.active.withAlpha(0.45f).vec4);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, tokens.signal.active.withAlpha(0.65f).vec4);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, tokens.signal.active.withAlpha(0.85f).vec4);
+            if (CenteredButton("Download", ImVec2(120.0f, Metrics::buttonHeight()))) {
+                UpdateChecker::instance().startDownload();
+                m_showUpdateConfirmModal = false;
+                m_updateConfirmed = true;
+            }
+            ImGui::PopStyleColor(3);
+            ImGui::SameLine(0, 12.0f);
+        } else {
+            if (CenteredButton("Open in GitHub ->", ImVec2(150.0f, Metrics::buttonHeight()))) {
+#if defined(_WIN32)
+                ShellExecuteA(nullptr, "open", info.downloadUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#endif
+            }
+            ImGui::SameLine(0, 12.0f);
         }
-        ImGui::PopStyleColor(3);
 
-        ImGui::SameLine(0, 12.0f);
         if (CenteredButton("Cancel", ImVec2(100.0f, Metrics::buttonHeight()))) {
             m_showUpdateConfirmModal = false;
             m_updateConfirmed = true;
@@ -730,10 +738,14 @@ void SettingsModal::renderUpdatesTab() {
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Metrics::kCardPaddingX, Metrics::kCardPaddingY));
 
-        ImGui::BeginChild("##UpToDateConfirmationCard", ImVec2(0.0f, 100.0f), true);
+        ImGui::BeginChild("##UpToDateConfirmationCard", ImVec2(0.0f, 0.0f), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         ImGui::TextColored(tokens.text.success.vec4, "PRACCY IS UP TO DATE");
         ImGui::Spacing();
-        ImGui::TextWrapped("You are already using the newest version of Praccy (%s).", praccy::kVersionString);
+        if (info.isBeta) {
+            ImGui::TextWrapped("You are running the latest development build from 'dev' branch (%s).", info.latestVersion.c_str());
+        } else {
+            ImGui::TextWrapped("You are already using the newest version of Praccy (%s).", praccy::kVersionString);
+        }
         ImGui::Spacing();
 
         if (CenteredButton("Okay", ImVec2(100.0f, Metrics::buttonHeight()))) {
@@ -952,18 +964,27 @@ void SettingsModal::renderUpdateConfirmModal() {
             ImGui::Separator();
             ImGui::Spacing();
 
-            ImGui::PushStyleColor(ImGuiCol_Button, tokens.signal.active.withAlpha(0.45f).vec4);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, tokens.signal.active.withAlpha(0.65f).vec4);
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, tokens.signal.active.withAlpha(0.85f).vec4);
-            if (CenteredButton("Download", ImVec2(120.0f, Metrics::buttonHeight()))) {
-                UpdateChecker::instance().startDownload();
-                m_showUpdateConfirmModal = false;
-                m_updateConfirmed = true;
-                ImGui::CloseCurrentPopup();
+            if (!info.assetUrl.empty()) {
+                ImGui::PushStyleColor(ImGuiCol_Button, tokens.signal.active.withAlpha(0.45f).vec4);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, tokens.signal.active.withAlpha(0.65f).vec4);
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, tokens.signal.active.withAlpha(0.85f).vec4);
+                if (CenteredButton("Download", ImVec2(120.0f, Metrics::buttonHeight()))) {
+                    UpdateChecker::instance().startDownload();
+                    m_showUpdateConfirmModal = false;
+                    m_updateConfirmed = true;
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::PopStyleColor(3);
+                ImGui::SameLine(0, 12.0f);
+            } else {
+                if (CenteredButton("Open in GitHub ->", ImVec2(150.0f, Metrics::buttonHeight()))) {
+#if defined(_WIN32)
+                    ShellExecuteA(nullptr, "open", info.downloadUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#endif
+                }
+                ImGui::SameLine(0, 12.0f);
             }
-            ImGui::PopStyleColor(3);
 
-            ImGui::SameLine(0, 12.0f);
             if (CenteredButton("Cancel", ImVec2(100.0f, Metrics::buttonHeight())) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
                 m_showUpdateConfirmModal = false;
                 m_updateConfirmed = true;
@@ -987,7 +1008,11 @@ void SettingsModal::renderUpdateConfirmModal() {
             ImGui::Separator();
             ImGui::Spacing();
 
-            ImGui::TextWrapped("You are currently running the latest version of Praccy (%s).", praccy::kVersionString);
+            if (info.isBeta) {
+                ImGui::TextWrapped("You are running the latest development build from 'dev' branch (%s).", info.latestVersion.c_str());
+            } else {
+                ImGui::TextWrapped("You are currently running the latest version of Praccy (%s).", praccy::kVersionString);
+            }
             ImGui::Spacing();
             ImGui::TextDisabled("Channel: %s", info.isBeta ? "Beta (dev branch)" : "Stable (Releases)");
             ImGui::Spacing();
