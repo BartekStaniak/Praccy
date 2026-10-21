@@ -125,22 +125,23 @@ UpdateInfo UpdateChecker::getInfo() const {
     return m_info;
 }
 
-static std::string extractJsonField(const std::string& json, const std::string& fieldName, size_t startOffset = 0) {
+static std::string extractJsonField(const std::string& json, const std::string& fieldName, size_t startOffset = 0, size_t endOffset = std::string::npos) {
     std::string key = "\"" + fieldName + "\":";
     size_t pos = json.find(key, startOffset);
-    if (pos == std::string::npos) return {};
+    if (pos == std::string::npos || (endOffset != std::string::npos && pos >= endOffset)) return {};
 
     pos += key.length();
-    while (pos < json.length() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\r' || json[pos] == '\n')) {
+    while (pos < json.length() && (endOffset == std::string::npos || pos < endOffset) &&
+           (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\r' || json[pos] == '\n')) {
         pos++;
     }
 
-    if (pos >= json.length()) return {};
+    if (pos >= json.length() || (endOffset != std::string::npos && pos >= endOffset)) return {};
 
     if (json[pos] == '\"') {
         pos++;
         size_t end = pos;
-        while (end < json.length()) {
+        while (end < json.length() && (endOffset == std::string::npos || end < endOffset)) {
             if (json[end] == '\"') {
                 size_t backslashes = 0;
                 size_t k = end;
@@ -170,7 +171,8 @@ static std::string extractJsonField(const std::string& json, const std::string& 
     } else {
         // Non-string (number / boolean)
         size_t end = pos;
-        while (end < json.length() && json[end] != ',' && json[end] != '}' && json[end] != ']') {
+        while (end < json.length() && (endOffset == std::string::npos || end < endOffset) &&
+               json[end] != ',' && json[end] != '}' && json[end] != ']') {
             end++;
         }
         return json.substr(pos, end - pos);
@@ -253,69 +255,170 @@ void UpdateChecker::runCheck(bool includeBeta, std::stop_token st) {
     result.currentVersion = praccy::kVersionString;
     result.isBeta = includeBeta;
 
-    // Helper lambda to parse release asset from a release JSON snippet
-    auto parseReleaseAsset = [&](const std::string& relJson, UpdateInfo& target, size_t startOffset = 0) {
+    // Helper lambda to parse release asset strictly within a specific release JSON snippet
+    auto parseReleaseAsset = [&](const std::string& relJson, UpdateInfo& target, size_t startOffset = 0, size_t endOffset = std::string::npos) {
+        if (endOffset == std::string::npos) {
+            endOffset = relJson.size();
+        }
         size_t assetPos = relJson.find("\"assets\":", startOffset);
-        if (assetPos != std::string::npos) {
-            size_t zipPos = relJson.find(".zip\"", assetPos);
-            if (zipPos != std::string::npos) {
-                // Find beginning of asset object around zip
-                size_t objStart = relJson.rfind('{', zipPos);
-                if (objStart != std::string::npos && objStart >= assetPos) {
-                    target.assetName = extractJsonField(relJson, "name", objStart);
-                    target.assetUrl = extractJsonField(relJson, "browser_download_url", objStart);
-                    std::string digest = extractJsonField(relJson, "digest", objStart);
-                    if (digest.rfind("sha256:", 0) == 0) {
-                        target.expectedSha256 = digest.substr(7);
-                    }
-                    std::string szStr = extractJsonField(relJson, "size", objStart);
-                    if (!szStr.empty()) {
-                        target.totalBytes = std::atoll(szStr.c_str());
+        if (assetPos == std::string::npos || assetPos >= endOffset) {
+            return;
+        }
+
+        size_t arrOpen = relJson.find('[', assetPos);
+        if (arrOpen == std::string::npos || arrOpen >= endOffset) {
+            return;
+        }
+
+        size_t arrClose = relJson.find(']', arrOpen);
+        if (arrClose == std::string::npos || arrClose > endOffset) {
+            arrClose = endOffset;
+        }
+
+        size_t cur = arrOpen;
+        std::string bestName;
+        std::string bestUrl;
+        std::string bestDigest;
+        int64_t bestSize = 0;
+        bool foundZip = false;
+
+        while (cur < arrClose) {
+            size_t oStart = relJson.find('{', cur);
+            if (oStart == std::string::npos || oStart >= arrClose) break;
+
+            // Find matching '}' for this asset object
+            size_t brace = 0;
+            size_t oEnd = std::string::npos;
+            for (size_t i = oStart; i < arrClose; ++i) {
+                if (relJson[i] == '{') brace++;
+                else if (relJson[i] == '}') {
+                    brace--;
+                    if (brace == 0) {
+                        oEnd = i;
+                        break;
                     }
                 }
             }
+            if (oEnd == std::string::npos) break;
+
+            std::string aName = extractJsonField(relJson, "name", oStart, oEnd);
+            std::string aUrl = extractJsonField(relJson, "browser_download_url", oStart, oEnd);
+            std::string aDigest = extractJsonField(relJson, "digest", oStart, oEnd);
+            std::string aSizeStr = extractJsonField(relJson, "size", oStart, oEnd);
+            int64_t aSize = aSizeStr.empty() ? 0 : std::atoll(aSizeStr.c_str());
+
+            bool isZip = (aName.size() >= 4 && _stricmp(aName.c_str() + aName.size() - 4, ".zip") == 0);
+            bool isExe = (aName.size() >= 4 && _stricmp(aName.c_str() + aName.size() - 4, ".exe") == 0);
+
+            if (isZip) {
+                bestName = aName;
+                bestUrl = aUrl;
+                bestDigest = aDigest;
+                bestSize = aSize;
+                foundZip = true;
+                break; // .zip is preferred; stop searching
+            } else if (isExe && !foundZip) {
+                bestName = aName;
+                bestUrl = aUrl;
+                bestDigest = aDigest;
+                bestSize = aSize;
+            }
+
+            cur = oEnd + 1;
+        }
+
+        if (!bestUrl.empty()) {
+            target.assetName = bestName;
+            target.assetUrl = bestUrl;
+            if (bestDigest.rfind("sha256:", 0) == 0) {
+                target.expectedSha256 = bestDigest.substr(7);
+            } else {
+                target.expectedSha256 = bestDigest;
+            }
+            target.totalBytes = bestSize;
         }
     };
 
     if (includeBeta) {
-        // Query latest commit on 'dev' branch
-        std::string json = httpGet("https://api.github.com/repos/BartekStaniak/Praccy/commits/dev");
-        if (st.stop_requested()) {
-            return;
-        }
-        if (json.empty()) {
-            result.status = UpdateStatus::Error;
-            result.errorMessage = "Unable to connect to GitHub. Check your network connection.";
-        } else {
-            std::string sha = extractJsonField(json, "sha");
-            std::string message = extractJsonField(json, "message");
-            std::string date = extractJsonField(json, "date");
+        // 1. First check GitHub releases for any newer release (including pre-releases)
+        std::string allReleases = httpGet("https://api.github.com/repos/BartekStaniak/Praccy/releases");
+        if (st.stop_requested()) return;
 
-            if (sha.empty()) {
-                result.status = UpdateStatus::Error;
-                result.errorMessage = "Could not parse GitHub API dev response.";
-            } else {
-                std::string shortSha = sha.substr(0, std::min<size_t>(7, sha.length()));
-                result.latestVersion = "dev (" + shortSha + ")";
-                auto newline = message.find('\n');
-                result.releaseTitle = (newline != std::string::npos) ? message.substr(0, newline) : message;
-                result.publishedDate = date;
-                result.downloadUrl = "https://github.com/BartekStaniak/Praccy/commit/" + sha;
-
-                // Check if any release asset is available (e.g. from matching pre-release or latest release package)
-                if (!st.stop_requested()) {
-                    std::string allReleases = httpGet("https://api.github.com/repos/BartekStaniak/Praccy/releases");
-                    if (!allReleases.empty()) {
-                        parseReleaseAsset(allReleases, result);
+        bool foundNewerRelease = false;
+        if (!allReleases.empty()) {
+            size_t firstObj = allReleases.find('{');
+            if (firstObj != std::string::npos) {
+                size_t brace = 0;
+                size_t firstObjEnd = std::string::npos;
+                for (size_t i = firstObj; i < allReleases.size(); ++i) {
+                    if (allReleases[i] == '{') brace++;
+                    else if (allReleases[i] == '}') {
+                        brace--;
+                        if (brace == 0) {
+                            firstObjEnd = i;
+                            break;
+                        }
                     }
                 }
 
-                std::string currentCommit = praccy::kGitCommit;
-                if (!currentCommit.empty() && currentCommit != "dev" && currentCommit != "unknown" &&
-                    shortSha == currentCommit.substr(0, std::min<size_t>(7, currentCommit.length()))) {
-                    result.status = UpdateStatus::UpToDate;
+                if (firstObjEnd != std::string::npos) {
+                    std::string tag = extractJsonField(allReleases, "tag_name", firstObj, firstObjEnd);
+                    std::string name = extractJsonField(allReleases, "name", firstObj, firstObjEnd);
+                    std::string htmlUrl = extractJsonField(allReleases, "html_url", firstObj, firstObjEnd);
+                    std::string publishedAt = extractJsonField(allReleases, "published_at", firstObj, firstObjEnd);
+                    std::string body = extractJsonField(allReleases, "body", firstObj, firstObjEnd);
+
+                    if (!tag.empty() && isVersionNewer(tag, result.currentVersion)) {
+                        foundNewerRelease = true;
+                        result.latestVersion = tag;
+                        result.releaseTitle = name.empty() ? tag : name;
+                        result.downloadUrl = htmlUrl.empty() ? "https://github.com/BartekStaniak/Praccy/releases" : htmlUrl;
+                        result.publishedDate = publishedAt;
+                        result.releaseNotes = body;
+                        parseReleaseAsset(allReleases, result, firstObj, firstObjEnd);
+                        result.status = UpdateStatus::UpdateAvailable;
+                    }
+                }
+            }
+        }
+
+        if (!foundNewerRelease) {
+            // 2. No newer release found; query latest commit on 'dev' branch
+            std::string json = httpGet("https://api.github.com/repos/BartekStaniak/Praccy/commits/dev");
+            if (st.stop_requested()) return;
+
+            if (json.empty()) {
+                result.status = UpdateStatus::Error;
+                result.errorMessage = "Unable to connect to GitHub. Check your network connection.";
+            } else {
+                std::string sha = extractJsonField(json, "sha");
+                std::string message = extractJsonField(json, "message");
+                std::string date = extractJsonField(json, "date");
+
+                if (sha.empty()) {
+                    result.status = UpdateStatus::Error;
+                    result.errorMessage = "Could not parse GitHub API dev response.";
                 } else {
-                    result.status = UpdateStatus::UpdateAvailable;
+                    std::string shortSha = sha.substr(0, std::min<size_t>(7, sha.length()));
+                    result.latestVersion = "dev (" + shortSha + ")";
+                    auto newline = message.find('\n');
+                    result.releaseTitle = (newline != std::string::npos) ? message.substr(0, newline) : message;
+                    result.publishedDate = date;
+                    result.downloadUrl = "https://github.com/BartekStaniak/Praccy/commit/" + sha;
+
+                    // Git commits do NOT have prebuilt binary assets
+                    result.assetUrl.clear();
+                    result.assetName.clear();
+                    result.expectedSha256.clear();
+                    result.totalBytes = 0;
+
+                    std::string currentCommit = praccy::kGitCommit;
+                    if (!currentCommit.empty() && currentCommit != "dev" && currentCommit != "unknown" &&
+                        shortSha == currentCommit.substr(0, std::min<size_t>(7, currentCommit.length()))) {
+                        result.status = UpdateStatus::UpToDate;
+                    } else {
+                        result.status = UpdateStatus::UpdateAvailable;
+                    }
                 }
             }
         }
@@ -345,12 +448,16 @@ void UpdateChecker::runCheck(bool includeBeta, std::stop_token st) {
                 result.publishedDate = publishedAt;
                 result.releaseNotes = body;
 
-                parseReleaseAsset(json, result);
+                parseReleaseAsset(json, result, 0, json.size());
 
                 if (isVersionNewer(tag, result.currentVersion)) {
                     result.status = UpdateStatus::UpdateAvailable;
                 } else {
                     result.status = UpdateStatus::UpToDate;
+                    result.assetUrl.clear();
+                    result.assetName.clear();
+                    result.expectedSha256.clear();
+                    result.totalBytes = 0;
                 }
             }
         }
@@ -601,21 +708,16 @@ void UpdateChecker::runDownload(std::stop_token st) {
         for (int i = 0; i < 8; ++i) {
             std::snprintf(hexDigest + i * 8, 9, "%08x", H[i]);
         }
-        if (expectedSha256.empty()) {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            m_info.status = UpdateStatus::Error;
-            m_info.errorMessage = "Missing SHA-256 digest for release asset.";
-            std::filesystem::remove(zipPath, ec);
-            return;
-        }
-        std::string expLower = expectedSha256;
-        for (char& ch : expLower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-        if (expLower != hexDigest) {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            m_info.status = UpdateStatus::Error;
-            m_info.errorMessage = "SHA-256 verification failed for downloaded update package.";
-            std::filesystem::remove(zipPath, ec);
-            return;
+        if (!expectedSha256.empty()) {
+            std::string expLower = expectedSha256;
+            for (char& ch : expLower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            if (expLower != hexDigest) {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_info.status = UpdateStatus::Error;
+                m_info.errorMessage = "SHA-256 verification failed for downloaded update package.";
+                std::filesystem::remove(zipPath, ec);
+                return;
+            }
         }
     }
 
@@ -624,18 +726,32 @@ void UpdateChecker::runDownload(std::stop_token st) {
         return;
     }
 
-    // Extract archive
+    // Extract archive or stage executable
     auto extractDir = updatesDir / "extracted";
     std::filesystem::remove_all(extractDir, ec);
     std::filesystem::create_directories(extractDir, ec);
 
-    // In-process archive extraction replacing external shells
-    std::string extractError;
-    if (!extractZipArchive(zipPath, extractDir, extractError)) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_info.status = UpdateStatus::Error;
-        m_info.errorMessage = "Failed to extract update package: " + extractError;
-        return;
+    bool isExe = (assetName.size() >= 4 &&
+                  _stricmp(assetName.c_str() + assetName.size() - 4, ".exe") == 0);
+    if (isExe) {
+        // Direct executable asset: copy directly to extracted/Praccy.exe
+        std::filesystem::copy_file(zipPath, extractDir / "Praccy.exe",
+                                   std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec) {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_info.status = UpdateStatus::Error;
+            m_info.errorMessage = "Failed to stage update executable: " + ec.message();
+            return;
+        }
+    } else {
+        // In-process archive extraction replacing external shells
+        std::string extractError;
+        if (!extractZipArchive(zipPath, extractDir, extractError)) {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_info.status = UpdateStatus::Error;
+            m_info.errorMessage = "Failed to extract update package: " + extractError;
+            return;
+        }
     }
 
     // Locate the extracted Praccy.exe
